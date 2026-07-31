@@ -130,7 +130,6 @@ pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("generate_silver_ticket", "T1558.002"),
         ("add_computer", "T1136.002"),
         ("addspn", "T1098.001"),
-        ("krbrelayup", "T1134.001"),
         ("create_inter_realm_ticket", "T1558.001"),
         ("forge_inter_realm_and_dump", "T1134.005"),
         ("get_sid", "T1087.002"),
@@ -263,7 +262,6 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("unconstrained_coerce_and_capture", "DelegationTools"),
         ("addspn", "DelegationTools"),
         // ── PrivilegeEscalationTools ────────────────────────────────────
-        ("krbrelayup", "PrivilegeEscalationTools"),
         ("dnstool", "PrivilegeEscalationTools"),
         ("add_computer", "PrivilegeEscalationTools"),
         // ── CVEExploitTools ─────────────────────────────────────────────

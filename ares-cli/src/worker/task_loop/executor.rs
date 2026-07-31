@@ -291,7 +291,6 @@ fn expand_exploit_task(params: &serde_json::Value) -> Vec<(String, serde_json::V
         "nopac" | "samaccountname" => "nopac",
         "printnightmare" => "printnightmare",
         "zerologon" => "zerologon_check",
-        "krbrelayup" => "krbrelayup",
         "mssql_access" => "mssql_enum_impersonation",
         _ => {
             warn!(vuln_type, "No tool mapping for exploit vuln_type");

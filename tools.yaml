@@ -96,8 +96,8 @@ roles:
         binaries: [printerbug, addspn, dnstool]
         fn_names: [unconstrained_tgt_dump, unconstrained_coerce_and_capture, addspn, dnstool]
       - category: Delegation and kerberos
-        binaries: [KrbRelayUp, pygpoabuse, raiseChild.py]
-        fn_names: [find_delegation, s4u_attack, krbrelayup, raise_child]
+        binaries: [pygpoabuse, raiseChild.py]
+        fn_names: [find_delegation, s4u_attack, raise_child]
       - category: Impacket
         binaries:
           - impacket-findDelegation

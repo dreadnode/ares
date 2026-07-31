@@ -359,11 +359,6 @@ pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
         ),
         "certipy_ca" => certipy_ca_plan(a),
         "nopac" => nopac_plan(record),
-        "krbrelayup" => UndoPlan::manual(
-            Reversibility::NeedsCapture,
-            "delete the machine account this created — needs the account name from tool output",
-        ),
-
         // ── IMPOSSIBLE ───────────────────────────────────────────────
         "bloodyad_set_password" => UndoPlan::manual(
             Reversibility::Impossible,

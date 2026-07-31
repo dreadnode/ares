@@ -1445,8 +1445,8 @@ fn is_exploit_scoped_task_id_rejects_unrelated_task_types() {
 }
 
 #[test]
-fn acl_evidence_detects_pywhisker_keycredlink_write() {
-    use super::result_has_acl_mutation_evidence;
+fn acl_evidence_rejects_pywhisker_keycredlink_write() {
+    use super::{result_has_acl_mutation_evidence, result_has_shadow_cred_stage_one};
     let payload = json!({
         "tool_outputs": [
             {"output": "[+] KeyCredential generated with DeviceID: 4b1c9f2a-1234-4a2b-9c3d-abcdef012345\n\
@@ -1454,20 +1454,29 @@ fn acl_evidence_detects_pywhisker_keycredlink_write() {
                         [+] Saved PFX (#PKCS12) certificate & key at path: /tmp/ws01.pfx"}
         ]
     });
-    assert!(result_has_acl_mutation_evidence(&Some(payload)));
+    assert!(
+        !result_has_acl_mutation_evidence(&Some(payload.clone())),
+        "the write is stage one of a two-stage chain and proves no credential was recovered"
+    );
+    assert!(result_has_shadow_cred_stage_one(&Some(payload)));
 }
 
 #[test]
-fn acl_evidence_matches_pywhisker_success_line_alone() {
-    use super::result_has_acl_mutation_evidence;
+fn shadow_cred_stage_one_lines_are_recognised_but_never_credit() {
+    use super::{result_has_acl_mutation_evidence, result_has_shadow_cred_stage_one};
     for line in [
         "[+] Updated the msDS-KeyCredentialLink attribute of the target object",
         "[+] Saved PFX (#PKCS12) certificate & key at path: /tmp/ws01.pfx",
+        "[+] Successfully added msDS-KeyCredentialLink to the target",
     ] {
         let payload = json!({ "tool_outputs": [{"output": line}] });
         assert!(
-            result_has_acl_mutation_evidence(&Some(payload)),
-            "marker set must cover pywhisker's own success line: {line}"
+            !result_has_acl_mutation_evidence(&Some(payload.clone())),
+            "stage-one line must not credit on its own: {line}"
+        );
+        assert!(
+            result_has_shadow_cred_stage_one(&Some(payload)),
+            "stage-one line must stay detectable for the log: {line}"
         );
     }
 }
@@ -1649,13 +1658,13 @@ fn acl_evidence_rejects_llm_prose_without_tool_marker() {
 }
 
 #[test]
-fn acl_shadow_cred_success_now_clears_the_whole_exploit_gate() {
+fn shadow_cred_stage_one_alone_does_not_credit() {
     use super::{
         is_acl_mutation_vuln, result_has_acl_mutation_evidence, result_has_parser_evidence,
-        result_text_indicates_failure,
+        result_has_shadow_cred_stage_one, result_text_indicates_failure,
     };
     let vuln_id = "acl_genericall_alice_krbtgt";
-    let payload = json!({
+    let result = Some(json!({
         "vuln_id": vuln_id,
         "summary": "Added shadow credentials to krbtgt and exported the PFX.",
         "tool_outputs": [
@@ -1664,12 +1673,15 @@ fn acl_shadow_cred_success_now_clears_the_whole_exploit_gate() {
                         [+] Updated the msDS-KeyCredentialLink attribute of the target object\n\
                         [+] Saved PFX (#PKCS12) certificate & key at path: /tmp/krbtgt.pfx"}
         ]
-    });
-    let result = Some(payload);
+    }));
 
     assert!(
         !result_has_parser_evidence(&result),
-        "ACL tools still emit no discoveries — the carve-out is what must carry this"
+        "no hash was recovered, so nothing reaches discoveries"
+    );
+    assert!(
+        result_has_shadow_cred_stage_one(&result),
+        "the write itself must still be detectable, so the gap can be logged"
     );
 
     let task_reported_success = true;
@@ -1680,8 +1692,60 @@ fn acl_shadow_cred_success_now_clears_the_whole_exploit_gate() {
         && (result_has_parser_evidence(&result) || has_acl_evidence);
 
     assert!(
+        !actually_succeeded,
+        "a msDS-KeyCredentialLink write with no PKINIT stage recovers no credential and must not be credited"
+    );
+}
+
+#[test]
+fn shadow_cred_stage_two_credits_via_parser_evidence() {
+    use super::{
+        is_acl_mutation_vuln, result_has_acl_mutation_evidence, result_has_parser_evidence,
+        result_text_indicates_failure,
+    };
+    let vuln_id = "acl_genericall_alice_krbtgt";
+    let result = Some(json!({
+        "vuln_id": vuln_id,
+        "summary": "Wrote msDS-KeyCredentialLink, then authenticated with the PFX.",
+        "discoveries": {
+            "hashes": [{"username": "krbtgt", "domain": "contoso.local",
+                        "hash": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"}]
+        },
+        "tool_outputs": [
+            {"name": "pywhisker",
+             "output": "[+] Saved PFX (#PKCS12) certificate & key at path: /tmp/krbtgt.pfx"},
+            {"name": "certipy_auth",
+             "output": "[*] Got hash for 'krbtgt@contoso.local': aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"}
+        ]
+    }));
+
+    let has_acl_evidence =
+        is_acl_mutation_vuln(vuln_id) && result_has_acl_mutation_evidence(&result);
+    let actually_succeeded = !result_text_indicates_failure(&result)
+        && (result_has_parser_evidence(&result) || has_acl_evidence);
+
+    assert!(
         actually_succeeded,
-        "a confirmed msDS-KeyCredentialLink write must score as an exploit success"
+        "the completed chain must credit — and via parser evidence, not the ACL carve-out"
+    );
+    assert!(
+        !has_acl_evidence,
+        "credit must come from the recovered hash, so the carve-out stays narrow"
+    );
+}
+
+#[test]
+fn pywhisker_generic_success_line_does_not_credit() {
+    use super::result_has_acl_mutation_evidence;
+    let result = Some(json!({
+        "tool_outputs": [
+            {"name": "pywhisker",
+             "output": "[*] Certificate added to the target object\n[+] Done!"}
+        ]
+    }));
+    assert!(
+        !result_has_acl_mutation_evidence(&result),
+        "generic attributed markers must not credit a stage-one-only tool"
     );
 }
 
@@ -1701,7 +1765,7 @@ fn error_indicates_assistance_matches_submission_format() {
 }
 
 #[test]
-fn assisted_acl_write_with_evidence_scores_as_success() {
+fn assisted_shadow_cred_stage_one_does_not_credit() {
     use super::{
         error_indicates_assistance, is_acl_mutation_vuln, result_has_acl_mutation_evidence,
         result_text_indicates_failure,
@@ -1725,8 +1789,37 @@ fn assisted_acl_write_with_evidence_scores_as_success() {
         && has_acl_evidence;
 
     assert!(
+        !assisted_with_evidence,
+        "this is the live op-20260730-213328 failure: the agent said it could not convert the PFX, so there is nothing to credit"
+    );
+}
+
+#[test]
+fn assisted_terminal_acl_write_still_credits() {
+    use super::{
+        error_indicates_assistance, is_acl_mutation_vuln, result_has_acl_mutation_evidence,
+        result_text_indicates_failure,
+    };
+    let vuln_id = "acl_genericall_alice_bob";
+    let err = "Assistance needed: granted rights but cannot pick the next edge (context: ...)";
+    let result = Some(json!({
+        "vuln_id": vuln_id,
+        "summary": "Granted GenericAll on the target.",
+        "tool_outputs": [
+            {"name": "bloodyad_add_genericall",
+             "output": "[+] alice has now GenericAll on bob"}
+        ]
+    }));
+
+    let has_acl_evidence =
+        is_acl_mutation_vuln(vuln_id) && result_has_acl_mutation_evidence(&result);
+    let assisted_with_evidence = error_indicates_assistance(Some(err))
+        && !result_text_indicates_failure(&result)
+        && has_acl_evidence;
+
+    assert!(
         assisted_with_evidence,
-        "a request_assistance whose primitive landed must still score as exploited"
+        "an ACL write that is itself the objective must keep crediting — the marker split must not undo #327"
     );
 }
 

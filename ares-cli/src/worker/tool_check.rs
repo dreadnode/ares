@@ -211,7 +211,6 @@ mod tests {
             "impacket-ticketer",
             "impacket-secretsdump",
             "impacket-psexec",
-            "KrbRelayUp",
         ] {
             assert!(
                 tools.contains(expected),

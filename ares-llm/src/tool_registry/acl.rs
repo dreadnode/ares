@@ -314,6 +314,28 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "certipy_auth".into(),
+            description: "Authenticate to Active Directory using a PFX certificate file. Performs PKINIT Kerberos authentication and retrieves the NT hash of the certificate's subject. This is the second and final stage of the Shadow Credentials attack: run it on the PFX that pywhisker saved to convert the msDS-KeyCredentialLink write into the target's NT hash. A pywhisker success alone recovers no credential and does not exploit the vulnerability.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain FQDN"
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP address"
+                    },
+                    "pfx_path": {
+                        "type": "string",
+                        "description": "Path to the PFX certificate file, as printed by pywhisker (e.g. the path in its 'Saved PFX (#PKCS12) certificate & key at path: ...' line)"
+                    }
+                },
+                "required": ["domain", "dc_ip", "pfx_path"]
+            }),
+        },
+        ToolDefinition {
             name: "targeted_kerberoast".into(),
             description: "Set a Service Principal Name (SPN) on a target account and then Kerberoast it. Exploits GenericAll or GenericWrite permissions to add an SPN to an account that lacks one, then requests a TGS ticket whose hash can be cracked offline to recover the account's password. Auth precedence: ticket_path > hash > password.".into(),
             input_schema: json!({

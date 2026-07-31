@@ -344,6 +344,14 @@ pub async fn process_completed_task(
                 || stalled_with_evidence
                 || assisted_with_evidence;
 
+            if !actually_succeeded && result_has_shadow_cred_stage_one(&result.result) {
+                warn!(
+                    vuln_id = %vuln_id,
+                    task_id = %task_id,
+                    "Shadow credential written but never converted — msDS-KeyCredentialLink landed and a PFX exists, but no credential was recovered. Run certipy_auth on the PFX to complete the chain; not crediting this vulnerability"
+                );
+            }
+
             if actually_succeeded {
                 info!(vuln_id = %vuln_id, task_id = %task_id, "Marking vulnerability as exploited");
                 if let Err(e) = dispatcher
@@ -1269,7 +1277,9 @@ fn result_has_ccache_evidence(result: &Option<Value>) -> bool {
 }
 
 /// Success lines specific enough that no other tool prints them, so they stand
-/// on their own wherever in the task they appear.
+/// on their own wherever in the task they appear. Every marker here names an
+/// outcome that *is* the objective: once the line is printed the edge has been
+/// taken and nothing further is required.
 const ACL_MUTATION_MARKERS: &[&str] = &[
     "dacl modified successfully",
     "has now genericall on",
@@ -1277,10 +1287,20 @@ const ACL_MUTATION_MARKERS: &[&str] = &[
     "password changed successfully",
     "is now able to dcsync",
     "can now impersonate users on",
+    "versionnumber attribute changed successfully",
+];
+
+/// Shadow-credential stage-one lines. These say a `msDS-KeyCredentialLink`
+/// write landed and a PFX exists — the *first* half of a two-stage attack whose
+/// second half (PKINIT via `certipy_auth`) is what actually recovers the
+/// target's NT hash. On their own they prove no credential was obtained, so
+/// they must never satisfy the exploit gate by themselves; stage two shows up
+/// as ordinary parser evidence (a hash lands in `discoveries`) and credits
+/// through that route instead.
+const SHADOW_CRED_STAGE_ONE_MARKERS: &[&str] = &[
     "successfully added msds-keycredentiallink",
     "updated the msds-keycredentiallink",
     "saved pfx",
-    "versionnumber attribute changed successfully",
 ];
 
 /// Success lines that are ordinary English and appear in unrelated tool output
@@ -1297,6 +1317,13 @@ const ACL_MUTATION_MARKERS_NEEDING_ATTRIBUTION: &[&str] = &[
     "gpt.ini",
     "done!",
 ];
+
+/// Tools that only ever perform stage one of a shadow-credential chain, or
+/// whose stage-two result arrives as a parsed hash rather than as a success
+/// line. Their generic `[*] … done!`-shaped output must not be read as an
+/// exploit, because for these tools such a line means the write landed, not
+/// that a credential was recovered.
+const SHADOW_CRED_STAGE_ONE_TOOLS: &[&str] = &["pywhisker", "certipy_shadow"];
 
 /// Tools whose output may be read as proof an ACL edge was taken.
 const ACL_MUTATION_TOOLS: &[&str] = &[
@@ -1330,6 +1357,7 @@ fn result_has_acl_mutation_evidence(result: &Option<Value>) -> bool {
             ),
         };
         let attributed = name.is_some_and(|n| ACL_MUTATION_TOOLS.contains(&n));
+        let stage_one_only = name.is_some_and(|n| SHADOW_CRED_STAGE_ONE_TOOLS.contains(&n));
 
         for line in output.lines() {
             let lower = line.trim().to_lowercase();
@@ -1340,6 +1368,7 @@ fn result_has_acl_mutation_evidence(result: &Option<Value>) -> bool {
                 return true;
             }
             if attributed
+                && !stage_one_only
                 && ACL_MUTATION_MARKERS_NEEDING_ATTRIBUTION
                     .iter()
                     .any(|m| lower.contains(m))
@@ -1349,6 +1378,34 @@ fn result_has_acl_mutation_evidence(result: &Option<Value>) -> bool {
         }
     }
     false
+}
+
+/// Returns `true` when the task wrote a shadow credential (stage one landed)
+/// without any independent evidence that the resulting PFX was ever converted
+/// into a credential. Used only to make the gap countable in the log: a
+/// half-finished chain that silently credits nothing is exactly the failure
+/// mode that let six of these render as EXPLOITED before the marker split.
+fn result_has_shadow_cred_stage_one(result: &Option<Value>) -> bool {
+    let Some(payload) = result.as_ref() else {
+        return false;
+    };
+    let Some(entries) = payload.get("tool_outputs").and_then(|v| v.as_array()) else {
+        return false;
+    };
+
+    entries.iter().any(|entry| {
+        let output = match entry.as_str() {
+            Some(s) => s,
+            None => entry.get("output").and_then(Value::as_str).unwrap_or(""),
+        };
+        output.lines().any(|line| {
+            let lower = line.trim().to_lowercase();
+            (lower.starts_with("[+]") || lower.starts_with("[*]"))
+                && SHADOW_CRED_STAGE_ONE_MARKERS
+                    .iter()
+                    .any(|m| lower.contains(m))
+        })
+    })
 }
 
 /// Returns `true` when the task's error string is one of the agent-loop

@@ -1305,7 +1305,6 @@ mod tests {
             DEDUP_PETITPOTAM_UNAUTH,
             DEDUP_WINRM_LATERAL,
             DEDUP_GROUP_ENUMERATION,
-            DEDUP_KRBRELAYUP,
             DEDUP_SEARCHCONNECTOR,
             DEDUP_LSASSY_DUMP,
             DEDUP_RDP_LATERAL,

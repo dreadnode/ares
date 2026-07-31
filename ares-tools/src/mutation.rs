@@ -57,7 +57,6 @@ const REVERSIBLE_TOOLS: &[&str] = &[
     "certipy_template_esc4",
     "dacl_edit",
     "dnstool",
-    "krbrelayup",
     "mssql_enable_xp_cmdshell",
     "mssql_linked_enable_xpcmdshell",
     "nopac",

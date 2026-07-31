@@ -50,7 +50,6 @@ const MUTATING_TOOLS: &[&str] = &[
     "pygpoabuse_immediate_task",
     "sharpgpoabuse",
     "nopac",
-    "krbrelayup",
 ];
 
 /// Whether a tool call should be recorded in the mutation journal.

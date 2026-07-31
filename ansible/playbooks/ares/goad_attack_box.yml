@@ -89,7 +89,6 @@
     privesc_tools_install_printspoofer: true
     privesc_tools_install_godpotato: true
     privesc_tools_install_sweetpotato: true
-    privesc_tools_install_krbrelayup: true
     privesc_tools_install_sharpgpoabuse: true
     privesc_tools_install_winpeas: true
     privesc_tools_install_linpeas: true
@@ -375,7 +374,6 @@
           - "   - PrintSpoofer, GodPotato"
           - "   - noPac (CVE-2021-42287)"
           - "   - PrintNightmare (CVE-2021-1675)"
-          - "   - KrbRelayUp"
           - "   - WinPEAS, LinPEAS"
           - ""
           - "10. Lateral Movement:"

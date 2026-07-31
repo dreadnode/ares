@@ -78,7 +78,6 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_petitpotam_unauth);
     spawn_auto!(auto_winrm_lateral);
     spawn_auto!(auto_group_enumeration);
-    spawn_auto!(auto_krbrelayup);
     spawn_auto!(auto_searchconnector_coercion);
     spawn_auto!(auto_lsassy_dump);
     spawn_auto!(auto_rdp_lateral);
