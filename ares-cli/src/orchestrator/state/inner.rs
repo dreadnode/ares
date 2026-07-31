@@ -396,7 +396,6 @@ impl StateInner {
         self.krbtgt_rotated_at.contains_key(&domain.to_lowercase())
     }
 
-    /// Parser-recorded source of the most recent krbtgt NTLM hash.
     pub fn latest_krbtgt_source(&self) -> Option<&str> {
         self.hashes
             .iter()
@@ -1043,12 +1042,6 @@ fn is_delegation_vuln_type(vuln_type: &str) -> bool {
         || vuln_type.eq_ignore_ascii_case("rbcd")
 }
 
-/// Render the domain admin path for a krbtgt capture made by `source`.
-///
-/// `source` is the `Hash.source` a parser wrote, never a model claim, so the
-/// rendered path names the tool that actually produced the hash. An empty
-/// source yields the technique-free form rather than naming a tool that may
-/// not have run.
 pub fn krbtgt_da_path(source: &str) -> String {
     let source = source.trim();
     if source.is_empty() {

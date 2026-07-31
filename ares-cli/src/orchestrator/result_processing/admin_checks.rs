@@ -14,17 +14,6 @@ use crate::orchestrator::state::{
     StateInner, DEDUP_ADMIN_HASH_UPGRADE,
 };
 
-/// Determine the domain admin path from parser-derived state.
-///
-/// The payload is deliberately not consulted: an agent's `domain_admin_path`
-/// is a model claim, and claims never feed state writes. The tool that
-/// actually produced the krbtgt hash is recorded by a parser in `Hash.source`,
-/// so that is what the path names.
-///
-/// Returns `None` when no krbtgt hash has landed — the DA flag can be set by
-/// an indicator alone, and naming a technique on that evidence is what made
-/// every report assert `secretsdump` regardless of what ran. Callers render
-/// their own fallback (the report derives a path from the credential chain).
 pub(crate) fn resolve_da_path(state: &StateInner) -> Option<String> {
     state.latest_krbtgt_source().map(krbtgt_da_path)
 }
