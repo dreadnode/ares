@@ -13,6 +13,7 @@ use ares_core::models::{Credential, Hash, Host, Share, TrustInfo, User, Vulnerab
 
 use super::parsing::resolve_parent_id;
 use super::reconcile_low_trust_credential_domain;
+use super::timeline::create_credential_timeline_event;
 use super::LOCKOUT_PATTERNS;
 use crate::orchestrator::dispatcher::Dispatcher;
 
@@ -93,13 +94,21 @@ async fn poll_discoveries(dispatcher: &Arc<Dispatcher>) -> Result<()> {
                     }
                     drop(state);
                     let user_domain = format!("{}@{}", cred.username, cred.domain);
+                    let source = cred.source.clone();
+                    let username = cred.username.clone();
+                    let domain = cred.domain.clone();
+                    let is_admin = cred.is_admin;
                     match dispatcher
                         .state
                         .publish_credential(&dispatcher.queue, cred)
                         .await
                     {
                         Ok(true) => {
-                            info!(credential = %user_domain, "Discovery: credential published")
+                            info!(credential = %user_domain, "Discovery: credential published");
+                            create_credential_timeline_event(
+                                dispatcher, &source, &username, &domain, is_admin,
+                            )
+                            .await;
                         }
                         Ok(false) => {
                             debug!(credential = %user_domain, "Discovery: credential already known")

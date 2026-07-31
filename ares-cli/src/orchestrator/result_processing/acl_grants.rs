@@ -33,6 +33,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracing::{debug, info};
 
+use super::timeline::create_credential_timeline_event;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::output_extraction::{is_valid_credential, make_credential};
 
@@ -337,16 +338,22 @@ pub(crate) fn extract_reset_credentials(payload: &Value) -> Vec<ares_core::model
 pub(crate) async fn publish_reset_credentials(payload: &Value, dispatcher: &Arc<Dispatcher>) {
     for cred in extract_reset_credentials(payload) {
         let (username, domain) = (cred.username.clone(), cred.domain.clone());
+        let source = cred.source.clone();
+        let is_admin = cred.is_admin;
         match dispatcher
             .state
             .publish_credential(&dispatcher.queue, cred)
             .await
         {
-            Ok(true) => info!(
-                username = %username,
-                domain = %domain,
-                "Password reset confirmed — target credential published for follow-on chain steps"
-            ),
+            Ok(true) => {
+                info!(
+                    username = %username,
+                    domain = %domain,
+                    "Password reset confirmed — target credential published for follow-on chain steps"
+                );
+                create_credential_timeline_event(dispatcher, &source, &username, &domain, is_admin)
+                    .await;
+            }
             Ok(false) => debug!(username = %username, "Reset credential already known"),
             Err(e) => {
                 tracing::warn!(err = %e, username = %username, "Failed to publish reset credential")
