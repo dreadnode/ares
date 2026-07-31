@@ -9,7 +9,10 @@ use tracing::{info, warn};
 use super::parsing::has_domain_admin_indicator;
 use super::timeline::{create_admin_upgrade_timeline_event, create_domain_admin_timeline_event};
 use crate::orchestrator::dispatcher::Dispatcher;
-use crate::orchestrator::state::{is_valid_domain_fqdn, resolve_flat_to_fqdn};
+use crate::orchestrator::state::{
+    canonicalize_domain_label, is_valid_domain_fqdn, resolve_flat_to_fqdn, StateInner,
+    DEDUP_ADMIN_HASH_UPGRADE,
+};
 
 /// Determine the domain admin path from a payload.
 pub(crate) fn resolve_da_path(_payload: &Value) -> Option<String> {
@@ -253,6 +256,139 @@ pub(crate) async fn check_golden_ticket_completion(
     }
 }
 
+/// Dedup key for the hash-backed admin credit — one per principal, matching
+/// the per-principal granularity of `mark_credentials_admin`'s flip.
+pub(crate) fn admin_hash_dedup_key(username: &str, domain: &str) -> String {
+    format!("{}\\{}", domain.to_lowercase(), username.to_lowercase())
+}
+
+/// Resolve the NTLM hash that backs a `Pwn3d!` line for a principal that holds
+/// no credential row, or `None` when the discovery is not creditable this way.
+///
+/// `mark_credentials_admin` only credits `state.credentials`, so a principal
+/// obtained by DCSync — held as a hash — produces a `Pwn3d!` line, no admin
+/// timeline event and no priority secretsdump. This is the `find_source_hash`
+/// fallback `dacl_abuse` already applies to the same asymmetry.
+///
+/// Declines in three cases. A credential row for the principal already exists,
+/// which means the credential path owns the decision and has already deduped
+/// it (`mark_credentials_admin` returns `false` both for "no row" and for
+/// "already admin", so the caller cannot tell them apart). The principal was
+/// already credited this operation. Or no hash for the principal is in state —
+/// requiring one keeps the admin event backed by real material rather than by
+/// the log line alone, which is the phantom shape `seimpersonate` credit had.
+///
+/// `find_source_hash`'s last-resort arm matches on username alone, so the
+/// hash's own domain is checked against the pwned domain — both canonicalized,
+/// since netexec reports flat names and hashes carry FQDNs. Without that,
+/// `administrator` in one forest would credit a `Pwn3d!` in another.
+pub(crate) fn resolve_hash_only_admin(
+    state: &StateInner,
+    username: &str,
+    domain: &str,
+) -> Option<ares_core::models::Hash> {
+    let holds_credential = state.credentials.iter().any(|c| {
+        c.username.eq_ignore_ascii_case(username) && c.domain.eq_ignore_ascii_case(domain)
+    });
+    if holds_credential {
+        return None;
+    }
+    if state.is_processed(
+        DEDUP_ADMIN_HASH_UPGRADE,
+        &admin_hash_dedup_key(username, domain),
+    ) {
+        return None;
+    }
+    let hash = state.find_source_hash(username, domain)?;
+    let canonical =
+        |d: &str| canonicalize_domain_label(d, state).unwrap_or_else(|| d.to_lowercase());
+    (canonical(&hash.domain) == canonical(domain)).then_some(hash)
+}
+
+/// Credit a `Pwn3d!` line whose principal is held only as an NTLM hash.
+///
+/// Emits the same admin-upgrade timeline event and priority secretsdump the
+/// credential path emits, over `request_secretsdump_hash` rather than a
+/// password. The dedup key is written before any dispatch so a failed submit
+/// cannot re-credit on the next `Pwn3d!` line for the same principal.
+async fn credit_hash_only_admin(
+    dispatcher: &Arc<Dispatcher>,
+    username: &str,
+    domain: &str,
+    pwned_ip: Option<&str>,
+) {
+    let hash = {
+        let state = dispatcher.state.read().await;
+        resolve_hash_only_admin(&state, username, domain)
+    };
+    let Some(hash) = hash else {
+        return;
+    };
+    let dedup_key = admin_hash_dedup_key(username, domain);
+    {
+        let mut state = dispatcher.state.write().await;
+        state.mark_processed(DEDUP_ADMIN_HASH_UPGRADE, dedup_key.clone());
+    }
+    let _ = dispatcher
+        .state
+        .persist_dedup(&dispatcher.queue, DEDUP_ADMIN_HASH_UPGRADE, &dedup_key)
+        .await;
+    info!(
+        username = %username,
+        domain = %domain,
+        pwned_host = ?pwned_ip,
+        "Hash-only principal confirmed local admin -- crediting from NTLM hash"
+    );
+    if let Some(ip) = pwned_ip {
+        if let Err(e) = dispatcher
+            .state
+            .mark_host_owned(&dispatcher.queue, ip)
+            .await
+        {
+            warn!(err = %e, ip = %ip, "Failed to mark host as owned");
+        }
+    }
+    create_admin_upgrade_timeline_event(dispatcher, username, domain, pwned_ip).await;
+    if !dispatcher.is_technique_allowed("secretsdump") {
+        return;
+    }
+    let mut targets: Vec<String> = {
+        let state = dispatcher.state.read().await;
+        state.domain_controllers.values().cloned().collect()
+    };
+    if let Some(ip) = pwned_ip {
+        if !targets.iter().any(|t| t == ip) {
+            targets.push(ip.to_string());
+        }
+    }
+    for target_ip in targets {
+        match dispatcher
+            .request_secretsdump_hash(
+                &target_ip,
+                &hash.username,
+                &hash.domain,
+                &hash.hash_value,
+                1,
+                None,
+            )
+            .await
+        {
+            Ok(Some(task_id)) => {
+                info!(
+                    task_id = %task_id,
+                    target = %target_ip,
+                    username = %username,
+                    "Admin Pwn3d! pass-the-hash secretsdump dispatched (priority 1)"
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(err = %e, "Failed to dispatch Pwn3d! pass-the-hash secretsdump")
+            }
+        }
+    }
+}
+
 pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher: &Arc<Dispatcher>) {
     for line in text.lines() {
         let Some((domain, username)) = parse_pwned_line(line) else {
@@ -270,8 +406,8 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
                 false
             }
         };
+        let pwned_ip = extract_ip_from_line(line);
         if upgraded {
-            let pwned_ip = extract_ip_from_line(line);
             info!(
                 username = %username,
                 domain = %domain,
@@ -337,6 +473,8 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
                     Err(e) => warn!(err = %e, "Failed to dispatch Pwn3d! secretsdump"),
                 }
             }
+        } else {
+            credit_hash_only_admin(dispatcher, &username, &domain, pwned_ip.as_deref()).await;
         }
     }
 }
@@ -795,6 +933,156 @@ Domain Sid: S-1-5-21-9999-8888-7777";
     #[test]
     fn parse_sid_returns_none_for_unrelated_text() {
         assert!(parse_sid_from_combined_text("nothing here").is_none());
+    }
+
+    fn admin_state() -> StateInner {
+        let mut state = StateInner::new("op-admin".into());
+        state.domains = vec!["contoso.local".into(), "fabrikam.local".into()];
+        state
+    }
+
+    fn ntlm_hash(username: &str, domain: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("hash-{username}-{domain}"),
+            username: username.into(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0".into(),
+            hash_type: "NTLM".into(),
+            domain: domain.into(),
+            cracked_password: None,
+            source: "secretsdump".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    fn plain_credential(username: &str, domain: &str) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("cred-{username}"),
+            username: username.into(),
+            password: "P@ssw0rd!".into(),
+            domain: domain.into(),
+            source: "test".into(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    /// The §2.3 case: a DCSync-obtained principal pwns a host, `Pwn3d!` fires,
+    /// and `mark_credentials_admin` finds nothing because the principal is
+    /// held as a hash. Before this fallback the discovery was uncreditable.
+    #[test]
+    fn hash_only_admin_credits_a_principal_with_no_credential_row() {
+        let mut state = admin_state();
+        state
+            .hashes
+            .push(ntlm_hash("administrator", "fabrikam.local"));
+        let hash = resolve_hash_only_admin(&state, "administrator", "fabrikam.local").unwrap();
+        assert_eq!(hash.domain, "fabrikam.local");
+        assert!(hash
+            .hash_value
+            .ends_with("31d6cfe0d16ae931b73c59d7e0c089c0"));
+    }
+
+    #[test]
+    fn hash_only_admin_declines_when_a_credential_row_exists() {
+        let mut state = admin_state();
+        state.hashes.push(ntlm_hash("alice", "contoso.local"));
+        state
+            .credentials
+            .push(plain_credential("alice", "contoso.local"));
+        assert!(resolve_hash_only_admin(&state, "alice", "contoso.local").is_none());
+    }
+
+    #[test]
+    fn hash_only_admin_declines_a_second_pwn3d_line_for_the_same_principal() {
+        let mut state = admin_state();
+        state.hashes.push(ntlm_hash("alice", "contoso.local"));
+        assert!(resolve_hash_only_admin(&state, "alice", "contoso.local").is_some());
+        state.mark_processed(
+            DEDUP_ADMIN_HASH_UPGRADE,
+            admin_hash_dedup_key("alice", "contoso.local"),
+        );
+        assert!(resolve_hash_only_admin(&state, "alice", "contoso.local").is_none());
+    }
+
+    /// `find_source_hash`'s last-resort arm matches on username alone, so
+    /// without the domain check `administrator` in one forest would credit a
+    /// `Pwn3d!` in another.
+    #[test]
+    fn hash_only_admin_declines_a_same_name_hash_from_another_domain() {
+        let mut state = admin_state();
+        state
+            .hashes
+            .push(ntlm_hash("administrator", "contoso.local"));
+        assert!(
+            state
+                .find_source_hash("administrator", "fabrikam.local")
+                .is_some(),
+            "guard must be what declines, not an empty find_source_hash"
+        );
+        assert!(resolve_hash_only_admin(&state, "administrator", "fabrikam.local").is_none());
+    }
+
+    #[test]
+    fn hash_only_admin_accepts_a_flat_pwned_domain_naming_the_hash_domain() {
+        let mut state = admin_state();
+        state
+            .hashes
+            .push(ntlm_hash("administrator", "fabrikam.local"));
+        assert!(resolve_hash_only_admin(&state, "administrator", "fabrikam").is_some());
+    }
+
+    #[test]
+    fn hash_only_admin_declines_when_no_hash_is_held() {
+        let state = admin_state();
+        assert!(resolve_hash_only_admin(&state, "bob", "contoso.local").is_none());
+    }
+
+    #[test]
+    fn hash_only_admin_declines_a_hash_with_no_domain() {
+        let mut state = admin_state();
+        state.hashes.push(ntlm_hash("alice", ""));
+        assert!(resolve_hash_only_admin(&state, "alice", "contoso.local").is_none());
+    }
+
+    /// Only NTLM is usable for pass-the-hash; a roast ciphertext for the same
+    /// principal must not be credited as admin material.
+    #[test]
+    fn hash_only_admin_declines_a_non_ntlm_hash() {
+        let mut state = admin_state();
+        let mut roast = ntlm_hash("svc_sql", "contoso.local");
+        roast.hash_type = "krb5tgs".into();
+        state.hashes.push(roast);
+        assert!(resolve_hash_only_admin(&state, "svc_sql", "contoso.local").is_none());
+    }
+
+    #[test]
+    fn hash_only_admin_matches_the_principal_case_insensitively() {
+        let mut state = admin_state();
+        state
+            .hashes
+            .push(ntlm_hash("Administrator", "Contoso.Local"));
+        assert!(resolve_hash_only_admin(&state, "administrator", "contoso.local").is_some());
+    }
+
+    #[test]
+    fn admin_hash_dedup_key_is_case_folded() {
+        assert_eq!(
+            admin_hash_dedup_key("Administrator", "CONTOSO.LOCAL"),
+            admin_hash_dedup_key("administrator", "contoso.local")
+        );
+        assert_eq!(
+            admin_hash_dedup_key("alice", "contoso.local"),
+            "contoso.local\\alice"
+        );
     }
 
     #[test]

@@ -1327,6 +1327,7 @@ mod tests {
             DEDUP_MSSQL_FAR_HOST_DUMP,
             DEDUP_SID_HISTORY,
             DEDUP_STALL_COLD_START,
+            DEDUP_ADMIN_HASH_UPGRADE,
         ];
         assert_eq!(expected.len(), ALL_DEDUP_SETS.len());
         for name in expected {

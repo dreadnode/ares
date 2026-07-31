@@ -118,6 +118,13 @@ pub const DEDUP_MSSQL_FAR_HOST_DUMP: &str = "mssql_far_host_dump";
 pub const DEDUP_SID_HISTORY: &str = "sid_history_enum";
 pub const DEDUP_STALL_COLD_START: &str = "stall_cold_start";
 
+/// Dedup for the `Pwn3d!` admin credit of a principal held only as an NTLM
+/// hash. The credential path dedups on `mark_credentials_admin`'s
+/// `false → true` transition, which a hash-only principal never reaches
+/// because it owns no credential row; this set is that transition's stand-in,
+/// keyed per `{domain}\{username}`.
+pub const DEDUP_ADMIN_HASH_UPGRADE: &str = "admin_hash_upgrade";
+
 /// Vuln queue ZSET key suffix.
 pub const KEY_VULN_QUEUE: &str = "vuln_queue";
 
@@ -188,6 +195,7 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_MSSQL_FAR_HOST_DUMP,
     DEDUP_SID_HISTORY,
     DEDUP_STALL_COLD_START,
+    DEDUP_ADMIN_HASH_UPGRADE,
 ];
 
 #[cfg(test)]
