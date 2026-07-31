@@ -69,7 +69,10 @@ static ENQUEUE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
     )
 });
 
-/// Atomic ZREM + counter DECR + signature SREM.
+/// Atomic ZREM + counter DECR + signature SREM. Fully removes a task and
+/// releases its dedup signature — used by `evict_stale` where a stale task
+/// is being discarded outright and a future re-enqueue of equivalent work
+/// should succeed.
 ///
 /// KEYS[1] = per-type ZSET
 /// KEYS[2] = total counter
@@ -88,6 +91,33 @@ static REMOVE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
             local cur = tonumber(redis.call('GET', KEYS[2]) or '0')
             if cur > 0 then redis.call('DECR', KEYS[2]) end
             redis.call('SREM', KEYS[3], ARGV[2])
+        end
+        return removed
+        ",
+    )
+});
+
+/// Atomic ZREM + counter DECR, keeping the signature in the SET. Used by
+/// `pop_best` so the sig stays asserted while the caller decides whether
+/// to dispatch the task or drop it as contained. Closes the race that
+/// existed when the sig was released at pop-time and re-added post-drop:
+/// a producer squeezing an equivalent enqueue into that window used to
+/// slip past the tombstone and get counted as a second distinct drop.
+/// Callers must invoke `release_signature` once dispatch is decided
+/// (contained tasks leave the sig in place as the tombstone).
+///
+/// KEYS[1] = per-type ZSET
+/// KEYS[2] = total counter
+/// ARGV[1] = member
+///
+/// Returns the number of elements removed (0 or 1).
+static POP_HOLD_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+        if removed > 0 then
+            local cur = tonumber(redis.call('GET', KEYS[2]) or '0')
+            if cur > 0 then redis.call('DECR', KEYS[2]) end
         end
         return removed
         ",
@@ -223,14 +253,20 @@ impl DeferredQueue {
     }
 
     /// Redis key for the per-task-type signature SET — paired with the
-    /// ZSET and maintained in lockstep via Lua. Used by the producer-side
-    /// dedup gate (Bug J): two automation rules racing to enqueue the
-    /// same `(task_type, role, technique, target_ip, cred)` tuple both
-    /// compute the same signature, and only the first one reaches the
-    /// ZSET. The SET shrinks when the corresponding ZSET member is
-    /// removed (pop_best / evict_stale) so a legitimate later dispatch
-    /// of the same tuple is no longer treated as duplicate once the
-    /// in-flight copy completes.
+    /// ZSET and maintained via Lua where they need to be atomic. Used by
+    /// the producer-side dedup gate (Bug J): two automation rules racing
+    /// to enqueue the same `(task_type, role, technique, target_ip, cred)`
+    /// tuple both compute the same signature, and only the first one
+    /// reaches the ZSET.
+    ///
+    /// Lifecycle:
+    /// * `enqueue` — SADD sig atomically with the ZADD.
+    /// * `pop_best` — leaves the sig in place while the caller decides.
+    /// * `release_signature` — caller SREMs sig once the popped task is
+    ///   headed for dispatch or being re-enqueued via `enqueue`.
+    /// * Contained task — sig is never released, acting as a permanent
+    ///   tombstone that blocks re-emission by producers.
+    /// * `evict_stale` — SREMs sig alongside the ZREM (task fully gone).
     fn sig_key(&self, task_type: &str) -> String {
         format!(
             "{}:{}:{}:sigs",
@@ -411,16 +447,14 @@ impl DeferredQueue {
             .into_iter()
             .nth(idx)
             .expect("selection index within bounds");
-        // SREM the signature in lockstep with the ZREM so a future enqueue
-        // of equivalent work is no longer treated as duplicate (Bug J).
-        let sig_key = format!("{key}:sigs");
-        let signature = task.signature();
-        let removed: i64 = REMOVE_SCRIPT
+        // Hold the signature in the SET across pop → decision. If the caller
+        // drops the task as contained, the sig stays as the tombstone that
+        // blocks re-emission. If it dispatches or re-enqueues, it must call
+        // `release_signature` first.
+        let removed: i64 = POP_HOLD_SCRIPT
             .key(&key)
             .key(&total_key)
-            .key(&sig_key)
             .arg(&member)
-            .arg(&signature)
             .invoke_async(&mut conn)
             .await
             .unwrap_or(0);
@@ -555,15 +589,17 @@ impl DeferredQueue {
         }
     }
 
-    /// Re-assert a contained task's signature so the producer-side dedup gate
-    /// keeps rejecting it. Containment is terminal, so without this the
-    /// automation re-emits the task every tick and the drain loop drops it
-    /// again, counting drop events rather than distinct work lost.
-    pub async fn tombstone_signature(&self, task: &DeferredTask) {
+    /// Release the signature that `pop_best` held across the pop → decision
+    /// window, so a future equivalent enqueue is no longer treated as a
+    /// duplicate. Call this once the popped task is on its way to dispatch
+    /// or being re-enqueued through the size-capped `enqueue` path. Do NOT
+    /// call it on the containment-drop path — leaving the sig in place is
+    /// exactly what makes it act as a tombstone.
+    pub async fn release_signature(&self, task: &DeferredTask) {
         let sig_key = self.sig_key(&task.task_type);
         let mut conn = self.queue_conn();
-        if let Err(e) = conn.sadd::<_, _, ()>(&sig_key, task.signature()).await {
-            warn!(err = %e, "Failed to tombstone contained deferred task signature");
+        if let Err(e) = conn.srem::<_, _, ()>(&sig_key, task.signature()).await {
+            warn!(err = %e, "Failed to release deferred task signature");
         }
     }
 
@@ -740,12 +776,22 @@ pub fn spawn_deferred_processor(
                         reason = %drop.detail,
                         "Dropping deferred task — invalidated by blue containment"
                     );
-                    deferred.tombstone_signature(&task).await;
+                    // Signature is left in the SET by pop_best (POP_HOLD_SCRIPT
+                    // doesn't SREM it), so it now serves as the tombstone that
+                    // blocks producers from re-emitting equivalent work. No
+                    // explicit tombstone_signature call is needed.
                     deferred
                         .record_blue_invalidation(&task.task_type, &task.target_role, drop.kind)
                         .await;
                     continue;
                 }
+
+                // Not contained — the sig no longer needs to be held. Release
+                // it before any dispatch or re-enqueue path so a future
+                // equivalent enqueue (either by submit_to_llm internally, or by
+                // a re-enqueue below) doesn't collapse on the held sig and
+                // silently lose the task.
+                deferred.release_signature(&task).await;
 
                 // Re-check throttle before submitting
                 let decision = throttler
