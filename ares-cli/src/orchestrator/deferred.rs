@@ -22,6 +22,8 @@ use std::sync::{Arc, LazyLock};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use ares_core::blue_invalidation::ContainmentKind;
+
 use crate::orchestrator::config::OrchestratorConfig;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::diversity;
@@ -526,6 +528,33 @@ impl DeferredQueue {
         Ok(total)
     }
 
+    /// Count one deferred task that blue containment removed from the queue.
+    ///
+    /// Best-effort: a Redis failure here must never stop the drain loop, since
+    /// the task is being discarded either way. The counter is the only durable
+    /// record that the work existed — the drop otherwise survives solely as a
+    /// log line, which is what makes a contained red verification run
+    /// indistinguishable from a driver that built nothing.
+    pub async fn record_blue_invalidation(
+        &self,
+        task_type: &str,
+        target_role: &str,
+        kind: ContainmentKind,
+    ) {
+        let mut conn = self.queue_conn();
+        if let Err(e) = ares_core::blue_invalidation::record_blue_invalidated_task(
+            &mut conn,
+            &self.config.operation_id,
+            task_type,
+            target_role,
+            kind,
+        )
+        .await
+        {
+            warn!(err = %e, "Failed to record blue-invalidated deferred task");
+        }
+    }
+
     fn queue_conn(&self) -> redis::aio::ConnectionManager {
         // TaskQueue wraps a ConnectionManager which implements Clone cheaply
         // We access it through an internal method.
@@ -560,14 +589,17 @@ async fn scan_keys_async(conn: &mut redis::aio::ConnectionManager, pattern: &str
     all_keys
 }
 
-/// Spawn a tokio task that periodically drains the deferred queue whenever
-/// the throttler allows new submissions.
-///
-/// Uses `Dispatcher::do_submit()` to route tasks directly to the LLM agent
-/// loop (not Redis task queues, which have no consumer in this process).
-/// Return the human-readable reason a deferred task should be dropped from
-/// the queue because a blue-team containment observation has invalidated
-/// its preconditions, or `None` when the task remains viable.
+/// A deferred task's cause of death: the closed-set kind that the per-op
+/// counter aggregates, plus the human-readable detail that names the revoked
+/// principal, isolated host or rotated realm for the log line.
+struct ContainmentDrop {
+    kind: ContainmentKind,
+    detail: String,
+}
+
+/// Return why a deferred task should be dropped from the queue because a
+/// blue-team containment observation has invalidated its preconditions, or
+/// `None` when the task remains viable.
 ///
 /// Kept intentionally narrow: mirrors the checks in the exploitation
 /// pre-dispatch filter (`orchestrator/exploitation.rs`) but limited to the
@@ -578,7 +610,7 @@ async fn scan_keys_async(conn: &mut redis::aio::ConnectionManager, pattern: &str
 async fn task_dropped_by_containment(
     task: &DeferredTask,
     state: &crate::orchestrator::state::SharedState,
-) -> Option<String> {
+) -> Option<ContainmentDrop> {
     let state = state.read().await;
 
     // Host isolated → drop any task pointing at that IP.
@@ -590,7 +622,10 @@ async fn task_dropped_by_containment(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if !target_ip.is_empty() && state.is_host_isolated(target_ip) {
-        return Some(format!("host isolated ({target_ip})"));
+        return Some(ContainmentDrop {
+            kind: ContainmentKind::HostIsolated,
+            detail: format!("host isolated ({target_ip})"),
+        });
     }
 
     // Credential revoked → drop any task bound to that principal.
@@ -598,7 +633,10 @@ async fn task_dropped_by_containment(
         let user = cred.get("username").and_then(|v| v.as_str()).unwrap_or("");
         let domain = cred.get("domain").and_then(|v| v.as_str()).unwrap_or("");
         if !user.is_empty() && !domain.is_empty() && state.is_credential_revoked(user, domain) {
-            return Some(format!("credential revoked ({user}@{domain})"));
+            return Some(ContainmentDrop {
+                kind: ContainmentKind::CredentialRevoked,
+                detail: format!("credential revoked ({user}@{domain})"),
+            });
         }
     }
 
@@ -624,12 +662,20 @@ async fn task_dropped_by_containment(
         || technique.to_lowercase().contains("kerberoast")
         || technique.to_lowercase().contains("golden");
     if !realm.is_empty() && kerberos_shaped && state.is_krbtgt_rotated(realm) {
-        return Some(format!("krbtgt rotated ({realm})"));
+        return Some(ContainmentDrop {
+            kind: ContainmentKind::KrbtgtRotated,
+            detail: format!("krbtgt rotated ({realm})"),
+        });
     }
 
     None
 }
 
+/// Spawn a tokio task that periodically drains the deferred queue whenever
+/// the throttler allows new submissions.
+///
+/// Uses `Dispatcher::do_submit()` to route tasks directly to the LLM agent
+/// loop (not Redis task queues, which have no consumer in this process).
 pub fn spawn_deferred_processor(
     deferred: Arc<DeferredQueue>,
     dispatcher: Arc<Dispatcher>,
@@ -675,13 +721,16 @@ pub fn spawn_deferred_processor(
                 // STATUS_LOGON_FAILURE / STATUS_HOST_UNREACHABLE tool
                 // errors — exactly the visual mess the containment loop is
                 // supposed to prevent for the demo.
-                if let Some(reason) = task_dropped_by_containment(&task, &dispatcher.state).await {
+                if let Some(drop) = task_dropped_by_containment(&task, &dispatcher.state).await {
                     info!(
                         task_type = %task.task_type,
                         target_role = %task.target_role,
-                        reason = %reason,
+                        reason = %drop.detail,
                         "Dropping deferred task — invalidated by blue containment"
                     );
+                    deferred
+                        .record_blue_invalidation(&task.task_type, &task.target_role, drop.kind)
+                        .await;
                     continue;
                 }
 
@@ -796,9 +845,11 @@ mod tests {
             "credential_access",
             serde_json::json!({ "target_ip": "192.168.58.20" }),
         );
-        let reason = task_dropped_by_containment(&task, &state).await;
-        assert!(reason.is_some());
-        assert!(reason.unwrap().contains("host isolated"));
+        let drop = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("isolated host should drop the task");
+        assert_eq!(drop.kind, ContainmentKind::HostIsolated);
+        assert!(drop.detail.contains("host isolated"));
     }
 
     #[tokio::test]
@@ -824,9 +875,11 @@ mod tests {
                 "credential": { "username": "svc_mssql", "domain": "contoso.local" },
             }),
         );
-        let reason = task_dropped_by_containment(&task, &state).await;
-        assert!(reason.is_some());
-        assert!(reason.unwrap().contains("credential revoked"));
+        let drop = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("revoked credential should drop the task");
+        assert_eq!(drop.kind, ContainmentKind::CredentialRevoked);
+        assert!(drop.detail.contains("credential revoked"));
     }
 
     #[tokio::test]
@@ -842,9 +895,11 @@ mod tests {
                 "domain": "contoso.local",
             }),
         );
-        let reason = task_dropped_by_containment(&task, &state).await;
-        assert!(reason.is_some());
-        assert!(reason.unwrap().contains("krbtgt rotated"));
+        let drop = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("rotated krbtgt should drop the kerberos task");
+        assert_eq!(drop.kind, ContainmentKind::KrbtgtRotated);
+        assert!(drop.detail.contains("krbtgt rotated"));
     }
 
     #[tokio::test]
@@ -881,9 +936,11 @@ mod tests {
                 "technique": "Kerberoasting",
             }),
         );
-        let reason = task_dropped_by_containment(&task, &state).await;
-        assert!(reason.is_some(), "expected kerberoast to be dropped");
-        assert!(reason.unwrap().contains("krbtgt rotated"));
+        let drop = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("expected kerberoast to be dropped");
+        assert_eq!(drop.kind, ContainmentKind::KrbtgtRotated);
+        assert!(drop.detail.contains("krbtgt rotated"));
     }
 
     #[test]

@@ -17,6 +17,51 @@ fn finalizing_note(state: &SharedRedTeamState) -> Option<String> {
     state.red_completion_reason.clone()
 }
 
+const BREAKDOWN_LIMIT: usize = 6;
+
+fn breakdown_line(label: &str, rows: &[(&str, u64)]) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = rows
+        .iter()
+        .take(BREAKDOWN_LIMIT)
+        .map(|(name, count)| format!("{name} {count}"))
+        .collect();
+    let mut line = format!("  by {label}: {}", shown.join(", "));
+    if rows.len() > BREAKDOWN_LIMIT {
+        line.push_str(&format!(", +{} more", rows.len() - BREAKDOWN_LIMIT));
+    }
+    Some(line)
+}
+
+fn format_blue_invalidated(
+    counts: &ares_core::blue_invalidation::BlueInvalidatedTasks,
+) -> Vec<String> {
+    if counts.is_empty() {
+        return Vec::new();
+    }
+
+    let plural = if counts.total == 1 { "" } else { "s" };
+    let mut lines = vec![format!(
+        "Warning: {} deferred task{plural} deleted by blue containment before dispatch (red verification may be voided)",
+        counts.total
+    )];
+
+    let roles = counts.roles_by_count();
+    let task_types = counts.task_types_by_count();
+    if let Some(line) = breakdown_line("role", &roles) {
+        lines.push(line);
+    }
+    if task_types != roles {
+        if let Some(line) = breakdown_line("task type", &task_types) {
+            lines.push(line);
+        }
+    }
+
+    lines
+}
+
 pub(crate) async fn ops_runtime(
     redis_url: Option<String>,
     operation_id: Option<String>,
@@ -78,6 +123,13 @@ pub(crate) async fn ops_runtime(
             "Warning: {} exploit credits have no vulnerability record (not itemised by `ops loot`)",
             vulns.orphan_credits
         );
+    }
+
+    let invalidated = ares_core::blue_invalidation::get_blue_invalidated_tasks(&mut conn, &op_id)
+        .await
+        .unwrap_or_default();
+    for line in format_blue_invalidated(&invalidated) {
+        println!("{line}");
     }
     println!();
 
@@ -211,5 +263,74 @@ mod tests {
         let mut state = red_done_state();
         state.completed_at = Some(at(4, 30));
         assert_eq!(finalizing_note(&state), None);
+    }
+
+    fn counts(
+        total: u64,
+        by_role: &[(&str, u64)],
+        by_task_type: &[(&str, u64)],
+    ) -> ares_core::blue_invalidation::BlueInvalidatedTasks {
+        ares_core::blue_invalidation::BlueInvalidatedTasks {
+            total,
+            by_role: by_role
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), *v))
+                .collect(),
+            by_task_type: by_task_type
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), *v))
+                .collect(),
+            by_reason: Default::default(),
+        }
+    }
+
+    #[test]
+    fn no_blue_drops_renders_nothing() {
+        assert!(format_blue_invalidated(&counts(0, &[], &[])).is_empty());
+    }
+
+    #[test]
+    fn blue_drops_render_total_and_role_breakdown() {
+        let lines = format_blue_invalidated(&counts(
+            5,
+            &[("acl", 2), ("recon", 3)],
+            &[("acl_chain_step", 2), ("recon", 3)],
+        ));
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("5 deferred tasks deleted by blue containment"));
+        assert_eq!(lines[1], "  by role: recon 3, acl 2");
+        assert_eq!(lines[2], "  by task type: recon 3, acl_chain_step 2");
+    }
+
+    #[test]
+    fn task_type_breakdown_is_suppressed_when_it_repeats_the_roles() {
+        let lines = format_blue_invalidated(&counts(3, &[("recon", 3)], &[("recon", 3)]));
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1], "  by role: recon 3");
+    }
+
+    #[test]
+    fn single_drop_is_not_pluralised() {
+        let lines = format_blue_invalidated(&counts(1, &[("acl", 1)], &[("acl_chain_step", 1)]));
+        assert!(lines[0].contains("1 deferred task deleted"));
+        assert!(!lines[0].contains("tasks deleted"));
+    }
+
+    #[test]
+    fn long_breakdowns_collapse_their_tail() {
+        let rows = [
+            ("recon", 24),
+            ("lateral", 12),
+            ("coercion", 11),
+            ("credential_access", 8),
+            ("privesc", 8),
+            ("exploit", 4),
+            ("acl", 2),
+            ("cracker", 1),
+        ];
+        let lines = format_blue_invalidated(&counts(70, &rows, &[]));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].ends_with(", +2 more"), "got {}", lines[1]);
+        assert!(!lines[1].contains("cracker"));
     }
 }
