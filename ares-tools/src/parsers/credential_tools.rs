@@ -712,6 +712,94 @@ fn extract_laps_pair(line: &str) -> Option<(String, String)> {
     Some((host.to_string(), password.to_string()))
 }
 
+/// Empty-NT sentinel — a gMSA row carrying it read nothing usable.
+const EMPTY_NT_HASH: &str = "31d6cfe0d16ae931b73c59d7e0c089c0";
+
+/// Blank LM half, used when a tool prints only the NT hash.
+const BLANK_LM_HASH: &str = "aad3b435b51404eeaad3b435b51404ee";
+
+/// Parse a gMSA managed-password read into NTLM hash discoveries.
+///
+/// Two producing tools, two shapes, one marker in common — an `NTLM:` label
+/// followed by the hash:
+///
+/// ```text
+/// GMSA  192.168.58.10  389  DC01  Account: svc_gmsa$   NTLM: aad3b4...:31d6...
+/// msDS-ManagedPassword.NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef...
+/// ```
+///
+/// netexec names the account inline; bloodyAD does not, so the account falls
+/// back to the `gmsa_account` dispatch parameter. `source` is the calling tool
+/// name, which is what `emit_gmsa_exploit_token_if_gmsa` gates the exploit
+/// credit on — a managed-password read must be distinguishable from the same
+/// account's hash arriving as DCSync loot.
+pub fn parse_gmsa(output: &str, params: &Value, tool_name: &str) -> Vec<Value> {
+    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    let fallback_account = params
+        .get("gmsa_account")
+        .or_else(|| params.get("target"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let mut hashes = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in output.lines() {
+        let Some(hash_value) = extract_gmsa_ntlm(line) else {
+            continue;
+        };
+        let account = extract_gmsa_account(line).unwrap_or_else(|| fallback_account.to_string());
+        if account.is_empty() {
+            continue;
+        }
+        if !seen.insert(account.to_lowercase()) {
+            continue;
+        }
+        hashes.push(json!({
+            "username": account,
+            "domain": domain,
+            "hash_value": hash_value,
+            "hash_type": "ntlm",
+            "source": tool_name,
+        }));
+    }
+
+    hashes
+}
+
+/// Pull the `lm:nt` pair out of a line carrying an `NTLM:` label. Bare NT
+/// hashes are widened with the blank LM half so the value matches the
+/// `lm:nt` shape every other hash producer emits.
+fn extract_gmsa_ntlm(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let idx = lower.find("ntlm:")?;
+    let raw = line[idx + "ntlm:".len()..].split_whitespace().next()?;
+    let (lm, nt) = match raw.split_once(':') {
+        Some((l, n)) => (l, n),
+        None => (BLANK_LM_HASH, raw),
+    };
+    if !is_hex32(lm) || !is_hex32(nt) || nt.eq_ignore_ascii_case(EMPTY_NT_HASH) {
+        return None;
+    }
+    Some(format!("{}:{}", lm.to_lowercase(), nt.to_lowercase()))
+}
+
+/// Pull the account name out of netexec's `Account: <sam>` label. Absent on
+/// bloodyAD output, where the caller supplies it from dispatch parameters.
+fn extract_gmsa_account(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let idx = lower.find("account:")?;
+    let name = line[idx + "account:".len()..].split_whitespace().next()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn is_hex32(s: &str) -> bool {
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 // ── adidnsdump ──────────────────────────────────────────────────────────────
 
 /// Parse adidnsdump output for DNS records that map to host IPs.
@@ -1145,5 +1233,86 @@ CONTOSO\\real_user RealPassword123";
         assert_eq!(hashes.len(), 1);
         assert!(creds.is_empty());
         assert_eq!(hashes[0]["hash_value"], "31d6cfe0d16ae931b73c59d7e0c089c0");
+    }
+
+    #[test]
+    fn gmsa_netexec_module_row_yields_hash_with_account_name() {
+        let output = "\
+LDAP  192.168.58.10  389  DC01  [*] Getting GMSA Passwords
+GMSA  192.168.58.10  389  DC01  Account: svc_gmsa$           NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        let params = json!({"domain": "contoso.local"});
+        let hashes = parse_gmsa(output, &params, "gmsa_dump_passwords");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "svc_gmsa$");
+        assert_eq!(hashes[0]["domain"], "contoso.local");
+        assert_eq!(
+            hashes[0]["hash_value"],
+            "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890"
+        );
+        assert_eq!(hashes[0]["hash_type"], "ntlm");
+        assert_eq!(hashes[0]["source"], "gmsa_dump_passwords");
+    }
+
+    #[test]
+    fn gmsa_bloodyad_row_takes_account_from_params() {
+        let output = "\
+distinguishedName: CN=svc_gmsa,CN=Managed Service Accounts,DC=contoso,DC=local
+msDS-ManagedPassword.NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        let params = json!({"domain": "contoso.local", "gmsa_account": "svc_gmsa$"});
+        let hashes = parse_gmsa(output, &params, "gmsa_read_password_bloodyad");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "svc_gmsa$");
+        assert_eq!(hashes[0]["source"], "gmsa_read_password_bloodyad");
+    }
+
+    #[test]
+    fn gmsa_bare_nt_hash_is_widened_with_blank_lm_half() {
+        let output = "Account: svc_gmsa$  NTLM: abcdef1234567890abcdef1234567890";
+        let hashes = parse_gmsa(
+            output,
+            &json!({"domain": "contoso.local"}),
+            "gmsa_dump_passwords",
+        );
+        assert_eq!(
+            hashes[0]["hash_value"],
+            "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890"
+        );
+    }
+
+    #[test]
+    fn gmsa_rejects_empty_nt_hash() {
+        let output = "Account: svc_gmsa$  NTLM: aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0";
+        assert!(parse_gmsa(output, &json!({}), "gmsa_dump_passwords").is_empty());
+    }
+
+    #[test]
+    fn gmsa_rejects_non_hex_and_unlabelled_lines() {
+        let output = "\
+[*] Getting GMSA Passwords
+Account: svc_gmsa$  NTLM: not-a-hash
+svc_gmsa$ aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        assert!(parse_gmsa(output, &json!({}), "gmsa_dump_passwords").is_empty());
+    }
+
+    #[test]
+    fn gmsa_without_account_name_or_param_is_dropped() {
+        let output = "msDS-ManagedPassword.NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        assert!(parse_gmsa(
+            output,
+            &json!({"domain": "contoso.local"}),
+            "gmsa_read_password_bloodyad"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn gmsa_dedupes_repeated_account_rows() {
+        let output = "\
+Account: svc_gmsa$  NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890
+Account: SVC_GMSA$  NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        assert_eq!(
+            parse_gmsa(output, &json!({}), "gmsa_dump_passwords").len(),
+            1
+        );
     }
 }

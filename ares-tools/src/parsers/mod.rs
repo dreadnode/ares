@@ -27,8 +27,8 @@ pub use bloodhound::{
 pub use certipy::{parse_certipy_esc1_chain, parse_certipy_find, ESC_TYPES};
 pub use cracker::parse_cracker_output;
 pub use credential_tools::{
-    parse_adidnsdump, parse_laps, parse_ldap_descriptions, parse_lsassy, parse_netexec_auth,
-    parse_ntds_dit, parse_spray_success,
+    parse_adidnsdump, parse_gmsa, parse_laps, parse_ldap_descriptions, parse_lsassy,
+    parse_netexec_auth, parse_ntds_dit, parse_spray_success,
 };
 pub use delegation::{
     extract_delegation_account, parse_add_computer, parse_delegation, parse_silver_ticket,
@@ -895,6 +895,13 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
         }
         "laps_dump" => {
             set_if_nonempty(&mut discoveries, "credentials", parse_laps(output, params));
+        }
+        "gmsa_dump_passwords" | "gmsa_read_password_bloodyad" => {
+            set_if_nonempty(
+                &mut discoveries,
+                "hashes",
+                parse_gmsa(output, params, tool_name),
+            );
         }
         "netexec_auth_check" => {
             set_if_nonempty(
@@ -2666,6 +2673,44 @@ LDAP  192.168.58.10  389  DC01  Computer:SRV01                    Password:LapsP
     fn parse_tool_output_laps_dump_empty_output() {
         let disc = parse_tool_output("laps_dump", "", &json!({"domain": "contoso.local"}));
         assert!(disc.get("credentials").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_gmsa_dump_passwords_reaches_the_parser() {
+        let output = "\
+LDAP  192.168.58.10  389  DC01  [*] Getting GMSA Passwords
+GMSA  192.168.58.10  389  DC01  Account: svc_gmsa$   NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        let disc = parse_tool_output(
+            "gmsa_dump_passwords",
+            output,
+            &json!({"domain": "contoso.local"}),
+        );
+        let hashes = disc["hashes"].as_array().expect("hashes");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "svc_gmsa$");
+        assert_eq!(hashes[0]["source"], "gmsa_dump_passwords");
+    }
+
+    #[test]
+    fn parse_tool_output_gmsa_read_password_bloodyad_reaches_the_parser() {
+        let output = "msDS-ManagedPassword.NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        let disc = parse_tool_output(
+            "gmsa_read_password_bloodyad",
+            output,
+            &json!({"domain": "contoso.local", "gmsa_account": "svc_gmsa$"}),
+        );
+        let hashes = disc["hashes"].as_array().expect("hashes");
+        assert_eq!(hashes[0]["source"], "gmsa_read_password_bloodyad");
+    }
+
+    #[test]
+    fn parse_tool_output_gmsa_empty_output() {
+        let disc = parse_tool_output(
+            "gmsa_dump_passwords",
+            "",
+            &json!({"domain": "contoso.local"}),
+        );
+        assert!(disc.get("hashes").is_none());
     }
 
     #[test]

@@ -817,6 +817,31 @@ pub async fn ldap_acl_enumeration(args: &Value) -> Result<ToolOutput> {
     build_ldap_acl_enumeration(args)?.execute().await
 }
 
+/// Object classes whose security descriptors carry ACL attack paths.
+///
+/// A gMSA's `objectCategory` is its own schema class, not `computer`, so the
+/// category-based clauses miss it entirely; the extra `objectClass` clause is
+/// what puts `msDS-GroupMSAMembership` — the gMSA reader list — in reach.
+const ACL_ENUM_FILTER: &str = "(|(objectCategory=person)(objectCategory=group)(objectCategory=computer)(objectCategory=groupPolicyContainer)(objectClass=msDS-GroupManagedServiceAccount))";
+
+/// Attributes requested for every object the ACL enumeration returns.
+///
+/// The LAPS expiry attributes are the readable marker for a LAPS-managed
+/// computer; the password attributes beside them are confidential and are
+/// deliberately not requested. A directory without either LAPS generation
+/// installed simply omits them.
+const ACL_ENUM_ATTRIBUTES: &[&str] = &[
+    "sAMAccountName",
+    "objectClass",
+    "objectSid",
+    "nTSecurityDescriptor",
+    "cn",
+    "displayName",
+    "msDS-GroupMSAMembership",
+    "ms-Mcs-AdmPwdExpirationTime",
+    "msLAPS-PasswordExpirationTime",
+];
+
 /// Build the subprocess invocation for [`ldap_acl_enumeration`].
 ///
 /// Exposed so the resolver-side Bug B contract test can verify the
@@ -842,30 +867,15 @@ pub fn build_ldap_acl_enumeration(args: &Value) -> Result<CommandBuilder> {
     if let Some(ccache) = ticket_path {
         return Ok(CommandBuilder::new("ldapsearch")
             .env("KRB5CCNAME", ccache)
-            .env(
-                "KRB5_CONFIG",
-                format!("{ccache}.krb5.conf:/etc/krb5.conf"),
-            )
+            .env("KRB5_CONFIG", format!("{ccache}.krb5.conf:/etc/krb5.conf"))
             .flag_visible("-H", &uri)
             .arg("-Y")
             .arg("GSSAPI")
             .timeout_secs(300)
             .flag("-b", &base_dn)
             .args(["-E", "1.2.840.113556.1.4.801=::MAMCAQQ="])
-            .arg("(|(objectCategory=person)(objectCategory=group)(objectCategory=computer)(objectCategory=groupPolicyContainer))")
-            .args([
-                "sAMAccountName",
-                "objectClass",
-                "objectSid",
-                "nTSecurityDescriptor",
-                // GPO containers carry their identity in `cn` (the
-                // `{GUID}` directory name) and `displayName` (the friendly
-                // name like "Default Domain Policy") — neither has a
-                // sAMAccountName. The parser uses `cn` to construct the
-                // gpo_<right>_<GUID> vuln_id.
-                "cn",
-                "displayName",
-            ]));
+            .arg(ACL_ENUM_FILTER)
+            .args(ACL_ENUM_ATTRIBUTES.iter().copied()));
     }
 
     // If hash is provided, use impacket LDAP for pass-the-hash
@@ -875,6 +885,11 @@ pub fn build_ldap_acl_enumeration(args: &Value) -> Result<CommandBuilder> {
         } else {
             h
         };
+        let attributes = ACL_ENUM_ATTRIBUTES
+            .iter()
+            .map(|a| format!("'{a}'"))
+            .collect::<Vec<_>>()
+            .join(",");
         let ldap_query = format!(
             r#"python3 -c "
 import base64
@@ -883,8 +898,8 @@ conn = ldap_mod.LDAPConnection('ldap://{target}', '{base_dn}', '{target}')
 conn.login('{u}', '', '{domain}', lmhash='', nthash='{nt_hash}')
 sc = ldap_mod.SimplePagedResultsControl(size=1000)
 resp = conn.search(
-    searchFilter='(|(objectCategory=person)(objectCategory=group)(objectCategory=computer)(objectCategory=groupPolicyContainer))',
-    attributes=['sAMAccountName','objectClass','objectSid','nTSecurityDescriptor','cn','displayName'],
+    searchFilter='{filter}',
+    attributes=[{attributes}],
     searchControls=[sc],
     sizeLimit=0,
 )
@@ -897,12 +912,9 @@ for item in resp:
         for attr in item['attributes']:
             name = str(attr['type'])
             for val in attr['vals']:
-                if name == 'nTSecurityDescriptor':
+                if name in ('nTSecurityDescriptor', 'msDS-GroupMSAMembership', 'objectSid'):
                     b = bytes(val)
-                    print(f'nTSecurityDescriptor:: {{base64.b64encode(b).decode()}}')
-                elif name == 'objectSid':
-                    b = bytes(val)
-                    print(f'objectSid:: {{base64.b64encode(b).decode()}}')
+                    print(f'{{name}}:: {{base64.b64encode(b).decode()}}')
                 else:
                     print(f'{{name}}: {{val}}')
         print()
@@ -915,6 +927,8 @@ for item in resp:
             u = u,
             nt_hash = nt_hash,
             base_dn = base_dn,
+            filter = ACL_ENUM_FILTER,
+            attributes = attributes,
         );
         return Ok(CommandBuilder::new("bash")
             .args(["-c", &ldap_query])
@@ -939,15 +953,8 @@ for item in resp:
         // Request DACL only via SD_FLAGS control (0x04 = DACL)
         // BER: SEQUENCE { INTEGER 4 } = 30 03 02 01 04 → base64 MAMCAQQ=
         .args(["-E", "1.2.840.113556.1.4.801=::MAMCAQQ="])
-        .arg("(|(objectCategory=person)(objectCategory=group)(objectCategory=computer)(objectCategory=groupPolicyContainer))")
-        .args([
-            "sAMAccountName",
-            "objectClass",
-            "objectSid",
-            "nTSecurityDescriptor",
-            "cn",
-            "displayName",
-        ]))
+        .arg(ACL_ENUM_FILTER)
+        .args(ACL_ENUM_ATTRIBUTES.iter().copied()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1538,6 +1545,61 @@ mod tests {
             .position(|a| a == "-w")
             .expect("password must reach -w for ldap_acl_enumeration");
         assert_eq!(args_vec.get(w_idx + 1).map(String::as_str), Some("P@ss"));
+    }
+
+    #[test]
+    fn ldap_acl_enumeration_requests_the_gmsa_and_laps_attributes() {
+        for args in [
+            json!({
+                "target": "192.168.58.10",
+                "domain": "contoso.local",
+                "username": "alice",
+                "password": "P@ssw0rd!",
+            }),
+            json!({
+                "target": "192.168.58.10",
+                "domain": "contoso.local",
+                "ticket_path": "/tmp/ares-tickets/z.ccache",
+            }),
+        ] {
+            let cmd = super::build_ldap_acl_enumeration(&args).unwrap();
+            let args_vec = cmd.args_for_test();
+            for attr in [
+                "msDS-GroupMSAMembership",
+                "ms-Mcs-AdmPwdExpirationTime",
+                "msLAPS-PasswordExpirationTime",
+            ] {
+                assert!(
+                    args_vec.iter().any(|a| a == attr),
+                    "{attr} must be requested, got {args_vec:?}"
+                );
+            }
+            assert!(
+                args_vec
+                    .iter()
+                    .any(|a| a.contains("objectClass=msDS-GroupManagedServiceAccount")),
+                "gMSA objects must be in the search filter, got {args_vec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ldap_acl_enumeration_hash_branch_carries_the_same_filter_and_attributes() {
+        let args = json!({
+            "target": "192.168.58.10",
+            "domain": "contoso.local",
+            "username": "alice",
+            "hash": "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890",
+        });
+        let cmd = super::build_ldap_acl_enumeration(&args).unwrap();
+        let script = cmd.args_for_test().join(" ");
+        assert!(script.contains("objectClass=msDS-GroupManagedServiceAccount"));
+        assert!(script.contains("'msDS-GroupMSAMembership'"));
+        assert!(script.contains("'ms-Mcs-AdmPwdExpirationTime'"));
+        assert!(
+            script.contains("'msDS-GroupMSAMembership', 'objectSid'"),
+            "the SD-syntax attributes must be base64-encoded, not printed raw"
+        );
     }
 
     #[test]

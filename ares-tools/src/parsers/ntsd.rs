@@ -51,6 +51,38 @@ pub(super) fn is_unactionable_acl_source(source_name: &str) -> bool {
     )
 }
 
+/// Lowercased `objectClass` of a group Managed Service Account.
+const GMSA_OBJECT_CLASS: &str = "msds-groupmanagedserviceaccount";
+
+/// Password-expiry attributes, legacy LAPS then Windows LAPS. Both are
+/// ordinary readable attributes, unlike the password attributes they sit
+/// beside, so their presence is a cheap "this computer is LAPS-managed"
+/// signal that needs no read access to the secret itself.
+const LAPS_EXPIRY_ATTRIBUTES: &[&str] = &[
+    "ms-mcs-admpwdexpirationtime",
+    "mslaps-passwordexpirationtime",
+];
+
+/// Rights that confer a LAPS password read on a LAPS-managed computer.
+/// Mirrors BloodHound's own `ReadLAPSPassword` rule: full control, or the
+/// unrestricted control-access right that covers the confidential attribute.
+const LAPS_READ_CONFERRING_RIGHTS: &[&str] = &["genericall", "allextendedrights"];
+
+/// True when an LDIF line carries a LAPS password-expiry attribute with a
+/// value. Matched on the attribute name only, case-insensitively, because
+/// the two LAPS generations disagree on capitalisation and the impacket
+/// branch echoes whatever the server returned.
+fn is_laps_expiry_attribute(line: &str) -> bool {
+    let Some((name, value)) = line.split_once(':') else {
+        return false;
+    };
+    if value.trim_start_matches(':').trim().is_empty() {
+        return false;
+    }
+    let name = name.trim().to_lowercase();
+    LAPS_EXPIRY_ATTRIBUTES.contains(&name.as_str())
+}
+
 // ── Access mask flags ──────────────────────────────────────────────────────
 
 const GENERIC_ALL: u32 = 0x10000000;
@@ -284,10 +316,10 @@ fn parse_ace(data: &[u8], offset: usize) -> Option<(ParsedAce, usize)> {
     }
 }
 
-/// Parse a SECURITY_DESCRIPTOR in self-relative format and extract DACL ACEs.
+/// Walk the DACL of a self-relative SECURITY_DESCRIPTOR and return its ACEs.
 ///
-/// Returns a list of (trustee_sid, vuln_type) pairs for dangerous ACEs.
-pub fn parse_security_descriptor(data: &[u8]) -> Vec<(String, String)> {
+/// Empty when the blob is truncated, not self-relative, or carries no DACL.
+fn dacl_aces(data: &[u8]) -> Vec<ParsedAce> {
     if data.len() < 20 {
         return Vec::new();
     }
@@ -318,7 +350,7 @@ pub fn parse_security_descriptor(data: &[u8]) -> Vec<(String, String)> {
 
     let ace_count = read_u16_le(data, dacl_offset + 4).unwrap_or(0) as usize;
 
-    let mut results = Vec::new();
+    let mut aces = Vec::new();
     let mut ace_offset = dacl_offset + 8; // skip ACL header
 
     for _ in 0..ace_count {
@@ -327,18 +359,51 @@ pub fn parse_security_descriptor(data: &[u8]) -> Vec<(String, String)> {
         }
         match parse_ace(data, ace_offset) {
             Some((ace, size)) => {
-                if !ace.trustee_sid.is_empty() {
-                    for vuln_type in classify_ace(&ace) {
-                        results.push((ace.trustee_sid.clone(), vuln_type.to_string()));
-                    }
-                }
+                aces.push(ace);
                 ace_offset += size;
             }
             None => break,
         }
     }
 
+    aces
+}
+
+/// Parse a SECURITY_DESCRIPTOR in self-relative format and extract DACL ACEs.
+///
+/// Returns a list of (trustee_sid, vuln_type) pairs for dangerous ACEs.
+pub fn parse_security_descriptor(data: &[u8]) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    for ace in dacl_aces(data) {
+        if ace.trustee_sid.is_empty() {
+            continue;
+        }
+        for vuln_type in classify_ace(&ace) {
+            results.push((ace.trustee_sid.clone(), vuln_type.to_string()));
+        }
+    }
     results
+}
+
+/// Every distinct trustee granted anything by a SECURITY_DESCRIPTOR's DACL.
+///
+/// `msDS-GroupMSAMembership` is an access-control list whose *entire* meaning
+/// is membership: a trustee that appears in it may read the gMSA's managed
+/// password, whatever the access mask says. [`parse_security_descriptor`]
+/// answers a different question — which ACEs are an abuse primitive — and
+/// discards ACEs that grant only a read, which is exactly the shape this
+/// attribute normally carries.
+pub fn parse_sd_allowed_trustees(data: &[u8]) -> Vec<String> {
+    let mut trustees: Vec<String> = Vec::new();
+    for ace in dacl_aces(data) {
+        if ace.trustee_sid.is_empty() || ace.access_mask == 0 {
+            continue;
+        }
+        if !trustees.iter().any(|s| s == &ace.trustee_sid) {
+            trustees.push(ace.trustee_sid);
+        }
+    }
+    trustees
 }
 
 /// Parse ldapsearch output containing base64-encoded nTSecurityDescriptor values.
@@ -364,11 +429,16 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
     // Build a SID → sAMAccountName map from the output itself
     let mut sid_to_name: HashMap<String, String> = HashMap::new();
     let mut vulns = Vec::new();
+    let mut emitted_reader_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // First pass: collect all objects with their sAMAccountName and objectSid
+    #[derive(Default)]
     struct LdapObject {
         sam_account_name: String,
-        object_class: String, // user, group, computer, grouppolicycontainer
+        /// `user`, `group`, `computer`, `grouppolicycontainer`, or the gMSA
+        /// class — the most specific one the record carries.
+        object_class: String,
         ntsd_base64: String,
         object_sid: String,
         /// `cn` attribute — for GPO containers this is the `{GUID}` form
@@ -379,18 +449,32 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
         /// name ("Default Domain Policy"). Used in the vuln description
         /// alongside the GUID cn.
         display_name: String,
+        /// `msDS-GroupMSAMembership` — the security descriptor naming the
+        /// principals allowed to retrieve this gMSA's managed password.
+        gmsa_membership_base64: String,
+        /// True when a LAPS password-expiry attribute is present, which is
+        /// how a LAPS-managed computer is told apart from an unmanaged one
+        /// without reading the confidential password attribute itself.
+        laps_managed: bool,
+    }
+
+    /// Which base64 attribute a continuation line belongs to.
+    #[derive(Clone, Copy, PartialEq)]
+    enum B64Field {
+        Ntsd,
+        GmsaMembership,
+    }
+
+    fn flush_b64(obj: &mut LdapObject, field: B64Field, buf: &mut String) {
+        match field {
+            B64Field::Ntsd => obj.ntsd_base64 = std::mem::take(buf),
+            B64Field::GmsaMembership => obj.gmsa_membership_base64 = std::mem::take(buf),
+        }
     }
 
     let mut objects: Vec<LdapObject> = Vec::new();
-    let mut current = LdapObject {
-        sam_account_name: String::new(),
-        object_class: String::new(),
-        ntsd_base64: String::new(),
-        object_sid: String::new(),
-        cn: String::new(),
-        display_name: String::new(),
-    };
-    let mut in_ntsd = false;
+    let mut current = LdapObject::default();
+    let mut pending_b64: Option<B64Field> = None;
     let mut ntsd_buf = String::new();
 
     // An "identifiable" object is one we can flush at a record boundary: it
@@ -406,43 +490,39 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
 
         if line.starts_with("dn: ") || (line.is_empty() && has_identity(&current)) {
             // Flush current
-            if in_ntsd {
-                current.ntsd_base64 = ntsd_buf.clone();
-                in_ntsd = false;
-                ntsd_buf.clear();
+            if let Some(field) = pending_b64.take() {
+                flush_b64(&mut current, field, &mut ntsd_buf);
             }
             if has_identity(&current) {
                 objects.push(current);
             }
-            current = LdapObject {
-                sam_account_name: String::new(),
-                object_class: String::new(),
-                ntsd_base64: String::new(),
-                object_sid: String::new(),
-                cn: String::new(),
-                display_name: String::new(),
-            };
+            current = LdapObject::default();
             continue;
         }
 
         // Handle base64 continuation lines (start with space)
-        if in_ntsd {
+        if let Some(field) = pending_b64 {
             if line.starts_with(' ') {
                 ntsd_buf.push_str(line.trim());
                 continue;
             } else {
-                current.ntsd_base64 = ntsd_buf.clone();
-                in_ntsd = false;
-                ntsd_buf.clear();
+                flush_b64(&mut current, field, &mut ntsd_buf);
+                pending_b64 = None;
             }
         }
 
-        if let Some(val) = line.strip_prefix("sAMAccountName: ") {
+        if is_laps_expiry_attribute(line) {
+            current.laps_managed = true;
+        } else if let Some(val) = line.strip_prefix("sAMAccountName: ") {
             current.sam_account_name = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("objectClass: ") {
             let val = val.trim().to_lowercase();
             // Keep the most specific class.
-            if val == "user" || val == "computer" || val == "group" || val == "grouppolicycontainer"
+            if val == "user"
+                || val == "computer"
+                || val == "group"
+                || val == "grouppolicycontainer"
+                || val == GMSA_OBJECT_CLASS
             {
                 current.object_class = val;
             }
@@ -462,15 +542,20 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
             current.object_sid = val.trim().to_string();
         } else if let Some(val) = line.strip_prefix("nTSecurityDescriptor:: ") {
             ntsd_buf = val.trim().to_string();
-            in_ntsd = true;
+            pending_b64 = Some(B64Field::Ntsd);
         } else if let Some(val) = line.strip_prefix("nTSecurityDescriptor: ") {
             // Non-base64 (shouldn't happen but handle it)
             current.ntsd_base64 = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("msDS-GroupMSAMembership:: ") {
+            ntsd_buf = val.trim().to_string();
+            pending_b64 = Some(B64Field::GmsaMembership);
+        } else if let Some(val) = line.strip_prefix("msDS-GroupMSAMembership: ") {
+            current.gmsa_membership_base64 = val.trim().to_string();
         }
     }
     // Flush last object
-    if in_ntsd {
-        current.ntsd_base64 = ntsd_buf;
+    if let Some(field) = pending_b64.take() {
+        flush_b64(&mut current, field, &mut ntsd_buf);
     }
     if has_identity(&current) {
         objects.push(current);
@@ -530,8 +615,42 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
                 "group" => "Group",
                 "computer" => "Computer",
                 "grouppolicycontainer" => "GPO",
+                GMSA_OBJECT_CLASS => "gMSA",
                 _ => "Unknown",
             };
+
+            if obj.laps_managed && LAPS_READ_CONFERRING_RIGHTS.contains(&vuln_type.as_str()) {
+                let vuln_id = format!(
+                    "laps_reader_{}_{}",
+                    source_name.to_lowercase().replace(' ', "_"),
+                    target_name.to_lowercase().replace('$', "")
+                );
+                if emitted_reader_ids.insert(vuln_id.clone()) {
+                    vulns.push(json!({
+                        "vuln_id": vuln_id,
+                        "vuln_type": "laps_reader",
+                        "source": source_name,
+                        "target": target_name,
+                        "target_type": target_type,
+                        "target_ip": target_ip,
+                        "domain": domain,
+                        "source_domain": domain,
+                        "details": {
+                            "trustee_sid": trustee_sid,
+                            "source": source_name,
+                            "reader": source_name,
+                            "target": target_name,
+                            "target_computer": target_name,
+                            "target_type": target_type,
+                            "domain": domain,
+                            "conferring_right": vuln_type,
+                            "description": format!(
+                                "{source_name} can read the LAPS password of {target_name} via {vuln_type}"
+                            ),
+                        },
+                    }));
+                }
+            }
 
             // GPO targets get a dedicated `gpo_<right>` vuln_type so the
             // auto_gpo_abuse chain picks them up. Other ACL targets keep
@@ -619,6 +738,59 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
                 "domain": domain,
                 "source_domain": domain,
                 "details": Value::Object(details_map),
+            }));
+        }
+    }
+
+    for obj in &objects {
+        if obj.gmsa_membership_base64.is_empty() || obj.sam_account_name.is_empty() {
+            continue;
+        }
+        let Ok(sd_bytes) = base64_decode(&obj.gmsa_membership_base64) else {
+            continue;
+        };
+        let target_name = obj.sam_account_name.as_str();
+        for trustee_sid in parse_sd_allowed_trustees(&sd_bytes) {
+            let source_name = sid_to_name
+                .get(&trustee_sid)
+                .map(|s| s.as_str())
+                .or_else(|| well_known_sid(&trustee_sid))
+                .unwrap_or(trustee_sid.as_str())
+                .to_string();
+            if is_unactionable_acl_source(&source_name)
+                || source_name.eq_ignore_ascii_case(target_name)
+            {
+                continue;
+            }
+            let vuln_id = format!(
+                "gmsa_reader_{}_{}",
+                source_name.to_lowercase().replace(' ', "_"),
+                target_name.to_lowercase().replace('$', "")
+            );
+            if !emitted_reader_ids.insert(vuln_id.clone()) {
+                continue;
+            }
+            vulns.push(json!({
+                "vuln_id": vuln_id,
+                "vuln_type": "gmsa_reader",
+                "source": source_name,
+                "target": target_name,
+                "target_type": "gMSA",
+                "target_ip": target_ip,
+                "domain": domain,
+                "source_domain": domain,
+                "details": {
+                    "trustee_sid": trustee_sid,
+                    "source": source_name,
+                    "reader": source_name,
+                    "target": target_name,
+                    "gmsa_account": target_name,
+                    "target_type": "gMSA",
+                    "domain": domain,
+                    "description": format!(
+                        "{source_name} is in msDS-GroupMSAMembership of {target_name} and can read its managed password"
+                    ),
+                },
             }));
         }
     }
@@ -1377,5 +1549,248 @@ nTSecurityDescriptor:: {b64}
             .collect();
         assert!(types.contains(&"writedacl"));
         assert!(types.contains(&"writeowner"));
+    }
+
+    fn sid_bytes(rid: u32) -> Vec<u8> {
+        let mut b = vec![0x01u8, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05];
+        b.extend_from_slice(&21u32.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&2u32.to_le_bytes());
+        b.extend_from_slice(&rid.to_le_bytes());
+        b
+    }
+
+    fn sd_with_ace(mask: u32, sid: &[u8]) -> Vec<u8> {
+        let mut sd: Vec<u8> = vec![0u8; 20];
+        sd[0] = 1;
+        sd[2] = 0x04;
+        sd[3] = 0x80;
+        sd[16] = 20;
+
+        let mut ace = vec![0x00u8, 0x00];
+        let ace_size = (4u16 + 4 + sid.len() as u16).to_le_bytes();
+        ace.extend_from_slice(&ace_size);
+        ace.extend_from_slice(&mask.to_le_bytes());
+        ace.extend_from_slice(sid);
+
+        let acl_size = (8u16 + ace.len() as u16).to_le_bytes();
+        let mut dacl = vec![2u8, 0];
+        dacl.extend_from_slice(&acl_size);
+        dacl.extend_from_slice(&1u16.to_le_bytes());
+        dacl.extend_from_slice(&0u16.to_le_bytes());
+        dacl.extend(ace);
+
+        sd.extend(dacl);
+        sd
+    }
+
+    fn encode_sd(sd: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(sd)
+    }
+
+    const READ_PROPERTY_MASK: u32 = 0x00000010;
+
+    #[test]
+    fn parse_sd_allowed_trustees_keeps_read_only_ace_that_classify_drops() {
+        let sd = sd_with_ace(READ_PROPERTY_MASK, &sid_bytes(2000));
+        assert!(
+            parse_security_descriptor(&sd).is_empty(),
+            "a bare read grants no abuse primitive"
+        );
+        assert_eq!(
+            parse_sd_allowed_trustees(&sd),
+            vec!["S-1-5-21-1-2-2000".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_sd_allowed_trustees_skips_zero_mask_and_dedupes() {
+        assert!(parse_sd_allowed_trustees(&sd_with_ace(0, &sid_bytes(2000))).is_empty());
+        let sd = sd_with_ace(READ_PROPERTY_MASK, &sid_bytes(2000));
+        assert_eq!(parse_sd_allowed_trustees(&sd).len(), 1);
+    }
+
+    #[test]
+    fn is_laps_expiry_attribute_matches_both_laps_generations() {
+        assert!(is_laps_expiry_attribute(
+            "ms-Mcs-AdmPwdExpirationTime: 133700000000000000"
+        ));
+        assert!(is_laps_expiry_attribute(
+            "msLAPS-PasswordExpirationTime: 133700000000000000"
+        ));
+    }
+
+    #[test]
+    fn is_laps_expiry_attribute_rejects_valueless_and_unrelated_lines() {
+        assert!(!is_laps_expiry_attribute("ms-Mcs-AdmPwdExpirationTime:"));
+        assert!(!is_laps_expiry_attribute("sAMAccountName: ws01$"));
+        assert!(!is_laps_expiry_attribute("ms-Mcs-AdmPwd: P@ssw0rd!"));
+        assert!(!is_laps_expiry_attribute("no colon here"));
+    }
+
+    #[test]
+    fn parse_acl_enumeration_emits_gmsa_reader_from_group_msa_membership() {
+        let membership = encode_sd(&sd_with_ace(READ_PROPERTY_MASK, &sid_bytes(2000)));
+        let output = format!(
+            "\
+dn: CN=web01,DC=contoso,DC=local
+sAMAccountName: WEB01$
+objectClass: computer
+objectSid: S-1-5-21-1-2-2000
+
+dn: CN=svc_gmsa,CN=Managed Service Accounts,DC=contoso,DC=local
+sAMAccountName: svc_gmsa$
+objectClass: computer
+objectClass: msDS-GroupManagedServiceAccount
+objectSid: S-1-5-21-1-2-3000
+msDS-GroupMSAMembership:: {membership}
+"
+        );
+        let vulns = parse_acl_enumeration(
+            &output,
+            &serde_json::json!({"domain": "contoso.local", "target": "192.168.58.10"}),
+        );
+        assert_eq!(
+            vulns.len(),
+            1,
+            "expected one gmsa_reader edge, got {vulns:?}"
+        );
+        let v = &vulns[0];
+        assert_eq!(v["vuln_type"], "gmsa_reader");
+        assert_eq!(v["source"], "WEB01$");
+        assert_eq!(v["target"], "svc_gmsa$");
+        assert_eq!(v["target_type"], "gMSA");
+        assert_eq!(v["details"]["gmsa_account"], "svc_gmsa$");
+        assert_eq!(v["details"]["source"], "WEB01$");
+        assert_eq!(v["details"]["domain"], "contoso.local");
+        assert_eq!(v["target_ip"], "192.168.58.10");
+    }
+
+    #[test]
+    fn parse_acl_enumeration_gmsa_reader_skips_unactionable_trustee() {
+        let system_sid = [
+            0x01u8, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x12, 0x00, 0x00, 0x00,
+        ];
+        let membership = encode_sd(&sd_with_ace(READ_PROPERTY_MASK, &system_sid));
+        let output = format!(
+            "\
+dn: CN=svc_gmsa,CN=Managed Service Accounts,DC=contoso,DC=local
+sAMAccountName: svc_gmsa$
+objectClass: msDS-GroupManagedServiceAccount
+objectSid: S-1-5-21-1-2-3000
+msDS-GroupMSAMembership:: {membership}
+"
+        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
+        assert!(
+            vulns.is_empty(),
+            "SYSTEM must not become a reader: {vulns:?}"
+        );
+    }
+
+    #[test]
+    fn parse_acl_enumeration_emits_laps_reader_for_laps_managed_computer() {
+        let output = format!(
+            "\
+dn: CN=alice,DC=contoso,DC=local
+sAMAccountName: alice
+objectClass: user
+objectSid: S-1-5-21-1-2-1001
+
+dn: CN=ws01,DC=contoso,DC=local
+sAMAccountName: ws01$
+objectClass: computer
+objectSid: S-1-5-21-1-2-2000
+ms-Mcs-AdmPwdExpirationTime: 133700000000000000
+nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
+"
+        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
+        let types: Vec<_> = vulns
+            .iter()
+            .map(|v| v["vuln_type"].as_str().unwrap_or(""))
+            .collect();
+        assert!(types.contains(&"genericall"), "got {vulns:?}");
+        assert!(types.contains(&"laps_reader"), "got {vulns:?}");
+        let laps = vulns
+            .iter()
+            .find(|v| v["vuln_type"] == "laps_reader")
+            .expect("laps_reader edge");
+        assert_eq!(laps["source"], "alice");
+        assert_eq!(laps["target"], "ws01$");
+        assert_eq!(laps["details"]["target_computer"], "ws01$");
+        assert_eq!(laps["details"]["conferring_right"], "genericall");
+        assert_eq!(laps["details"]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn parse_acl_enumeration_emits_laps_reader_for_windows_laps_attribute() {
+        let output = format!(
+            "\
+dn: CN=alice,DC=contoso,DC=local
+sAMAccountName: alice
+objectClass: user
+objectSid: S-1-5-21-1-2-1001
+
+dn: CN=ws01,DC=contoso,DC=local
+sAMAccountName: ws01$
+objectClass: computer
+objectSid: S-1-5-21-1-2-2000
+msLAPS-PasswordExpirationTime: 133700000000000000
+nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
+"
+        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
+        assert!(vulns.iter().any(|v| v["vuln_type"] == "laps_reader"));
+    }
+
+    #[test]
+    fn parse_acl_enumeration_no_laps_reader_without_expiry_attribute() {
+        let output = format!(
+            "\
+dn: CN=alice,DC=contoso,DC=local
+sAMAccountName: alice
+objectClass: user
+objectSid: S-1-5-21-1-2-1001
+
+dn: CN=ws01,DC=contoso,DC=local
+sAMAccountName: ws01$
+objectClass: computer
+objectSid: S-1-5-21-1-2-2000
+nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
+"
+        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
+        assert!(
+            !vulns.iter().any(|v| v["vuln_type"] == "laps_reader"),
+            "an unmanaged computer must not yield a LAPS reader: {vulns:?}"
+        );
+    }
+
+    #[test]
+    fn parse_acl_enumeration_no_laps_reader_for_non_conferring_right() {
+        let sd = encode_sd(&sd_with_ace(WRITE_DACL, &sid_bytes(1001)));
+        let output = format!(
+            "\
+dn: CN=alice,DC=contoso,DC=local
+sAMAccountName: alice
+objectClass: user
+objectSid: S-1-5-21-1-2-1001
+
+dn: CN=ws01,DC=contoso,DC=local
+sAMAccountName: ws01$
+objectClass: computer
+objectSid: S-1-5-21-1-2-2000
+ms-Mcs-AdmPwdExpirationTime: 133700000000000000
+nTSecurityDescriptor:: {sd}
+"
+        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
+        assert!(vulns.iter().any(|v| v["vuln_type"] == "writedacl"));
+        assert!(
+            !vulns.iter().any(|v| v["vuln_type"] == "laps_reader"),
+            "writedacl does not confer a LAPS read: {vulns:?}"
+        );
     }
 }

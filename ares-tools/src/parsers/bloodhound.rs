@@ -35,11 +35,16 @@ const MAX_EMITTED_EDGES: usize = 500;
 const ACE_BEARING_TYPES: &[&str] = &["users", "groups", "computers", "domains", "gpos"];
 
 /// Map a BloodHound `RightName` (optionally refined by the v3 `AceType`) onto
-/// the ACL vocabulary `auto_dacl_abuse` matches on.
+/// the ACL vocabulary `auto_dacl_abuse` matches on, plus the two reader edges
+/// that drive their own automation.
 ///
-/// Returns `None` for rights that are real but not an ACL-abuse primitive
-/// (`Contains`, `GetChanges`, `ReadLAPSPassword`, …) — those have their own
-/// automation and must not be routed through the ACL driver.
+/// `ReadLAPSPassword` and `ReadGMSAPassword` map to `laps_reader` and
+/// `gmsa_reader`, which `is_acl_vuln_type` deliberately does not match: they
+/// reach `auto_laps_extraction` and `auto_gmsa_extraction` instead of the ACL
+/// driver, which has no way to abuse either right.
+///
+/// Returns `None` for rights that are real but drive nothing (`Contains`,
+/// `GetChanges`, …).
 fn classify_bloodhound_right(right_name: &str, ace_type: &str) -> Option<&'static str> {
     let refined = if right_name.eq_ignore_ascii_case("ExtendedRight") && !ace_type.is_empty() {
         ace_type
@@ -56,23 +61,30 @@ fn classify_bloodhound_right(right_name: &str, ace_type: &str) -> Option<&'stati
         "addmember" | "addmembers" => Some("addmember"),
         "addself" | "self-membership" => Some("addself"),
         "writespn" | "writeproperty" | "addkeycredentiallink" => Some("writeproperty"),
+        "readlapspassword" => Some("laps_reader"),
+        "readgmsapassword" => Some("gmsa_reader"),
         _ => None,
     }
 }
 
 /// Ordering used when the edge count exceeds [`MAX_EMITTED_EDGES`]. Lower
 /// sorts first.
+///
+/// The two reader edges outrank everything: a forest yields a handful of them
+/// against tens of thousands of `genericall`s, and the alphabetical tie-break
+/// would otherwise drop them off the end of the cut.
 fn right_severity(right: &str) -> u8 {
     match right {
-        "genericall" => 0,
-        "writedacl" => 1,
-        "writeowner" => 2,
-        "forcechangepassword" => 3,
-        "genericwrite" => 4,
-        "addmember" => 5,
-        "addself" => 6,
-        "allextendedrights" => 7,
-        _ => 8,
+        "laps_reader" | "gmsa_reader" => 0,
+        "genericall" => 1,
+        "writedacl" => 2,
+        "writeowner" => 3,
+        "forcechangepassword" => 4,
+        "genericwrite" => 5,
+        "addmember" => 6,
+        "addself" => 7,
+        "allextendedrights" => 8,
+        _ => 9,
     }
 }
 
@@ -645,7 +657,7 @@ mod tests {
                     user(
                         BOB,
                         "bob",
-                        json!([ace(ALICE, "ReadLAPSPassword"), ace(ALICE, "Contains")]),
+                        json!([ace(ALICE, "GetChanges"), ace(ALICE, "Contains")]),
                     ),
                 ],
             ),
@@ -913,5 +925,60 @@ mod tests {
     fn collection_with_unreadable_directory_returns_nothing() {
         let output = format!("{}/nonexistent/ares-bh\n", BLOODHOUND_OUTPUT_DIR_MARKER);
         assert!(parse_bloodhound_collection(&output, &params()).is_empty());
+    }
+
+    #[test]
+    fn read_laps_password_maps_to_the_laps_reader_vuln_type() {
+        assert_eq!(
+            classify_bloodhound_right("ReadLAPSPassword", ""),
+            Some("laps_reader")
+        );
+        assert_eq!(
+            classify_bloodhound_right("ExtendedRight", "ReadLAPSPassword"),
+            Some("laps_reader")
+        );
+    }
+
+    #[test]
+    fn read_gmsa_password_maps_to_the_gmsa_reader_vuln_type() {
+        assert_eq!(
+            classify_bloodhound_right("ReadGMSAPassword", ""),
+            Some("gmsa_reader")
+        );
+        assert_eq!(
+            classify_bloodhound_right("ExtendedRight", "ReadGMSAPassword"),
+            Some("gmsa_reader")
+        );
+    }
+
+    #[test]
+    fn reader_rights_outrank_every_acl_right_for_truncation() {
+        assert!(right_severity("laps_reader") < right_severity("genericall"));
+        assert!(right_severity("gmsa_reader") < right_severity("genericall"));
+        assert!(right_severity("genericall") < right_severity("writedacl"));
+        assert!(right_severity("allextendedrights") < right_severity("unmapped"));
+    }
+
+    #[test]
+    fn reader_edge_carries_source_target_and_domain_for_the_automations() {
+        let files = vec![(
+            "users.json".to_string(),
+            doc(
+                "users",
+                5,
+                vec![
+                    user(ALICE, "alice", json!([])),
+                    user(BOB, "bob", json!([ace(ALICE, "ReadLAPSPassword")])),
+                ],
+            ),
+        )];
+        let vulns = parse_bloodhound_documents(&files, &params());
+        let laps = vulns
+            .iter()
+            .find(|v| v["vuln_type"] == "laps_reader")
+            .expect("laps_reader edge");
+        assert_eq!(laps["details"]["source"], "alice");
+        assert_eq!(laps["details"]["target"], "bob");
+        assert_eq!(laps["details"]["domain"], "contoso.local");
     }
 }
