@@ -71,6 +71,8 @@ pub(crate) struct VulnCounts {
     pub exploitable_exploited: usize,
     pub findings: usize,
     pub findings_exploited: usize,
+    pub not_exploitable_by_construction: usize,
+    pub not_exploitable_by_construction_exploited: usize,
     pub attributed_credits: usize,
     pub unattributed_credits: usize,
 }
@@ -81,13 +83,18 @@ pub(crate) fn vulnerability_counts(state: &SharedRedTeamState) -> VulnCounts {
         exploitable_exploited: 0,
         findings: 0,
         findings_exploited: 0,
+        not_exploitable_by_construction: 0,
+        not_exploitable_by_construction_exploited: 0,
         attributed_credits: 0,
         unattributed_credits: 0,
     };
 
     for (id, vuln) in &state.discovered_vulnerabilities {
         let exploited = state.exploited_vulnerabilities.contains(id);
-        if display::is_exploitable(vuln) {
+        if display::is_not_exploitable_by_construction(vuln) {
+            counts.not_exploitable_by_construction += 1;
+            counts.not_exploitable_by_construction_exploited += usize::from(exploited);
+        } else if display::is_exploitable(vuln) {
             counts.exploitable += 1;
             counts.exploitable_exploited += usize::from(exploited);
         } else {
@@ -175,9 +182,13 @@ mod tests {
     use ares_core::models::{Credential, Hash, VulnerabilityInfo};
 
     fn mk_vuln(id: &str, priority: i32) -> VulnerabilityInfo {
+        mk_vuln_typed(id, priority, "adcs_esc8")
+    }
+
+    fn mk_vuln_typed(id: &str, priority: i32, vuln_type: &str) -> VulnerabilityInfo {
         VulnerabilityInfo {
             vuln_id: id.to_string(),
-            vuln_type: "adcs_esc8".to_string(),
+            vuln_type: vuln_type.to_string(),
             target: "192.168.58.10".to_string(),
             discovered_by: "recon-1".to_string(),
             discovered_at: chrono::Utc::now(),
@@ -198,6 +209,61 @@ mod tests {
             state.exploited_vulnerabilities.insert((*id).to_string());
         }
         state
+    }
+
+    #[test]
+    fn seimpersonate_routes_to_not_exploitable_by_construction_bucket() {
+        let mut state = SharedRedTeamState::new("op-test".to_string());
+        state
+            .discovered_vulnerabilities
+            .insert("v-exp".to_string(), mk_vuln("v-exp", 1));
+        state.discovered_vulnerabilities.insert(
+            "v-sei-web01".to_string(),
+            mk_vuln_typed("v-sei-web01", 2, "seimpersonate"),
+        );
+        state
+            .discovered_vulnerabilities
+            .insert("v-find".to_string(), mk_vuln("v-find", 5));
+
+        let counts = vulnerability_counts(&state);
+
+        assert_eq!(counts.exploitable, 1);
+        assert_eq!(counts.findings, 1);
+        assert_eq!(counts.not_exploitable_by_construction, 1);
+        assert_eq!(counts.not_exploitable_by_construction_exploited, 0);
+    }
+
+    #[test]
+    fn not_exploitable_by_construction_flags_leaked_exploit_credit() {
+        let mut state = SharedRedTeamState::new("op-test".to_string());
+        state.discovered_vulnerabilities.insert(
+            "v-sei-web01".to_string(),
+            mk_vuln_typed("v-sei-web01", 2, "seimpersonate"),
+        );
+        state
+            .exploited_vulnerabilities
+            .insert("v-sei-web01".to_string());
+
+        let counts = vulnerability_counts(&state);
+
+        assert_eq!(counts.not_exploitable_by_construction, 1);
+        assert_eq!(counts.not_exploitable_by_construction_exploited, 1);
+        assert_eq!(counts.exploitable_exploited, 0);
+    }
+
+    #[test]
+    fn vulnerability_counts_ignores_seimpersonate_priority_in_exploitable_count() {
+        let mut state = SharedRedTeamState::new("op-test".to_string());
+        state.discovered_vulnerabilities.insert(
+            "v-sei-web01".to_string(),
+            mk_vuln_typed("v-sei-web01", 1, "seimpersonate"),
+        );
+
+        let counts = vulnerability_counts(&state);
+
+        assert_eq!(counts.exploitable, 0);
+        assert_eq!(counts.findings, 0);
+        assert_eq!(counts.not_exploitable_by_construction, 1);
     }
 
     #[test]

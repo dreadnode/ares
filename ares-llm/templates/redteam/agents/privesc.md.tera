@@ -396,14 +396,16 @@ Scope the SPN to what you actually want: `cifs/<host>` for SMB shares,
 
 ## Local Privilege Escalation
 
-When you have a shell but need SYSTEM (e.g., SeImpersonatePrivilege):
-
 ### Potato Attacks Are NOT Available
-This harness is a Linux-side remote-protocol orchestrator. It has no primitive
-for staging or running a binary on a Windows target, so the potato family
-(GodPotato, PrintSpoofer, SweetPotato) and every other on-target executable
-(winPEAS, Seatbelt, SharpUp, PowerUp, RunasCs) CANNOT be used. Do not attempt
-them and do not report SYSTEM on the strength of an observed privilege.
+This harness is a Linux-side remote-protocol orchestrator. Every execution
+primitive it has — `psexec_kerberos`, `evil_winrm`, `mssql_impersonate` with
+`xp_cmdshell` — needs administrative (or MSSQL sysadmin) rights *before* it will
+run anything, so none of them is an entry point for a local privilege
+escalation. There is no way to stage and run an arbitrary binary as an
+unprivileged user, which is exactly what the potato family requires: GodPotato,
+PrintSpoofer, SweetPotato, and every other on-target executable (winPEAS,
+Seatbelt, SharpUp, PowerUp, RunasCs) CANNOT be used. Do not attempt them and do
+not report SYSTEM on the strength of an observed privilege.
 
 `SeImpersonatePrivilege` is recorded as an operator lead only. Observing it is
 not exploitation of it — when you see it, note it and move on to a path below.

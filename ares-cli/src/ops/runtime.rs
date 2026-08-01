@@ -121,6 +121,20 @@ pub(crate) async fn ops_runtime(
         "Vulns: {} exploitable ({} exploited), {} findings ({} exploited)",
         vulns.exploitable, vulns.exploitable_exploited, vulns.findings, vulns.findings_exploited
     );
+    if vulns.not_exploitable_by_construction > 0 {
+        if vulns.not_exploitable_by_construction_exploited > 0 {
+            println!(
+                "Warning: {} observed but not exploitable (no on-target execution primitive), of which {} carry an EXPLOITED status \u{2014} the dispatch-gate decline leaked, investigate",
+                vulns.not_exploitable_by_construction,
+                vulns.not_exploitable_by_construction_exploited
+            );
+        } else {
+            println!(
+                "Note: {} observed but not exploitable (no on-target execution primitive; itemised under Observed but not exploitable in `ops loot`)",
+                vulns.not_exploitable_by_construction
+            );
+        }
+    }
     if vulns.attributed_credits > 0 {
         let plural = if vulns.attributed_credits == 1 {
             ""

@@ -8,6 +8,7 @@ use crate::dedup::{
     dedup_credentials, dedup_hashes, dedup_users, looks_like_workgroup_pseudo_domain,
     normalize_source_label,
 };
+use crate::orchestrator::exploitation::NO_EXECUTION_PRIMITIVE_VULN_TYPES;
 
 /// Draw the DA/GT achievement banner box. Shared by `print_loot_human` and
 /// `print_runtime_summary` so both views render identically.
@@ -374,15 +375,25 @@ pub(super) fn print_runtime_summary(
 /// as actively exploitable rather than an informational finding.
 const EXPLOITABLE_PRIORITY_MAX: i32 = 3;
 
+/// Whether a vulnerability names a capability ares has no execution primitive
+/// for and never will (see `NO_EXECUTION_PRIMITIVE_VULN_TYPES`). Renders under
+/// its own table so the operator can distinguish "observed but permanently
+/// undispatchable" from "priority-deferred finding".
+pub(super) fn is_not_exploitable_by_construction(vuln: &VulnerabilityInfo) -> bool {
+    NO_EXECUTION_PRIMITIVE_VULN_TYPES.contains(&vuln.vuln_type.to_lowercase().as_str())
+}
+
 /// Whether a vulnerability is actively exploitable rather than an informational
 /// finding. Shared with `super::vulnerability_counts` so the `ops runtime`
 /// headline and the `ops loot` tables can never disagree on the split.
 pub(super) fn is_exploitable(vuln: &VulnerabilityInfo) -> bool {
-    vuln.priority <= EXPLOITABLE_PRIORITY_MAX
+    !is_not_exploitable_by_construction(vuln) && vuln.priority <= EXPLOITABLE_PRIORITY_MAX
 }
 
-/// Print vulnerabilities split into two tables: actively exploitable
-/// (priority <= EXPLOITABLE_PRIORITY_MAX) and informational findings (rest).
+/// Print vulnerabilities split into three tables: actively exploitable
+/// (priority <= EXPLOITABLE_PRIORITY_MAX), informational findings (rest by
+/// priority), and observed-but-not-exploitable-by-construction (vuln_type in
+/// `NO_EXECUTION_PRIMITIVE_VULN_TYPES`, regardless of priority).
 fn print_vulnerabilities(
     discovered: &HashMap<String, VulnerabilityInfo>,
     exploited: &HashSet<String>,
@@ -393,8 +404,11 @@ fn print_vulnerabilities(
 
     let mut exploitable: Vec<(&String, &VulnerabilityInfo)> = Vec::new();
     let mut findings: Vec<(&String, &VulnerabilityInfo)> = Vec::new();
+    let mut not_exploitable: Vec<(&String, &VulnerabilityInfo)> = Vec::new();
     for (id, vuln) in discovered.iter() {
-        if is_exploitable(vuln) {
+        if is_not_exploitable_by_construction(vuln) {
+            not_exploitable.push((id, vuln));
+        } else if is_exploitable(vuln) {
             exploitable.push((id, vuln));
         } else {
             findings.push((id, vuln));
@@ -409,6 +423,7 @@ fn print_vulnerabilities(
     };
     sort_vulns(&mut exploitable);
     sort_vulns(&mut findings);
+    sort_vulns(&mut not_exploitable);
 
     let exploited_in_exploitable = exploitable
         .iter()
@@ -432,6 +447,12 @@ fn print_vulnerabilities(
         print_vuln_table(&findings, exploited);
     }
     println!();
+
+    if !not_exploitable.is_empty() {
+        println!("Observed but not exploitable ({}):", not_exploitable.len());
+        print_vuln_table(&not_exploitable, exploited);
+        println!();
+    }
 }
 
 /// Render a scoreboard-aligned token coverage table:

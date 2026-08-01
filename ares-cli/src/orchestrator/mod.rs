@@ -24,7 +24,7 @@ mod cost_summary;
 mod deferred;
 mod dispatcher;
 mod diversity;
-mod exploitation;
+pub(crate) mod exploitation;
 mod llm_runner;
 mod monitoring;
 pub(crate) mod output_extraction;

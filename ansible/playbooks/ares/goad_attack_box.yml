@@ -193,7 +193,10 @@
       vars:
         cracking_tools_verify_install: true
 
-    # Privilege escalation tools (PrintSpoofer, noPac, PrintNightmare, etc.)
+    # Privilege escalation tools. noPac and PrintNightmare are dispatched by
+    # ares; PrintSpoofer/GodPotato/WinPEAS/LinPEAS/PowerUpSQL are staged for
+    # operator manual triage only (no reachable code path in ares — Linux-side
+    # remote-protocol orchestrator with no on-target unprivileged exec).
     - role: l50.arsenal.privesc_tools
       vars:
         privesc_tools_verify_install: true
@@ -384,13 +387,10 @@
           - ""
           - "8. MSSQL Exploitation:"
           - "   - mssqlclient.py (via impacket)"
-          - "   - PowerUpSQL (PowerShell MSSQL toolkit)"
           - ""
           - "9. Privilege Escalation:"
-          - "   - PrintSpoofer, GodPotato"
           - "   - noPac (CVE-2021-42287)"
           - "   - PrintNightmare (CVE-2021-1675)"
-          - "   - WinPEAS, LinPEAS"
           - ""
           - "10. Lateral Movement:"
           - "    - evil-winrm"
@@ -401,6 +401,15 @@
           - "11. Domain Trust Exploitation:"
           - "    - raiseChild.py (via impacket)"
           - "    - ticketer.py (via impacket)"
+          - ""
+          - "12. Installed but NOT reachable from ares (operator manual only):"
+          - "    - PrintSpoofer, GodPotato, SweetPotato (SeImpersonate -> SYSTEM)"
+          - "    - WinPEAS, LinPEAS (enumeration)"
+          - "    - PowerUpSQL (PowerShell MSSQL toolkit)"
+          - "    - RunasCs, PowerUp, SharpUp, Seatbelt, scm_uac_bypass"
+          - "    Ares is a Linux-side remote-protocol orchestrator; it has no"
+          - "    primitive for staging or running a Windows binary on-target"
+          - "    as an unprivileged user. See docs/red.md for the full boundary."
           - ""
           - "Tools Location:"
           - "  - Ares workspace: /opt/ares"

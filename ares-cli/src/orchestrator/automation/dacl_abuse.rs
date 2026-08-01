@@ -26,6 +26,51 @@ pub(crate) fn is_destructive_acl_type(vuln_type: &str) -> bool {
     t.contains("forcechangepassword") || t.contains("genericall")
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct DaclTickCensus {
+    pub technique_gated: bool,
+    pub no_auth_material: bool,
+    pub acl_vulns: usize,
+    pub already_exploited: usize,
+    pub deduped: usize,
+    pub ghost_target: usize,
+    pub no_source_principal: usize,
+    pub unresolvable_principal: usize,
+    pub domain_dominated: usize,
+    pub capture_in_flight: usize,
+    pub target_material_held: usize,
+    pub over_tick_cap: usize,
+    pub eligible: usize,
+}
+
+impl DaclTickCensus {
+    pub(crate) fn gated() -> Self {
+        Self {
+            technique_gated: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn emit(&self) {
+        info!(
+            technique_gated = self.technique_gated,
+            no_auth_material = self.no_auth_material,
+            acl_vulns = self.acl_vulns,
+            already_exploited = self.already_exploited,
+            deduped = self.deduped,
+            ghost_target = self.ghost_target,
+            no_source_principal = self.no_source_principal,
+            unresolvable_principal = self.unresolvable_principal,
+            domain_dominated = self.domain_dominated,
+            capture_in_flight = self.capture_in_flight,
+            target_material_held = self.target_material_held,
+            over_tick_cap = self.over_tick_cap,
+            eligible = self.eligible,
+            "DACL abuse tick census"
+        );
+    }
+}
+
 pub(crate) fn holds_target_material(state: &StateInner, target_user: &str, domain: &str) -> bool {
     let target = target_user.to_lowercase();
     let domain = domain.to_lowercase();
@@ -44,6 +89,7 @@ pub(crate) fn holds_target_material(state: &StateInner, target_user: &str, domai
 pub async fn auto_dacl_abuse(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_census: Option<DaclTickCensus> = None;
 
     loop {
         tokio::select! {
@@ -55,13 +101,23 @@ pub async fn auto_dacl_abuse(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
         }
 
         if !dispatcher.is_technique_allowed("acl_abuse") {
+            let census = DaclTickCensus::gated();
+            if last_census.as_ref() != Some(&census) {
+                census.emit();
+                last_census = Some(census);
+            }
             continue;
         }
 
+        let mut census = DaclTickCensus::default();
         let work: Vec<DaclWork> = {
             let state = dispatcher.state.read().await;
-            collect_dacl_work(&state)
+            collect_dacl_work_census(&state, &mut census)
         };
+        if last_census.as_ref() != Some(&census) {
+            census.emit();
+            last_census = Some(census);
+        }
 
         for item in work {
             let payload = build_dacl_payload(&item);
@@ -153,8 +209,17 @@ pub(crate) fn build_dacl_payload(item: &DaclWork) -> serde_json::Value {
 /// privileged ones have been dispatched and dedup'd. Both ACL drivers share
 /// one 50-slot `acl_chain_step` deferred bucket, so an unbounded 310-path
 /// enumeration would otherwise starve every other technique.
+#[cfg(test)]
 pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
+    collect_dacl_work_census(state, &mut DaclTickCensus::default())
+}
+
+pub(crate) fn collect_dacl_work_census(
+    state: &StateInner,
+    census: &mut DaclTickCensus,
+) -> Vec<DaclWork> {
     if state.credentials.is_empty() && state.hashes.is_empty() {
+        census.no_auth_material = true;
         return Vec::new();
     }
 
@@ -168,13 +233,16 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
         if !acl_graph::is_acl_vuln_type(&vtype) {
             continue;
         }
+        census.acl_vulns += 1;
 
         if state.exploited_vulnerabilities.contains(&vuln.vuln_id) {
+            census.already_exploited += 1;
             continue;
         }
 
         let dedup_key = format!("dacl:{}", vuln.vuln_id);
         if state.is_processed(DEDUP_DACL_ABUSE, &dedup_key) {
+            census.deduped += 1;
             continue;
         }
 
@@ -186,6 +254,7 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         if is_ghost_machine_account(target_name) {
+            census.ghost_target += 1;
             debug!(
                 vuln_id = %vuln.vuln_id,
                 target = %target_name,
@@ -211,6 +280,7 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
             .unwrap_or("");
 
         if source_user.is_empty() {
+            census.no_source_principal += 1;
             continue;
         }
 
@@ -245,6 +315,7 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
                     .map(|h| (h.username.clone(), h.domain.clone()))
             })
         else {
+            census.unresolvable_principal += 1;
             continue;
         };
 
@@ -260,6 +331,7 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
         let dispatch_domain = auth_domain.to_lowercase();
 
         if state.dominated_domains.contains(&dispatch_domain) {
+            census.domain_dominated += 1;
             debug!(vuln_id = %vuln.vuln_id, domain = %auth_domain, "DACL abuse skipped: domain dominated");
             continue;
         }
@@ -268,6 +340,7 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
         // DCSync either finishes (domain becomes dominated above) or its
         // in-flight TTL expires and the chain runs as fallback.
         if state.credential_capture_in_flight_for(&dispatch_domain) {
+            census.capture_in_flight += 1;
             debug!(vuln_id = %vuln.vuln_id, domain = %auth_domain, "DACL abuse deferred: credential capture in flight");
             continue;
         }
@@ -280,6 +353,7 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
             && !target_user.is_empty()
             && holds_target_material(state, &target_user, &dispatch_domain)
         {
+            census.target_material_held += 1;
             debug!(vuln_id = %vuln.vuln_id, target = %target_user, "Destructive ACL skipped: target material already in state");
             continue;
         }
@@ -321,7 +395,9 @@ pub(crate) fn collect_dacl_work(state: &StateInner) -> Vec<DaclWork> {
             .cmp(&analysis.rank_of(&b.vuln_id))
             .then_with(|| a.vuln_id.cmp(&b.vuln_id))
     });
+    census.over_tick_cap = items.len().saturating_sub(MAX_ACL_DISPATCH_PER_TICK);
     items.truncate(MAX_ACL_DISPATCH_PER_TICK);
+    census.eligible = items.len();
     items
 }
 
@@ -894,6 +970,110 @@ mod tests {
         assert_eq!(work[0].source_user, "admin");
         assert_eq!(work[0].target_user, "victim");
         assert_eq!(work[0].domain, "contoso.local");
+    }
+
+    #[tokio::test]
+    async fn census_reports_no_auth_material_when_state_is_bare() {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            let details = acl_details("admin", "victim", "contoso.local");
+            let vuln = make_vuln("vuln-001", "ForceChangePassword", details);
+            state
+                .discovered_vulnerabilities
+                .insert(vuln.vuln_id.clone(), vuln);
+        }
+        let state = shared.read().await;
+        let mut census = DaclTickCensus::default();
+        let work = collect_dacl_work_census(&state, &mut census);
+
+        assert!(work.is_empty());
+        assert!(census.no_auth_material);
+        assert_eq!(census.acl_vulns, 0);
+        assert_ne!(census, DaclTickCensus::default());
+    }
+
+    #[tokio::test]
+    async fn census_attributes_a_dominated_domain_decline() {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("admin", "contoso.local"));
+            state.dominated_domains.insert("contoso.local".into());
+            let details = acl_details("admin", "victim", "contoso.local");
+            let vuln = make_vuln("vuln-dom-001", "GenericWrite", details);
+            state
+                .discovered_vulnerabilities
+                .insert(vuln.vuln_id.clone(), vuln);
+        }
+
+        let state = shared.read().await;
+        let mut census = DaclTickCensus::default();
+        let work = collect_dacl_work_census(&state, &mut census);
+
+        assert!(work.is_empty());
+        assert_eq!(census.acl_vulns, 1);
+        assert_eq!(census.domain_dominated, 1);
+        assert_eq!(census.eligible, 0);
+        assert!(!census.no_auth_material);
+    }
+
+    #[tokio::test]
+    async fn census_attributes_an_unresolvable_principal_decline() {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("alice", "contoso.local"));
+            let details = acl_details("bob", "victim", "contoso.local");
+            let vuln = make_vuln("vuln-nop-001", "GenericWrite", details);
+            state
+                .discovered_vulnerabilities
+                .insert(vuln.vuln_id.clone(), vuln);
+        }
+
+        let state = shared.read().await;
+        let mut census = DaclTickCensus::default();
+        let work = collect_dacl_work_census(&state, &mut census);
+
+        assert!(work.is_empty());
+        assert_eq!(census.acl_vulns, 1);
+        assert_eq!(census.unresolvable_principal, 1);
+        assert_eq!(census.domain_dominated, 0);
+    }
+
+    #[tokio::test]
+    async fn census_counts_an_eligible_edge() {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("admin", "contoso.local"));
+            let details = acl_details("admin", "victim", "contoso.local");
+            let vuln = make_vuln("vuln-ok-001", "GenericWrite", details);
+            state
+                .discovered_vulnerabilities
+                .insert(vuln.vuln_id.clone(), vuln);
+        }
+
+        let state = shared.read().await;
+        let mut census = DaclTickCensus::default();
+        let work = collect_dacl_work_census(&state, &mut census);
+
+        assert_eq!(work.len(), 1);
+        assert_eq!(census.acl_vulns, 1);
+        assert_eq!(census.eligible, 1);
+        assert_eq!(census.over_tick_cap, 0);
+    }
+
+    #[test]
+    fn gated_census_is_distinguishable_from_a_silent_tick() {
+        assert_ne!(DaclTickCensus::gated(), DaclTickCensus::default());
+        assert!(DaclTickCensus::gated().technique_gated);
     }
 
     #[tokio::test]

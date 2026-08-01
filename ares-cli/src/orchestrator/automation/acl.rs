@@ -160,6 +160,49 @@ pub(crate) struct AclStepWork {
     pub credential: ares_core::models::Credential,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct AclChainTickCensus {
+    pub post_domination_stop: bool,
+    pub chains: usize,
+    pub no_chains: bool,
+    pub malformed_chains: usize,
+    pub already_dispatched: usize,
+    pub already_exploited: usize,
+    pub no_source_principal: usize,
+    pub unresolvable_principal: usize,
+    pub domain_dominated: usize,
+    pub target_material_held: usize,
+    pub over_tick_cap: usize,
+    pub eligible: usize,
+}
+
+impl AclChainTickCensus {
+    pub(crate) fn post_domination() -> Self {
+        Self {
+            post_domination_stop: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn emit(&self) {
+        info!(
+            post_domination_stop = self.post_domination_stop,
+            chains = self.chains,
+            no_chains = self.no_chains,
+            malformed_chains = self.malformed_chains,
+            already_dispatched = self.already_dispatched,
+            already_exploited = self.already_exploited,
+            no_source_principal = self.no_source_principal,
+            unresolvable_principal = self.unresolvable_principal,
+            domain_dominated = self.domain_dominated,
+            target_material_held = self.target_material_held,
+            over_tick_cap = self.over_tick_cap,
+            eligible = self.eligible,
+            "ACL chain tick census"
+        );
+    }
+}
+
 /// Collect the chain steps dispatchable this tick.
 ///
 /// At most one step per chain: the first that is neither already dispatched
@@ -170,11 +213,21 @@ pub(crate) struct AclStepWork {
 ///
 /// Extracted from the driver loop so that sequencing is testable without a
 /// Dispatcher.
+#[cfg(test)]
 pub(crate) fn collect_acl_chain_work(state: &StateInner) -> Vec<AclStepWork> {
+    collect_acl_chain_work_census(state, &mut AclChainTickCensus::default())
+}
+
+pub(crate) fn collect_acl_chain_work_census(
+    state: &StateInner,
+    census: &mut AclChainTickCensus,
+) -> Vec<AclStepWork> {
     let mut items = Vec::new();
+    census.chains = state.acl_chains.len();
 
     for (chain_idx, chain) in state.acl_chains.iter().enumerate() {
         let Some(steps) = extract_chain_steps(chain) else {
+            census.malformed_chains += 1;
             continue;
         };
 
@@ -183,9 +236,11 @@ pub(crate) fn collect_acl_chain_work(state: &StateInner) -> Vec<AclStepWork> {
 
             // Skip already dispatched steps
             if state.dispatched_acl_steps.contains(&dedup_key) {
+                census.already_dispatched += 1;
                 continue;
             }
             if state.is_processed(DEDUP_ACL_STEPS, &dedup_key) {
+                census.already_dispatched += 1;
                 continue;
             }
 
@@ -194,6 +249,7 @@ pub(crate) fn collect_acl_chain_work(state: &StateInner) -> Vec<AclStepWork> {
                 && (state.exploited_vulnerabilities.contains(&vuln_id)
                     || state.is_processed(DEDUP_DACL_ABUSE, &format!("dacl:{vuln_id}")))
             {
+                census.already_exploited += 1;
                 continue;
             }
 
@@ -202,15 +258,18 @@ pub(crate) fn collect_acl_chain_work(state: &StateInner) -> Vec<AclStepWork> {
             let source_domain = extract_source_domain(step);
 
             if source_user.is_empty() {
+                census.no_source_principal += 1;
                 continue;
             }
 
             let Some(credential) = resolve_step_principal(state, source_user, source_domain) else {
+                census.unresolvable_principal += 1;
                 break;
             };
 
             let edge_domain = extract_edge_domain(step, &credential.domain).to_lowercase();
             if state.dominated_domains.contains(&edge_domain) {
+                census.domain_dominated += 1;
                 debug!(vuln_id = %vuln_id, domain = %edge_domain, "ACL chain skipped: domain already dominated");
                 break;
             }
@@ -220,6 +279,7 @@ pub(crate) fn collect_acl_chain_work(state: &StateInner) -> Vec<AclStepWork> {
                 && !target_user.is_empty()
                 && holds_target_material(state, target_user, &edge_domain)
             {
+                census.target_material_held += 1;
                 debug!(vuln_id = %vuln_id, target = %target_user, "ACL chain step skipped: destructive ACL, target material already in state");
                 continue;
             }
@@ -236,7 +296,9 @@ pub(crate) fn collect_acl_chain_work(state: &StateInner) -> Vec<AclStepWork> {
         }
     }
 
+    census.over_tick_cap = items.len().saturating_sub(MAX_ACL_DISPATCH_PER_TICK);
     items.truncate(MAX_ACL_DISPATCH_PER_TICK);
+    census.eligible = items.len();
     items
 }
 
@@ -251,6 +313,7 @@ pub async fn auto_acl_chain_follow(
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_census: Option<AclChainTickCensus> = None;
 
     loop {
         tokio::select! {
@@ -269,6 +332,11 @@ pub async fn auto_acl_chain_follow(
                 && state.all_forests_dominated()
                 && !dispatcher.config.strategy.should_continue_after_da()
             {
+                let census = AclChainTickCensus::post_domination();
+                if last_census.as_ref() != Some(&census) {
+                    census.emit();
+                    last_census = Some(census);
+                }
                 continue;
             }
         }
@@ -279,15 +347,25 @@ pub async fn auto_acl_chain_follow(
             debug!(chains = count, "ACL graph refreshed");
         }
 
+        let mut census = AclChainTickCensus::default();
         let work: Vec<AclStepWork> = {
             let state = dispatcher.state.read().await;
 
             if state.acl_chains.is_empty() {
+                census.no_chains = true;
+                if last_census.as_ref() != Some(&census) {
+                    census.emit();
+                    last_census = Some(census);
+                }
                 continue;
             }
 
-            collect_acl_chain_work(&state)
+            collect_acl_chain_work_census(&state, &mut census)
         };
+        if last_census.as_ref() != Some(&census) {
+            census.emit();
+            last_census = Some(census);
+        }
 
         // Dispatch each collected step
         for AclStepWork {
@@ -685,6 +763,65 @@ mod tests {
         let mut state = state_with_chain();
         state.hashes.push(hash("alice", "fabrikam.local", "ntlm"));
         assert!(collect_acl_chain_work(&state).is_empty());
+    }
+
+    #[test]
+    fn census_attributes_an_unresolvable_source_principal() {
+        let state = state_with_chain();
+        let mut census = AclChainTickCensus::default();
+        let work = collect_acl_chain_work_census(&state, &mut census);
+
+        assert!(work.is_empty());
+        assert_eq!(census.chains, 1);
+        assert_eq!(census.unresolvable_principal, 1);
+        assert_eq!(census.eligible, 0);
+        assert!(!census.no_chains);
+        assert_ne!(census, AclChainTickCensus::default());
+    }
+
+    #[test]
+    fn census_attributes_an_already_dispatched_step() {
+        let mut state = state_with_chain();
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local"));
+        let first = collect_acl_chain_work(&state);
+        state
+            .dispatched_acl_steps
+            .insert(first[0].dedup_key.clone());
+
+        let mut census = AclChainTickCensus::default();
+        let work = collect_acl_chain_work_census(&state, &mut census);
+
+        assert!(work.is_empty());
+        assert_eq!(census.already_dispatched, 1);
+        assert_eq!(census.eligible, 0);
+    }
+
+    #[test]
+    fn census_counts_an_eligible_step() {
+        let mut state = state_with_chain();
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local"));
+
+        let mut census = AclChainTickCensus::default();
+        let work = collect_acl_chain_work_census(&state, &mut census);
+
+        assert_eq!(work.len(), 1);
+        assert_eq!(census.chains, 1);
+        assert_eq!(census.eligible, 1);
+        assert_eq!(census.unresolvable_principal, 0);
+        assert_eq!(census.over_tick_cap, 0);
+    }
+
+    #[test]
+    fn post_domination_census_is_distinguishable_from_a_silent_tick() {
+        assert_ne!(
+            AclChainTickCensus::post_domination(),
+            AclChainTickCensus::default()
+        );
+        assert!(AclChainTickCensus::post_domination().post_domination_stop);
     }
 
     #[test]

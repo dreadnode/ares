@@ -849,9 +849,7 @@ Provisioned by: `ansible/playbooks/ares/privesc.yml` → `dreadnode.nimbus_range
 - **Impacket**: impacket-findDelegation, impacket-getST, impacket-getTGT, impacket-rbcd,
   impacket-addcomputer, impacket-lookupsid, impacket-mssqlclient, impacket-raiseChild,
   impacket-ticketer, impacket-secretsdump, impacket-psexec
-- **Kerberos privesc**: KrbRelayUp
 - **GPO abuse**: SharpGPOAbuse (run locally under `mono`, speaks LDAP to the DC), pygpoabuse
-- **PEAS enumeration**: linPEAS
 
 #### Provisioned but NOT reachable
 
@@ -863,14 +861,28 @@ the LLM's toolset:
 
 - **Windows potato exploits**: PrintSpoofer, GodPotato, SweetPotato
 - **Windows enumeration**: Seatbelt, SharpUp, winPEAS
+- **Linux enumeration**: linPEAS
 - **User impersonation**: RunasCs
 - **PowerShell scripts**: PowerUp, PowerUpSQL
 - **UAC bypass**: SCMUACBypass
+- **Kerberos privesc**: KrbRelayUp — removed from the technique set entirely in #371
+  (automation, tool definition, dispatcher wiring, MITRE mappings, cleanup handling and
+  tests all went with it) because it needs on-host execution as an unprivileged Windows
+  user. The binary may still be installed; nothing can call it.
+
+To be precise about which primitive is missing: ares *can* run commands on a Windows host
+— `psexec_kerberos`, `evil_winrm`, and `mssql_impersonate` with `xp_cmdshell` all do. Every
+one of them requires administrative (or MSSQL sysadmin) rights first. What ares has no path
+to is executing code *as an unprivileged user*, which is the state every tool above starts
+from. That is why the boundary bites local privilege escalation specifically and leaves
+remote exploitation untouched.
 
 Consequence: the GOAD local-privilege-escalation category (SeImpersonate → SYSTEM and
 the potato family) is out of scope by construction. `SeImpersonatePrivilege` is published
-as an operator lead and never credited as exploited. Reversing this requires an upload +
-execute primitive, which is an architectural decision, not a missing parser.
+as an operator lead, declined by name in the exploitation queue
+(`exploitation.rs::NO_EXECUTION_PRIMITIVE_VULN_TYPES`), and never credited as exploited.
+Reversing this requires an upload + execute primitive, which is an architectural decision,
+not a missing parser.
 
 ### LATERAL Agent
 
