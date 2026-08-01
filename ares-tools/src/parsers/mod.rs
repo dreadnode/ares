@@ -126,6 +126,23 @@ fn bare_account_name(raw: &str) -> String {
         .to_string()
 }
 
+/// Pull the PFX path out of a successful `pywhisker --action add`.
+///
+/// Matches the tool's own success line, `[+] Saved PFX (#PKCS12) certificate &
+/// key at path: <path>`. Stage one of a shadow-credential chain writes
+/// `msDS-KeyCredentialLink` and drops that file, and until the path reaches
+/// operation state it exists only in one agent's transcript: a later
+/// `certipy_auth` task has nothing to authenticate with and abandons with
+/// "requires a PFX certificate file path, but none is provided". Publishing it
+/// is what lets `auto_certipy_auth` dispatch stage two on its own.
+fn parse_pywhisker_pfx_path(output: &str) -> Option<String> {
+    output
+        .lines()
+        .filter_map(|line| line.split_once("certificate & key at path:"))
+        .map(|(_, path)| path.trim().to_string())
+        .find(|path| !path.is_empty())
+}
+
 /// Republish a confirmed take-ownership as the `WriteDacl` edge it acquired.
 ///
 /// An object's owner holds `WRITE_DAC` implicitly, whatever its DACL says, so a
@@ -633,6 +650,51 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
                         "description": format!("WinRM access confirmed on {target}"),
                         "target_ip": target,
                     },
+                }]);
+            }
+        }
+        "pywhisker" => {
+            if let Some(pfx) = parse_pywhisker_pfx_path(output) {
+                let target = params
+                    .get("target_samaccountname")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let domain = params
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let dc_ip = params.get("dc_ip").and_then(|v| v.as_str()).unwrap_or("");
+
+                let mut details = serde_json::Map::new();
+                details.insert("pfx_path".into(), json!(pfx));
+                details.insert("source".into(), json!("pywhisker"));
+                details.insert("domain".into(), json!(domain));
+                if !target.is_empty() {
+                    details.insert("target_user".into(), json!(target));
+                    details.insert("account_name".into(), json!(target));
+                }
+                if !dc_ip.is_empty() {
+                    details.insert("target_ip".into(), json!(dc_ip));
+                }
+                details.insert(
+                    "description".into(),
+                    json!(format!(
+                        "Shadow credential written on {target} in {domain}; PKINIT with \
+                         {pfx} recovers that account's NT hash"
+                    )),
+                );
+
+                let user_safe = target.replace(['$', '.', '\\'], "_");
+                let domain_safe = domain.replace('.', "_");
+                discoveries["vulnerabilities"] = json!([{
+                    "vuln_id": format!("certificate_obtained_{user_safe}_{domain_safe}"),
+                    "vuln_type": "certificate_obtained",
+                    "target": dc_ip,
+                    "discovered_by": "pywhisker",
+                    "priority": 2,
+                    "recommended_agent": "privesc",
+                    "details": details,
                 }]);
             }
         }
@@ -2398,6 +2460,68 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
     }
 
     // ── ntlmrelayx_* arms ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_tool_output_pywhisker_publishes_the_pfx_for_stage_two() {
+        let output = "\
+[*] Searching for the target account
+[+] Target user found: CN=svc_sql,CN=Users,DC=contoso,DC=local
+[+] KeyCredential generated with DeviceID: 4b1c9f2a-1234-4a2b-9c3d-abcdef012345
+[+] Updated the msDS-KeyCredentialLink attribute of the target object
+[+] Saved PFX (#PKCS12) certificate & key at path: /tmp/ares_shadowcred_svc_sql_1754000000000.pfx
+[*] Must be used with password: ares-shadow-cred";
+        let params = json!({
+            "target_samaccountname": "svc_sql",
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",
+        });
+        let disc = parse_tool_output("pywhisker", output, &params);
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0]["vuln_type"], "certificate_obtained");
+        assert_eq!(
+            vulns[0]["details"]["pfx_path"],
+            "/tmp/ares_shadowcred_svc_sql_1754000000000.pfx"
+        );
+        assert_eq!(vulns[0]["details"]["target_user"], "svc_sql");
+        assert_eq!(vulns[0]["details"]["domain"], "contoso.local");
+        assert_eq!(vulns[0]["target"], "192.168.58.10");
+    }
+
+    #[test]
+    fn parse_tool_output_pywhisker_machine_account_vuln_id_is_sanitised() {
+        let output = "[+] Saved PFX (#PKCS12) certificate & key at path: \
+                      /tmp/ares_shadowcred_dc01__1754000000000.pfx";
+        let params = json!({
+            "target_samaccountname": "dc01$",
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",
+        });
+        let disc = parse_tool_output("pywhisker", output, &params);
+        let vulns = disc["vulnerabilities"].as_array().expect("vulns");
+        let vid = vulns[0]["vuln_id"].as_str().unwrap();
+        assert!(!vid.contains('$'), "vuln_id must sanitise $: {vid}");
+        assert_eq!(vulns[0]["details"]["account_name"], "dc01$");
+    }
+
+    #[test]
+    fn parse_tool_output_pywhisker_publishes_nothing_without_a_saved_pfx() {
+        for output in [
+            "[!] Could not modify object, the server reports insufficient rights: 00002098",
+            "[+] KeyCredential generated with DeviceID: 4b1c9f2a-1234-4a2b-9c3d-abcdef012345",
+            "[+] Saved PEM certificate at path: /tmp/ares_shadowcred_svc_sql_1_cert.pem",
+        ] {
+            let disc = parse_tool_output(
+                "pywhisker",
+                output,
+                &json!({"target_samaccountname": "svc_sql", "domain": "contoso.local"}),
+            );
+            assert!(
+                disc.get("vulnerabilities").is_none(),
+                "must not publish a certificate for: {output}"
+            );
+        }
+    }
 
     #[test]
     fn parse_tool_output_ntlmrelayx_to_adcs_emits_certificate_obtained() {

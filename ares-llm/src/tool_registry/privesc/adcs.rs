@@ -114,7 +114,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: "certipy_auth".into(),
             description: "Authenticate to Active Directory using a PFX certificate file. \
                 Performs PKINIT Kerberos authentication and retrieves the NT hash of the \
-                certificate's subject."
+                certificate's subject. Works on both an unprotected PFX from certipy_req \
+                and the passphrase-protected PFX pywhisker writes — the passphrase for the \
+                latter is applied for you, so pass only the path."
                 .into(),
             input_schema: json!({
                 "type": "object",

@@ -66,6 +66,8 @@ const TASK_EXPLOIT_UNCONSTRAINED_TEMPLATE: &str =
 const TASK_EXPLOIT_GOLDEN_TICKET_TEMPLATE: &str =
     include_str!("../../templates/redteam/tasks/exploit_golden_ticket.md.tera");
 
+const TASK_CREDACCESS_CERT_AUTH_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/credaccess_cert_auth.md.tera");
 const TASK_CREDACCESS_KERBEROS_TEMPLATE: &str =
     include_str!("../../templates/redteam/tasks/credaccess_kerberos.md.tera");
 const TASK_CREDACCESS_LOW_HANGING_WITH_CREDS_TEMPLATE: &str =
@@ -158,6 +160,7 @@ pub const TASK_EXPLOIT_UNCONSTRAINED: &str = "redteam/tasks/exploit_unconstraine
 pub const TASK_EXPLOIT_GOLDEN_TICKET: &str = "redteam/tasks/exploit_golden_ticket";
 
 // Credential access task templates
+pub const TASK_CREDACCESS_CERT_AUTH: &str = "redteam/tasks/credaccess_cert_auth";
 pub const TASK_CREDACCESS_KERBEROS: &str = "redteam/tasks/credaccess_kerberos";
 pub const TASK_CREDACCESS_LOW_HANGING_WITH_CREDS: &str =
     "redteam/tasks/credaccess_low_hanging_with_creds";
@@ -255,6 +258,10 @@ static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
             TASK_EXPLOIT_GOLDEN_TICKET_TEMPLATE,
         ),
         // Credential access task templates
+        (
+            TASK_CREDACCESS_CERT_AUTH,
+            TASK_CREDACCESS_CERT_AUTH_TEMPLATE,
+        ),
         (TASK_CREDACCESS_KERBEROS, TASK_CREDACCESS_KERBEROS_TEMPLATE),
         (
             TASK_CREDACCESS_LOW_HANGING_WITH_CREDS,

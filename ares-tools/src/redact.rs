@@ -21,6 +21,7 @@ const SECRET_FLAGS: &[&str] = &[
     "-aesKey",
     "-password",
     "--password",
+    "--pfx-password",
     "-pfx",
     "-ca-pfx",
     "-computer-pass",

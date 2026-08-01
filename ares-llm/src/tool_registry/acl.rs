@@ -271,7 +271,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "pywhisker".into(),
-            description: "Manage msDS-KeyCredentialLink attribute for Shadow Credentials attack. Adds, removes, or lists Key Credential entries on a target object. When adding, generates a PFX certificate that can be used with PKINIT to obtain a TGT for the target principal. Auth precedence: ticket_path > hash > password.".into(),
+            description: "Manage msDS-KeyCredentialLink attribute for Shadow Credentials attack. Adds, removes, or lists Key Credential entries on a target object. When adding, generates a PFX certificate that can be used with PKINIT to obtain a TGT for the target principal. This is stage ONE only — it recovers no credential on its own. Follow every successful add with certipy_auth on the PFX path it prints, which is the step that yields the target's NT hash. Auth precedence: ticket_path > hash > password.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -315,7 +315,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "certipy_auth".into(),
-            description: "Authenticate to Active Directory using a PFX certificate file. Performs PKINIT Kerberos authentication and retrieves the NT hash of the certificate's subject. This is the second and final stage of the Shadow Credentials attack: run it on the PFX that pywhisker saved to convert the msDS-KeyCredentialLink write into the target's NT hash. A pywhisker success alone recovers no credential and does not exploit the vulnerability.".into(),
+            description: "Authenticate to Active Directory using a PFX certificate file. Performs PKINIT Kerberos authentication and retrieves the NT hash of the certificate's subject. This is the second and final stage of the Shadow Credentials attack: run it on the PFX that pywhisker saved to convert the msDS-KeyCredentialLink write into the target's NT hash. A pywhisker success alone recovers no credential and does not exploit the vulnerability. The PFX pywhisker exports is passphrase-protected; that passphrase is applied for you, so pass only the path and never treat 'Must be used with password' in pywhisker's output as something you must act on.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

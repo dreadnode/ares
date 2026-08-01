@@ -733,6 +733,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pywhisker_export_becomes_stage_two_work() {
+        let parsed = ares_tools::parsers::parse_tool_output(
+            "pywhisker",
+            "[+] Updated the msDS-KeyCredentialLink attribute of the target object\n\
+             [+] Saved PFX (#PKCS12) certificate & key at path: \
+             /tmp/ares_shadowcred_svc_sql_1754000000000.pfx\n\
+             [*] Must be used with password: ares-shadow-cred",
+            &serde_json::json!({
+                "target_samaccountname": "svc_sql",
+                "domain": "contoso.local",
+                "dc_ip": "192.168.58.10",
+            }),
+        );
+        let vuln: ares_core::models::VulnerabilityInfo =
+            serde_json::from_value(parsed["vulnerabilities"].as_array().expect("vulns")[0].clone())
+                .expect("parser output must deserialize into a VulnerabilityInfo");
+
+        let shared = SharedState::new("test".into());
+        {
+            let mut s = shared.write().await;
+            s.domain_controllers
+                .insert("contoso.local".into(), "192.168.58.10".into());
+            s.discovered_vulnerabilities
+                .insert(vuln.vuln_id.clone(), vuln);
+        }
+        let state = shared.read().await;
+        let work = collect_cert_auth_work(&state);
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].pfx_path,
+            "/tmp/ares_shadowcred_svc_sql_1754000000000.pfx"
+        );
+        assert_eq!(work[0].target_user, "svc_sql");
+        assert_eq!(work[0].domain, "contoso.local");
+        assert_eq!(work[0].dc_ip, Some("192.168.58.10".into()));
+    }
+
+    #[tokio::test]
     async fn collect_dc_ip_lookup_is_case_insensitive() {
         let shared = SharedState::new("test".into());
         {

