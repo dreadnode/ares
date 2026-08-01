@@ -858,6 +858,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dacl_edit_schema_required_fields_are_enough_to_build_a_command() {
+        use ares_llm::tool_registry::{tools_for_role, AgentRole};
+
+        let schema = tools_for_role(AgentRole::Acl)
+            .into_iter()
+            .find(|t| t.name == "dacl_edit")
+            .expect("acl registry missing dacl_edit")
+            .input_schema;
+
+        let required: Vec<String> = schema["required"]
+            .as_array()
+            .expect("dacl_edit schema declares no required array")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+
+        let mut payload = serde_json::Map::new();
+        for field in &required {
+            let value = match field.as_str() {
+                "domain" => "contoso.local",
+                "dc_ip" => "192.168.58.10",
+                "username" | "principal" => "alice",
+                "rights" => "GenericAll",
+                "target_dn" => {
+                    "CN={34034095-875D-4230-9232-2611A167C9E1},CN=Policies,CN=System,\
+                     DC=contoso,DC=local"
+                }
+                other => panic!("no sample value for newly required dacl_edit field {other:?}"),
+            };
+            payload.insert(field.clone(), serde_json::json!(value));
+        }
+        payload.insert("password".into(), serde_json::json!("P@ssw0rd!"));
+
+        ares_tools::acl::build_dacl_edit(&serde_json::Value::Object(payload)).unwrap_or_else(|e| {
+            panic!(
+                "a schema-obedient dacl_edit call carrying only {required:?} (plus the auth \
+                 material the worker injects) failed to build: {e}. The model cannot see \
+                 build_dacl_edit's requirements, only the schema — every field the builder \
+                 hard-requires must appear in the schema's `required` list, or the tool errors \
+                 on every dispatch."
+            )
+        });
+    }
+
     // ── Per-worker concurrency (Serial-loop wedge fix) ────────────────────
 
     /// Env-var tests serialise on this mutex — process-wide `set_var` is

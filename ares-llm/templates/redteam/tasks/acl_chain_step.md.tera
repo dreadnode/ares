@@ -24,6 +24,12 @@ The orchestrator has already resolved a credential that owns the right.
 {% if target_user -%}
 **Target object (we abuse the ACL against this):** `{{ target_user }}`
 {% endif -%}
+{% if target_type -%}
+**Target object class:** `{{ target_type }}`
+{% endif -%}
+{% if target_dn -%}
+**Target distinguished name (`target_dn` argument — pass verbatim):** `{{ target_dn }}`
+{% endif -%}
 {% if domain -%}
 **Domain:** `{{ domain }}`
 {% endif -%}
@@ -44,8 +50,11 @@ The orchestrator has already resolved a credential that owns the right.
 ### How to choose a tool
 
 Map the ACL right to the right exploit tool. All tools require `dc_ip` — use
-the value above. Pass `target` as the SAM account name of the target object
-(not its DN — the tools resolve DN themselves via LDAP).
+the value above. Pass `target` as the SAM account name of the target object;
+the tools resolve its DN themselves via LDAP. The one exception is `dacl_edit`,
+whose only target argument is `target_dn`: when a **Target distinguished name**
+is shown above, copy it verbatim. Never invent a DN — if the edge did not give
+you one and the tool needs one, say so in `task_complete`.
 
 | ACL right                        | Tool to call                      | Effect                                                |
 |----------------------------------|-----------------------------------|-------------------------------------------------------|
@@ -60,6 +69,7 @@ the value above. Pass `target` as the SAM account name of the target object
 | `writedacl`                      | `dacl_edit`                       | Grant ourselves an actionable right, then chain       |
 | `writeowner`                     | `owner_edit`, THEN `dacl_edit`    | Two calls, in this order — see below                  |
 | `self_membership` / `write_membership` on a GROUP | `bloodyad_add_group_member` | Add source principal to the group        |
+| any right on a **GPO** (`gpo_*`)  | `owner_edit` / `dacl_edit` with the DN | Take ownership, then grant ourselves GenericAll |
 
 **`writeowner` is a two-step edge.** WriteOwner does not give you write access
 to the target's DACL — it lets you *become the target's owner*, and an owner
@@ -71,6 +81,17 @@ the GenericAll as usual. Calling `dacl_edit` first on a `writeowner` edge can
 only fail — we do not hold WriteDacl yet. If `owner_edit` itself fails, report
 that failure; do not retry it as `dacl_edit` or `bloodyad_add_genericall`,
 which need the same right you were just refused.
+
+**Group Policy Object targets have no SAM account name.** A GPO's identity is
+the brace-wrapped container GUID (`{31B2F340-016D-11D2-945F-00C04FB984F9}`),
+and passing that GUID as `target` matches nothing — every one of these tools
+resolves a principal by sAMAccountName or by DN, and a GPO only has the latter.
+Use the **Target distinguished name** shown above: give it to `dacl_edit` as
+`target_dn`, and to `owner_edit` as `target` (that tool routes any value
+containing `=` to `-target-dn` for you). Do not fall back to `bloodyAD` or
+`pywhisker` on a GPO — neither has a GPO primitive. Once we own the GPO's DACL,
+report the finding; the orchestrator runs `pygpoabuse_immediate_task` for the
+code-execution half.
 
 **Group targets:** when `target_user` resolves to a group (e.g. `Domain Admins`,
 `DnsAdmins`, `Group Policy Creator Owners`, `Users`), use `bloodyad_add_group_member`

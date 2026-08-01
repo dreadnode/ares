@@ -435,6 +435,7 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
     // First pass: collect all objects with their sAMAccountName and objectSid
     #[derive(Default)]
     struct LdapObject {
+        dn: String,
         sam_account_name: String,
         /// `user`, `group`, `computer`, `grouppolicycontainer`, or the gMSA
         /// class — the most specific one the record carries.
@@ -497,6 +498,9 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
                 objects.push(current);
             }
             current = LdapObject::default();
+            if let Some(val) = line.strip_prefix("dn: ") {
+                current.dn = val.trim().to_string();
+            }
             continue;
         }
 
@@ -717,6 +721,9 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
             details_map.insert("domain".into(), json!(domain));
             details_map.insert("source_domain".into(), json!(domain));
             details_map.insert("description".into(), json!(description));
+            if !obj.dn.is_empty() {
+                details_map.insert("target_dn".into(), json!(obj.dn));
+            }
             // Extra context for GPO targets so auto_gpo_abuse's payload
             // builder can populate gpo_id / gpo_name / gpo_display_name
             // without an extra LDAP round-trip.
@@ -1350,6 +1357,62 @@ nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
             .as_str()
             .unwrap()
             .starts_with("acl_genericall_"));
+    }
+
+    #[test]
+    fn parse_acl_enumeration_emits_target_dn_for_a_user_target() {
+        let output = format!(
+            "\
+dn: CN=alice,CN=Users,DC=contoso,DC=local
+sAMAccountName: alice
+objectClass: user
+objectSid: S-1-5-21-1-2-1001
+
+dn: CN=bob,CN=Users,DC=contoso,DC=local
+sAMAccountName: bob
+objectClass: user
+nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
+"
+        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
+        assert_eq!(vulns.len(), 1, "Expected 1 vuln, got: {vulns:?}");
+        assert_eq!(
+            vulns[0]["details"]["target_dn"], "CN=bob,CN=Users,DC=contoso,DC=local",
+            "dacl_edit's only target argument is `target_dn`; dropping the DN the \
+             collector already printed forces the model to invent one"
+        );
+    }
+
+    #[test]
+    fn parse_acl_enumeration_gpo_target_carries_its_distinguished_name() {
+        let output = format!(
+            "\
+dn: CN=alice,CN=Users,DC=contoso,DC=local
+sAMAccountName: alice
+objectClass: user
+objectSid: S-1-5-21-1-2-1001
+
+dn: CN={{31B2F340-016D-11D2-945F-00C04FB984F9}},CN=Policies,CN=System,DC=contoso,DC=local
+objectClass: groupPolicyContainer
+cn: {{31B2F340-016D-11D2-945F-00C04FB984F9}}
+displayName: Default Domain Policy
+nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
+"
+        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
+        assert_eq!(vulns.len(), 1, "Expected 1 vuln, got: {vulns:?}");
+        let v = &vulns[0];
+        assert_eq!(v["vuln_type"], "gpo_genericall");
+        assert_eq!(v["target_type"], "GPO");
+        assert_eq!(v["target"], "{31B2F340-016D-11D2-945F-00C04FB984F9}");
+        assert_eq!(
+            v["details"]["target_dn"],
+            "CN={31B2F340-016D-11D2-945F-00C04FB984F9},CN=Policies,CN=System,DC=contoso,DC=local"
+        );
+        assert_eq!(
+            v["details"]["gpo_id"], "{31B2F340-016D-11D2-945F-00C04FB984F9}",
+            "auto_gpo_abuse still addresses the container by GUID"
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ pub(crate) fn generate_acl_analysis_prompt(
 ///
 /// Two payload shapes are supported:
 ///   1. Flat fields from `auto_dacl_abuse` (acl_type / source_user / target_user /
-///      target_ip / domain / vuln_id / credential).
+///      target_dn / target_type / target_ip / domain / vuln_id / credential).
 ///   2. Nested `step` object from `auto_acl_chain_follow` (raw BloodHound
 ///      step). Best-effort extraction of source/target/domain/dc_ip from the
 ///      step keys, falling back to the credential domain.
@@ -82,6 +82,12 @@ pub(crate) fn generate_acl_chain_step_prompt(
     }
     if let Some(v) = pick_str(&["target_user", "target", "to"]) {
         ctx.insert("target_user", &v);
+    }
+    if let Some(v) = pick_str(&["target_dn", "target_distinguished_name"]) {
+        ctx.insert("target_dn", &v);
+    }
+    if let Some(v) = pick_str(&["target_type", "target_class"]) {
+        ctx.insert("target_type", &v);
     }
     if let Some(v) = pick_str(&["domain"]).or_else(|| cred_domain.map(String::from)) {
         ctx.insert("domain", &v);
@@ -137,6 +143,54 @@ mod tests {
             "owner_edit must be named before dacl_edit — dacl_edit first on a \
              writeowner edge can only fail; row was: {row}"
         );
+    }
+
+    #[test]
+    fn gpo_step_surfaces_the_distinguished_name_and_names_the_dn_argument() {
+        let dn =
+            "CN={34034095-875D-4230-9232-2611A167C9E1},CN=Policies,CN=System,DC=contoso,DC=local";
+        let payload = json!({
+            "technique": "dacl_abuse",
+            "acl_type": "gpo_writeowner",
+            "vuln_id": "gpo_writeowner_alice__34034095_875d_4230_9232_2611a167c9e1_",
+            "source_user": "alice",
+            "target_user": "{34034095-875D-4230-9232-2611A167C9E1}",
+            "target_type": "GPO",
+            "target_dn": dn,
+            "target_ip": "192.168.58.10",
+            "domain": "contoso.local",
+        });
+        let prompt = generate_acl_chain_step_prompt("acl_chain_step_gpo", &payload, None)
+            .expect("GPO step must render");
+
+        assert!(
+            prompt.contains(dn),
+            "the DN is the only handle owneredit.py / dacledit.py accept for a GPO; \
+             without it in the prompt the model can only pass the bare GUID: {prompt}"
+        );
+        assert!(
+            prompt.contains("target_dn"),
+            "the prompt has to name the argument dacl_edit's schema requires"
+        );
+        assert!(
+            prompt.contains("Group Policy Object targets have no SAM account name"),
+            "the GPO steer must survive template edits"
+        );
+    }
+
+    #[test]
+    fn chain_step_omits_the_dn_block_when_the_edge_has_no_dn() {
+        let payload = json!({
+            "acl_type": "writeowner",
+            "source_user": "alice",
+            "target_user": "svc_sql",
+            "target_ip": "192.168.58.10",
+            "domain": "contoso.local",
+        });
+        let prompt = generate_acl_chain_step_prompt("acl_chain_step_3", &payload, None)
+            .expect("step without a DN must still render");
+        assert!(!prompt.contains("**Target distinguished name (`target_dn` argument"));
+        assert!(!prompt.contains("**Target object class:**"));
     }
 
     #[test]

@@ -91,6 +91,7 @@ fn right_severity(right: &str) -> u8 {
 /// One AD object as the collector saw it.
 struct BhObject {
     sid: String,
+    distinguished_name: String,
     /// sAMAccountName where the object has one, otherwise the DNS/UPN-stripped
     /// `Properties.name`. This is the identifier credentials are matched on.
     name: String,
@@ -132,6 +133,16 @@ fn display_name(properties: Option<&Value>, object_type: &str) -> String {
         Some((account, _)) if !account.is_empty() => account.to_string(),
         _ => name.to_string(),
     }
+}
+
+fn gpo_guid_from_dn(dn: &str) -> Option<String> {
+    let leaf = dn.split(',').next()?.trim();
+    let (attr, value) = leaf.split_once('=')?;
+    if !attr.trim().eq_ignore_ascii_case("cn") {
+        return None;
+    }
+    let value = value.trim();
+    (value.len() > 2 && value.starts_with('{') && value.ends_with('}')).then(|| value.to_string())
 }
 
 fn object_domain(properties: Option<&Value>, name: &str) -> String {
@@ -275,8 +286,16 @@ fn parse_document(doc: &Value, file_name: &str, out: &mut Vec<BhObject>) {
             })
             .unwrap_or_default();
 
+        let distinguished_name = properties
+            .and_then(|p| p.get("distinguishedname"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
         out.push(BhObject {
             sid: sid.to_string(),
+            distinguished_name,
             name,
             object_type: object_type.to_string(),
             domain,
@@ -419,6 +438,15 @@ pub fn parse_bloodhound_documents(files: &[(String, String)], params: &Value) ->
             details.insert("source_domain".into(), json!(source_domain));
             details.insert("description".into(), json!(description));
             details.insert("is_inherited".into(), json!(ace.is_inherited));
+            if !target.distinguished_name.is_empty() {
+                details.insert("target_dn".into(), json!(target.distinguished_name));
+            }
+            if target.object_type == "GPO" {
+                details.insert("gpo_name".into(), json!(target.name));
+                if let Some(guid) = gpo_guid_from_dn(&target.distinguished_name) {
+                    details.insert("gpo_id".into(), json!(guid));
+                }
+            }
             if !source_members.is_empty() {
                 details.insert("source_members".into(), json!(source_members));
             }
@@ -542,9 +570,60 @@ mod tests {
     const CAROL: &str = "S-1-5-21-111-222-333-1107";
     const HELPDESK: &str = "S-1-5-21-111-222-333-1200";
 
+    const GPO_GUID: &str = "{A1B2C3D4-0000-0000-0000-000000000001}";
+
     #[test]
     fn empty_input_yields_nothing() {
         assert!(parse_bloodhound_documents(&[], &params()).is_empty());
+    }
+
+    #[test]
+    fn gpo_guid_from_dn_accepts_only_a_policies_container_leaf() {
+        assert_eq!(
+            gpo_guid_from_dn(
+                "CN={A1B2C3D4-0000-0000-0000-000000000001},CN=Policies,CN=System,DC=contoso,DC=local"
+            )
+            .as_deref(),
+            Some(GPO_GUID)
+        );
+        assert_eq!(
+            gpo_guid_from_dn("CN=alice,CN=Users,DC=contoso,DC=local"),
+            None
+        );
+        assert_eq!(gpo_guid_from_dn(""), None);
+    }
+
+    #[test]
+    fn gpo_target_carries_dn_and_container_guid() {
+        let gpo = json!({
+            "ObjectIdentifier": "A1B2C3D4-0000-0000-0000-000000000001",
+            "Properties": {
+                "name": "DEFAULT DOMAIN POLICY@CONTOSO.LOCAL",
+                "domain": "CONTOSO.LOCAL",
+                "distinguishedname":
+                    "CN={A1B2C3D4-0000-0000-0000-000000000001},CN=Policies,CN=System,DC=contoso,DC=local",
+            },
+            "Aces": [ace(ALICE, "WriteOwner")],
+        });
+        let files = vec![
+            (
+                "users.json".into(),
+                doc("users", 5, vec![user(ALICE, "alice", json!([]))]),
+            ),
+            ("gpos.json".into(), doc("gpos", 5, vec![gpo])),
+        ];
+        let out = parse_bloodhound_documents(&files, &params());
+        assert_eq!(out.len(), 1, "expected one GPO edge, got: {out:?}");
+        let v = &out[0];
+        assert_eq!(v["vuln_type"], "writeowner");
+        assert_eq!(v["target_type"], "GPO");
+        assert_eq!(
+            v["details"]["target_dn"],
+            "CN={A1B2C3D4-0000-0000-0000-000000000001},CN=Policies,CN=System,DC=contoso,DC=local",
+            "a GPO has no sAMAccountName — the DN is the only handle the ACL tools accept"
+        );
+        assert_eq!(v["details"]["gpo_id"], GPO_GUID);
+        assert_eq!(v["details"]["gpo_name"], "DEFAULT DOMAIN POLICY");
     }
 
     #[test]

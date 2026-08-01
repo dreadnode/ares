@@ -44,6 +44,7 @@ pub(crate) struct GrantedAclEdge {
     pub source: String,
     pub target: String,
     pub target_type: String,
+    pub target_dn: String,
     pub domain: String,
 }
 
@@ -65,6 +66,12 @@ impl GrantedAclEdge {
         details.insert("target".into(), Value::String(self.target.clone()));
         details.insert("target_type".into(), Value::String(self.target_type));
         details.insert("domain".into(), Value::String(self.domain));
+        if !self.target_dn.is_empty() {
+            if let Some(guid) = gpo_guid_from_dn(&self.target_dn) {
+                details.insert("gpo_id".into(), Value::String(guid));
+            }
+            details.insert("target_dn".into(), Value::String(self.target_dn));
+        }
         ares_core::models::VulnerabilityInfo {
             vuln_id,
             vuln_type: self.right,
@@ -127,13 +134,31 @@ fn principal_name(raw: &str) -> String {
         .to_string()
 }
 
+/// Extract the `{GUID}` container id from a groupPolicyContainer DN.
+pub(crate) fn gpo_guid_from_dn(dn: &str) -> Option<String> {
+    let lower = dn.to_lowercase();
+    if !lower.contains(",cn=policies,cn=system,") {
+        return None;
+    }
+    let leaf = dn.split(',').next()?.trim();
+    let (attr, value) = leaf.split_once('=')?;
+    if !attr.trim().eq_ignore_ascii_case("cn") {
+        return None;
+    }
+    let value = value.trim();
+    (value.len() > 2 && value.starts_with('{') && value.ends_with('}')).then(|| value.to_string())
+}
+
 /// Resolve a `target_dn` to `(name, target_type)`.
 ///
 /// A DN whose every RDN is `DC=` is the domain head: the name becomes the
 /// dotted FQDN and the type `Domain`, which `acl_graph::is_high_value_terminal`
-/// treats as domain compromise. Everything else keeps `Unknown` — the same
-/// value `ldap_acl_enumeration` emits when it cannot classify an objectClass,
-/// and the value `auto_shadow_credentials` still accepts.
+/// treats as domain compromise. A groupPolicyContainer DN keeps its GUID as the
+/// name and is typed `GPO`, so the republished edge routes back through the DN
+/// path rather than being retried against a name nothing resolves. Everything
+/// else keeps `Unknown` — the same value `ldap_acl_enumeration` emits when it
+/// cannot classify an objectClass, and the value `auto_shadow_credentials`
+/// still accepts.
 fn resolve_target(target_dn: &str) -> Option<(String, String)> {
     let trimmed = target_dn.trim();
     if trimmed.is_empty() {
@@ -141,6 +166,9 @@ fn resolve_target(target_dn: &str) -> Option<(String, String)> {
     }
     if !trimmed.contains('=') {
         return Some((trimmed.to_string(), "Unknown".to_string()));
+    }
+    if let Some(guid) = gpo_guid_from_dn(trimmed) {
+        return Some((guid, "GPO".to_string()));
     }
     let rdns: Vec<&str> = trimmed.split(',').map(str::trim).collect();
     if rdns
@@ -241,6 +269,7 @@ pub(crate) fn extract_granted_acl_edges(payload: &Value) -> Vec<GrantedAclEdge> 
             source,
             target,
             target_type,
+            target_dn: arg("target_dn").to_string(),
             domain: arg("domain").to_string(),
         });
     }
@@ -463,6 +492,40 @@ mod tests {
         assert_eq!(vuln.details["target"], json!("bob"));
         assert_eq!(vuln.details["target_type"], json!("Unknown"));
         assert_eq!(vuln.details["domain"], json!("contoso.local"));
+    }
+
+    #[test]
+    fn republished_gpo_grant_keeps_the_dn_it_was_granted_against() {
+        let dn =
+            "CN={34034095-875D-4230-9232-2611A167C9E1},CN=Policies,CN=System,DC=contoso,DC=local";
+        let payload = json!({
+            "tool_outputs": [tool_entry(
+                "dacl_edit",
+                json!({
+                    "domain": "contoso.local",
+                    "username": "alice",
+                    "dc_ip": "192.168.58.10",
+                    "principal": "alice",
+                    "rights": "FullControl",
+                    "target_dn": dn,
+                }),
+                "[*] DACL modified successfully!",
+            )]
+        });
+
+        let edges = extract_granted_acl_edges(&payload);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target, "{34034095-875D-4230-9232-2611A167C9E1}");
+        assert_eq!(edges[0].target_type, "GPO");
+
+        let vuln = edges[0].clone().into_vulnerability();
+        assert_eq!(vuln.details["target_dn"], json!(dn));
+        assert_eq!(
+            vuln.details["gpo_id"],
+            json!("{34034095-875D-4230-9232-2611A167C9E1}"),
+            "without gpo_id and target_dn the republished edge is the same \
+             GUID-only record the ACL tools cannot bind on"
+        );
     }
 
     #[test]
@@ -761,6 +824,7 @@ mod tests {
             source: "Domain Users".to_string(),
             target: "WS01$".to_string(),
             target_type: "Computer".to_string(),
+            target_dn: String::new(),
             domain: "contoso.local".to_string(),
         };
         assert_eq!(edge.vuln_id(), "acl_genericwrite_domain_users_ws01");
