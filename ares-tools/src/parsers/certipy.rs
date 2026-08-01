@@ -8,6 +8,75 @@ pub const ESC_TYPES: &[&str] = &[
     "esc13", "esc14", "esc15",
 ];
 
+const SID_SECURITY_EXTENSION_OID: &str = "1.3.6.1.4.1.311.25.2";
+
+const MAX_DISABLED_EXTENSION_CONTINUATION: usize = 16;
+
+/// Read the CA-wide SID security-extension state out of a `certipy find`
+/// transcript.
+///
+/// Returns `Some(true)` when the issuing CA omits `szOID_NTDS_CA_SECURITY_EXT`
+/// from **every** certificate it issues (certipy v5 reports this as ESC16),
+/// `Some(false)` when the CA is known to stamp it, and `None` when the
+/// transcript does not say. The three answers are distinct: only the first two
+/// license a decision about whether a spoofed UPN survives KB5014754 strong
+/// mapping.
+///
+/// ESC16 is read as a fact about the CA rather than emitted as a vulnerability,
+/// because it has no exploit primitive of its own. Two independent markers are
+/// accepted: the `ESC16` vulnerability label, which certipy prints only when the
+/// bound principal can also enroll, and the raw `Disabled Extensions` property,
+/// which it prints either way.
+pub fn ca_security_extension_state(output: &str) -> Option<bool> {
+    if esc16_reported(output) {
+        return Some(true);
+    }
+    let oids = disabled_extension_oids(output)?;
+    Some(
+        oids.iter()
+            .any(|oid| oid.contains(SID_SECURITY_EXTENSION_OID)),
+    )
+}
+
+fn esc16_reported(output: &str) -> bool {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("ESC16") else {
+            continue;
+        };
+        if rest.is_empty() || rest.starts_with(' ') || rest.starts_with(':') {
+            return true;
+        }
+    }
+    false
+}
+
+fn disabled_extension_oids(output: &str) -> Option<Vec<String>> {
+    let mut lines = output.lines();
+    let value = loop {
+        let line = lines.next()?;
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Disabled Extensions") {
+            break rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+        }
+    };
+    if value.eq_ignore_ascii_case("Unknown") {
+        return None;
+    }
+    let mut oids = Vec::new();
+    if !value.is_empty() {
+        oids.push(value.to_string());
+    }
+    for cont in lines.take(MAX_DISABLED_EXTENSION_CONTINUATION) {
+        let trimmed = cont.trim();
+        if trimmed.is_empty() || trimmed.contains(':') || trimmed.starts_with('[') {
+            break;
+        }
+        oids.push(trimmed.to_string());
+    }
+    Some(oids)
+}
+
 pub fn parse_certipy_find(output: &str, params: &Value) -> Vec<Value> {
     // ca_host_ip is the ADCS CA server IP (where certs are enrolled).
     // target/target_ip is the DC IP used for LDAP queries.
@@ -37,6 +106,7 @@ pub fn parse_certipy_find(output: &str, params: &Value) -> Vec<Value> {
 
     let mut vulns = Vec::new();
     let output_lower = output.to_lowercase();
+    let sid_extension_disabled = ca_security_extension_state(output);
 
     // Strategy 1: Look for "[!] Vulnerabilities" section (certipy text output)
     let has_vuln_header = output_lower.contains("[!] vulnerabilities");
@@ -99,6 +169,9 @@ pub fn parse_certipy_find(output: &str, params: &Value) -> Vec<Value> {
             if !ca_host_ip.is_empty() {
                 details["ca_host"] = json!(ca_host_ip);
             }
+            if let Some(disabled) = sid_extension_disabled {
+                details["ca_security_extension_disabled"] = json!(disabled);
+            }
 
             // Include `template_name` in the vuln_id when present so two
             // distinct vulnerable templates of the same ESC type on the
@@ -119,7 +192,7 @@ pub fn parse_certipy_find(output: &str, params: &Value) -> Vec<Value> {
                 "discovered_by": "certipy_find",
                 "details": details,
                 "recommended_agent": "privesc",
-                "priority": esc_priority(esc_type),
+                "priority": esc_priority(esc_type, sid_extension_disabled == Some(true)),
             }));
         }
     }
@@ -383,7 +456,15 @@ fn slugify_template(name: &str) -> String {
 }
 
 /// Priority for ESC types (lower = more urgent).
-fn esc_priority(esc_type: &str) -> i32 {
+///
+/// `ca_omits_sid_extension` is the ESC16 fact from
+/// [`ca_security_extension_state`], and it only ever promotes: a CA that stamps
+/// the extension does not kill ESC9 or ESC10, so the `false` case must leave
+/// every rank alone.
+fn esc_priority(esc_type: &str, ca_omits_sid_extension: bool) -> i32 {
+    if ca_omits_sid_extension && matches!(esc_type, "esc9" | "esc10") {
+        return 1;
+    }
     match esc_type {
         "esc1" | "esc6" => 1,           // Direct enrollment → DA cert
         "esc4" | "esc8" => 2,           // Template abuse / relay
@@ -517,26 +598,41 @@ mod tests {
 
     #[test]
     fn esc_priority_ordering() {
-        assert!(esc_priority("esc1") < esc_priority("esc4"));
-        assert!(esc_priority("esc4") < esc_priority("esc5"));
+        assert!(esc_priority("esc1", false) < esc_priority("esc4", false));
+        assert!(esc_priority("esc4", false) < esc_priority("esc5", false));
     }
 
     #[test]
     fn esc_priority_all_values() {
-        assert_eq!(esc_priority("esc1"), 1);
-        assert_eq!(esc_priority("esc6"), 1);
-        assert_eq!(esc_priority("esc4"), 2);
-        assert_eq!(esc_priority("esc8"), 2);
-        assert_eq!(esc_priority("esc2"), 3);
-        assert_eq!(esc_priority("esc3"), 3);
-        assert_eq!(esc_priority("esc15"), 3);
-        assert_eq!(esc_priority("esc7"), 4);
-        assert_eq!(esc_priority("esc9"), 4);
-        assert_eq!(esc_priority("esc10"), 4);
-        assert_eq!(esc_priority("esc11"), 4);
-        assert_eq!(esc_priority("esc13"), 4);
-        assert_eq!(esc_priority("esc5"), 5);
-        assert_eq!(esc_priority("unknown"), 6);
+        assert_eq!(esc_priority("esc1", false), 1);
+        assert_eq!(esc_priority("esc6", false), 1);
+        assert_eq!(esc_priority("esc4", false), 2);
+        assert_eq!(esc_priority("esc8", false), 2);
+        assert_eq!(esc_priority("esc2", false), 3);
+        assert_eq!(esc_priority("esc3", false), 3);
+        assert_eq!(esc_priority("esc15", false), 3);
+        assert_eq!(esc_priority("esc7", false), 4);
+        assert_eq!(esc_priority("esc9", false), 4);
+        assert_eq!(esc_priority("esc10", false), 4);
+        assert_eq!(esc_priority("esc11", false), 4);
+        assert_eq!(esc_priority("esc13", false), 4);
+        assert_eq!(esc_priority("esc5", false), 5);
+        assert_eq!(esc_priority("unknown", false), 6);
+    }
+
+    #[test]
+    fn esc16_promotes_only_the_upn_spoof_family() {
+        assert_eq!(esc_priority("esc9", true), 1);
+        assert_eq!(esc_priority("esc10", true), 1);
+        for other in [
+            "esc1", "esc2", "esc3", "esc4", "esc5", "esc6", "esc7", "esc8", "esc11",
+        ] {
+            assert_eq!(
+                esc_priority(other, true),
+                esc_priority(other, false),
+                "{other} must not move on the ESC16 fact"
+            );
+        }
     }
 
     #[test]
@@ -840,5 +936,156 @@ Certificate Templates\n  0\n    Template Name                       : ESC1\n    
         assert_eq!(esc1["details"]["ca_dns_name"], "ca01.contoso.local");
         // Exploitation must target the CA host, not the DC used for LDAP.
         assert_eq!(esc1["target"], "192.168.58.50");
+    }
+
+    fn ca_block_with_esc16() -> String {
+        "\
+Certificate Authorities\n  0\n\
+    CA Name                             : CONTOSO-CA\n\
+    DNS Name                            : ca01.contoso.local\n\
+    Request Disposition                 : Issue\n\
+    Enforce Encryption for Requests     : Enabled\n\
+    Active Policy                       : CertificateAuthority_MicrosoftDefault.Policy\n\
+    Disabled Extensions                 : 1.3.6.1.4.1.311.25.2\n\
+    [!] Vulnerabilities\n\
+      ESC16                             : Security Extension is disabled.\n"
+            .to_string()
+    }
+
+    #[test]
+    fn ca_security_extension_state_reads_the_esc16_label() {
+        assert_eq!(
+            ca_security_extension_state(&ca_block_with_esc16()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn ca_security_extension_state_reads_the_oid_without_the_esc16_label() {
+        let output = "\
+    CA Name                             : CONTOSO-CA\n\
+    Request Disposition                 : Issue\n\
+    Disabled Extensions                 : 1.3.6.1.4.1.311.25.2\n";
+        assert_eq!(ca_security_extension_state(output), Some(true));
+    }
+
+    #[test]
+    fn ca_security_extension_state_reads_a_wrapped_oid_list() {
+        let output = "\
+    Disabled Extensions                 : 1.3.6.1.4.1.311.21.7\n\
+                                          1.3.6.1.4.1.311.25.2\n\
+    [!] Vulnerabilities\n";
+        assert_eq!(ca_security_extension_state(output), Some(true));
+    }
+
+    #[test]
+    fn ca_security_extension_state_is_false_when_the_ca_stamps_the_sid() {
+        let output = "\
+    CA Name                             : CONTOSO-CA\n\
+    Disabled Extensions                 : 1.3.6.1.4.1.311.21.7\n\
+    [!] Vulnerabilities\n\
+      ESC1                              : 'CONTOSO.LOCAL\\Domain Users' can enroll\n";
+        assert_eq!(ca_security_extension_state(output), Some(false));
+    }
+
+    #[test]
+    fn ca_security_extension_state_is_unknown_when_the_transcript_does_not_say() {
+        assert_eq!(ca_security_extension_state(""), None);
+        assert_eq!(
+            ca_security_extension_state("    CA Name : CONTOSO-CA\n"),
+            None
+        );
+        assert_eq!(
+            ca_security_extension_state("    Disabled Extensions                 : Unknown\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn esc16_produces_no_vulnerability_record() {
+        let vulns = parse_certipy_find(
+            &ca_block_with_esc16(),
+            &json!({ "target": "192.168.58.50", "domain": "contoso.local" }),
+        );
+        assert!(
+            vulns.is_empty(),
+            "ESC16 must not emit a vulnerability record, got {vulns:?}"
+        );
+    }
+
+    #[test]
+    fn parse_certipy_find_stamps_the_ca_fact_on_every_record() {
+        let output = format!(
+            "{}Certificate Templates\n  0\n\
+    Template Name                       : UserAuth\n\
+    [!] Vulnerabilities\n\
+      ESC9                              : 'CONTOSO.LOCAL\\alice' has dangerous permissions\n\
+  1\n\
+    Template Name                       : WebServer\n\
+    [!] Vulnerabilities\n\
+      ESC3                              : 'CONTOSO.LOCAL\\Domain Users' can enroll\n",
+            ca_block_with_esc16()
+        );
+        let vulns = parse_certipy_find(
+            &output,
+            &json!({ "target": "192.168.58.50", "domain": "contoso.local" }),
+        );
+        assert_eq!(
+            vulns.len(),
+            2,
+            "ESC16 must not inflate the record set, got {vulns:?}"
+        );
+        for v in &vulns {
+            assert_eq!(
+                v["details"]["ca_security_extension_disabled"], true,
+                "missing CA fact on {}",
+                v["vuln_id"]
+            );
+        }
+        let esc9 = vulns
+            .iter()
+            .find(|v| v["vuln_type"] == "adcs_esc9")
+            .unwrap_or_else(|| panic!("expected adcs_esc9 in {vulns:?}"));
+        assert_eq!(esc9["priority"], 1);
+        let esc3 = vulns
+            .iter()
+            .find(|v| v["vuln_type"] == "adcs_esc3")
+            .unwrap_or_else(|| panic!("expected adcs_esc3 in {vulns:?}"));
+        assert_eq!(esc3["priority"], 3);
+    }
+
+    #[test]
+    fn ca_that_stamps_the_sid_records_the_fact_without_reordering() {
+        let output = "\
+    CA Name                             : CONTOSO-CA\n\
+    Disabled Extensions                 : 1.3.6.1.4.1.311.21.7\n\
+Certificate Templates\n  0\n\
+    Template Name                       : UserAuth\n\
+    [!] Vulnerabilities\n\
+      ESC9                              : 'CONTOSO.LOCAL\\alice' has dangerous permissions\n";
+        let vulns = parse_certipy_find(
+            output,
+            &json!({ "target": "192.168.58.50", "domain": "contoso.local" }),
+        );
+        assert_eq!(vulns.len(), 1);
+        assert_eq!(vulns[0]["details"]["ca_security_extension_disabled"], false);
+        assert_eq!(vulns[0]["priority"], 4);
+    }
+
+    #[test]
+    fn unknown_ca_state_leaves_records_untouched() {
+        let output = "[!] Vulnerabilities\nESC9 : 'CONTOSO.LOCAL\\alice' has dangerous permissions";
+        let vulns = parse_certipy_find(
+            output,
+            &json!({ "target": "192.168.58.50", "domain": "contoso.local" }),
+        );
+        assert_eq!(vulns.len(), 1);
+        assert!(
+            vulns[0]["details"]
+                .get("ca_security_extension_disabled")
+                .is_none(),
+            "an unread CA must not assert either state"
+        );
+        assert_eq!(vulns[0]["priority"], 4);
     }
 }
