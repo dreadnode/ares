@@ -350,6 +350,51 @@ impl RedisStateReader {
         Ok(true)
     }
 
+    /// Fold `user`'s group memberships into the stored row for the same
+    /// `username@domain`, rewriting it in place.
+    ///
+    /// [`add_user`](Self::add_user) is first-writer-wins, so a later sighting
+    /// that finally carries `memberOf` is otherwise discarded. The restore path
+    /// (`load_state`) reads these rows straight back into `state.users`, so
+    /// without the rewrite a resumed operation regresses to empty membership.
+    pub async fn merge_user_member_of(
+        &self,
+        conn: &mut impl AsyncCommands,
+        user: &User,
+    ) -> Result<bool, redis::RedisError> {
+        if user.member_of.is_empty() {
+            return Ok(false);
+        }
+        let key = self.key(KEY_USERS);
+        let existing: Vec<String> = conn.lrange(&key, 0, -1).await?;
+        let dedup_key = format!(
+            "{}@{}",
+            user.username.to_lowercase(),
+            user.domain.to_lowercase()
+        );
+        for (idx, item) in existing.iter().enumerate() {
+            let Ok(mut stored) = serde_json::from_str::<User>(item) else {
+                continue;
+            };
+            let stored_key = format!(
+                "{}@{}",
+                stored.username.to_lowercase(),
+                stored.domain.to_lowercase()
+            );
+            if stored_key != dedup_key {
+                continue;
+            }
+            if !stored.merge_member_of(&user.member_of) {
+                return Ok(false);
+            }
+            let data = serde_json::to_string(&stored).unwrap_or_default();
+            let _: () = conn.lset(&key, idx as isize, &data).await?;
+            let _: () = conn.expire(&key, OP_TTL_SECS).await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Add a domain to Redis SET.
     pub async fn add_domain(
         &self,
@@ -1094,6 +1139,51 @@ mod tests {
 
         let users = reader.get_users(&mut conn).await.unwrap();
         assert_eq!(users.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn merge_user_member_of_rewrites_the_stored_row() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        assert!(reader
+            .add_user(&mut conn, &make_user("jdoe", "contoso.local"))
+            .await
+            .unwrap());
+
+        let mut with_groups = make_user("JDoe", "CONTOSO.LOCAL");
+        with_groups.member_of = vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".into()];
+        assert!(reader
+            .merge_user_member_of(&mut conn, &with_groups)
+            .await
+            .unwrap());
+
+        let users = reader.get_users(&mut conn).await.unwrap();
+        assert_eq!(users.len(), 1, "merging must not append a second row");
+        assert_eq!(
+            users[0].member_of,
+            vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string()]
+        );
+
+        assert!(
+            !reader
+                .merge_user_member_of(&mut conn, &with_groups)
+                .await
+                .unwrap(),
+            "a repeat merge adds nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_user_member_of_is_a_noop_for_an_unknown_principal() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let mut stranger = make_user("nobody", "contoso.local");
+        stranger.member_of = vec!["CN=Domain Admins,CN=Users,DC=contoso,DC=local".into()];
+        assert!(!reader
+            .merge_user_member_of(&mut conn, &stranger)
+            .await
+            .unwrap());
+        assert!(reader.get_users(&mut conn).await.unwrap().is_empty());
     }
 
     // -- get_shares / add_share ----------------------------------------------

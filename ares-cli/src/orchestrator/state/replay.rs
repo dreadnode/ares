@@ -60,6 +60,23 @@ pub struct ReplaySnapshot {
     pub revoked_certificates: HashMap<String, DateTime<Utc>>,
 }
 
+/// Apply one `UserDiscovered` event to a replayed user table.
+///
+/// `publish_user` emits a second event for the same principal when a later
+/// sighting adds group membership, so a blind push would leave two rows for one
+/// user and let the earlier membership-free row shadow the later one in
+/// whichever consumer reads first.
+fn upsert_replayed_user(users: &mut Vec<User>, user: &User) {
+    if let Some(existing) = users.iter_mut().find(|u| {
+        u.username.eq_ignore_ascii_case(&user.username)
+            && u.domain.eq_ignore_ascii_case(&user.domain)
+    }) {
+        existing.merge_member_of(&user.member_of);
+        return;
+    }
+    users.push(user.clone());
+}
+
 impl ReplaySnapshot {
     pub fn new(operation_id: impl Into<String>) -> Self {
         Self {
@@ -88,7 +105,7 @@ impl ReplaySnapshot {
                 }
             }
             OpStateEventPayload::UserDiscovered { user } => {
-                self.users.push(user.clone());
+                upsert_replayed_user(&mut self.users, user);
             }
             OpStateEventPayload::VulnDiscovered { vuln } => {
                 self.discovered_vulnerabilities
@@ -241,7 +258,7 @@ pub fn apply_event_to_state(state: &mut StateInner, event: &OpStateEvent) {
             }
         }
         OpStateEventPayload::UserDiscovered { user } => {
-            state.users.push(user.clone());
+            upsert_replayed_user(&mut state.users, user);
         }
         OpStateEventPayload::VulnDiscovered { vuln } => {
             state
@@ -506,6 +523,51 @@ mod tests {
         );
         assert_eq!(s.users.len(), 1);
         assert_eq!(s.users[0].username, "bob");
+    }
+
+    #[test]
+    fn user_discovered_folds_membership_into_the_replayed_row() {
+        let user = |groups: &[&str]| User {
+            username: "bob".into(),
+            domain: "contoso.local".into(),
+            description: String::new(),
+            is_admin: false,
+            source: "ldap".into(),
+            member_of: groups.iter().map(|g| (*g).to_string()).collect(),
+        };
+
+        let mut s = StateInner::new("op-1".into());
+        apply(
+            &mut s,
+            OpStateEventPayload::UserDiscovered { user: user(&[]) },
+        );
+        apply(
+            &mut s,
+            OpStateEventPayload::UserDiscovered {
+                user: user(&["CN=Cert Publishers,CN=Users,DC=contoso,DC=local"]),
+            },
+        );
+
+        assert_eq!(s.users.len(), 1);
+        assert_eq!(
+            s.users[0].member_of,
+            vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string()]
+        );
+
+        let mut snapshot = ReplaySnapshot::new("op-1");
+        for groups in [
+            vec![],
+            vec!["CN=Domain Admins,CN=Users,DC=contoso,DC=local"],
+        ] {
+            snapshot.apply(&OpStateEvent::new(
+                "op-1",
+                OpStateEventPayload::UserDiscovered {
+                    user: user(&groups),
+                },
+            ));
+        }
+        assert_eq!(snapshot.users.len(), 1);
+        assert_eq!(snapshot.users[0].member_of.len(), 1);
     }
 
     #[test]

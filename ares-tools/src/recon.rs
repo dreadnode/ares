@@ -432,6 +432,9 @@ pub fn build_ldap_search(args: &Value) -> Result<CommandBuilder> {
         {
             requested.push("objectClass");
         }
+        if !requested.iter().any(|a| a.eq_ignore_ascii_case("memberOf")) {
+            requested.push("memberOf");
+        }
         for attr in requested {
             cmd = cmd.arg(attr);
         }
@@ -1391,6 +1394,41 @@ mod tests {
         assert!(
             args_vec.iter().any(|a| a == "objectClass"),
             "objectClass must be appended when omitted, got: {args_vec:?}"
+        );
+    }
+
+    #[test]
+    fn ldap_search_forces_memberof_attribute() {
+        let args = json!({
+            "target": "192.168.58.1",
+            "domain": "contoso.local",
+            "filter": "(objectCategory=person)",
+            "attributes": "sAMAccountName,description"
+        });
+        let cmd = super::build_ldap_search(&args).unwrap();
+        let args_vec = cmd.args_for_test();
+        assert!(
+            args_vec.iter().any(|a| a == "memberOf"),
+            "memberOf must be appended when omitted, got: {args_vec:?}"
+        );
+    }
+
+    #[test]
+    fn ldap_search_does_not_duplicate_memberof() {
+        let args = json!({
+            "target": "192.168.58.1",
+            "domain": "contoso.local",
+            "attributes": "sAMAccountName,memberof"
+        });
+        let cmd = super::build_ldap_search(&args).unwrap();
+        let args_vec = cmd.args_for_test();
+        assert_eq!(
+            args_vec
+                .iter()
+                .filter(|a| a.eq_ignore_ascii_case("memberof"))
+                .count(),
+            1,
+            "got: {args_vec:?}"
         );
     }
 

@@ -93,6 +93,34 @@ pub struct User {
     pub member_of: Vec<String>,
 }
 
+impl User {
+    /// Fold `incoming` group memberships into this record, case-insensitively
+    /// deduped, and report whether the set grew.
+    ///
+    /// A principal is discovered many times over an operation and only some of
+    /// those sightings carry `memberOf` — the LDAP roster does, a netexec RID
+    /// brute does not. Every dedup layer is first-writer-wins, so without an
+    /// explicit fold the membership arrives after the bare row and is dropped.
+    pub fn merge_member_of(&mut self, incoming: &[String]) -> bool {
+        let mut known: Vec<String> = self.member_of.iter().map(|g| g.to_lowercase()).collect();
+        let mut grew = false;
+        for group in incoming {
+            let trimmed = group.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lower = trimmed.to_lowercase();
+            if known.contains(&lower) {
+                continue;
+            }
+            known.push(lower);
+            self.member_of.push(trimmed.to_string());
+            grew = true;
+        }
+        grew
+    }
+}
+
 /// AD built-in accounts that ship `userAccountControl & ACCOUNTDISABLE` set
 /// out of the box. Spraying or otherwise auth'ing against these can never
 /// succeed and just burns the per-account badPwdCount budget — which on
@@ -393,6 +421,31 @@ mod tests {
         assert!(json.contains("aes256key"));
         let deser: Hash = serde_json::from_str(&json).unwrap();
         assert_eq!(hash, deser);
+    }
+
+    #[test]
+    fn merge_member_of_folds_new_groups_and_dedups_case_insensitively() {
+        let mut user = User {
+            username: "alice".to_string(),
+            domain: "contoso.local".to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: "ldap_extraction".to_string(),
+            member_of: vec!["CN=Domain Admins,CN=Users,DC=contoso,DC=local".to_string()],
+        };
+
+        assert!(user.merge_member_of(&[
+            "cn=domain admins,cn=users,dc=contoso,dc=local".to_string(),
+            "CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string(),
+            "  ".to_string(),
+        ]));
+        assert_eq!(user.member_of.len(), 2);
+        assert_eq!(
+            user.member_of[0],
+            "CN=Domain Admins,CN=Users,DC=contoso,DC=local"
+        );
+
+        assert!(!user.merge_member_of(&["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".into()]));
     }
 
     #[test]

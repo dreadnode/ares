@@ -23,12 +23,20 @@ impl SharedState {
     /// from creating phantom users attributed to the wrong domain — e.g.
     /// a user in `child.contoso.local` appearing as `fabrikam.local\user`
     /// when enumerated via a cross-forest GC query.
+    ///
+    /// An exact duplicate returns `Ok(false)` but is not discarded: any group
+    /// membership it carries is folded into the stored row, in memory, in Redis
+    /// and as a fresh `UserDiscovered` event. Dedup here is first-writer-wins
+    /// and only some sightings of a principal carry `memberOf`, so without the
+    /// fold the LDAP roster's membership is lost behind whichever enumerator
+    /// saw the account first.
     pub async fn publish_user(
         &self,
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         user: User,
     ) -> Result<bool> {
         // Check for duplicate in memory (exact match or cross-domain trust match)
+        let mut duplicate_of: Option<usize> = None;
         {
             let state = self.inner.read().await;
             let dedup = format!(
@@ -39,7 +47,7 @@ impl SharedState {
             let username_lower = user.username.to_lowercase();
             let domain_lower = user.domain.to_lowercase();
 
-            for existing in &state.users {
+            for (idx, existing) in state.users.iter().enumerate() {
                 let existing_key = format!(
                     "{}@{}",
                     existing.username.to_lowercase(),
@@ -47,7 +55,8 @@ impl SharedState {
                 );
                 // Exact duplicate
                 if existing_key == dedup {
-                    return Ok(false);
+                    duplicate_of = Some(idx);
+                    break;
                 }
                 // Cross-domain duplicate: same username, different domain, trust exists
                 if existing.username.to_lowercase() == username_lower
@@ -73,6 +82,39 @@ impl SharedState {
         let operation_id = self.operation_id().await;
         let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
+
+        if let Some(idx) = duplicate_of {
+            if user.member_of.is_empty() {
+                return Ok(false);
+            }
+            let merged = {
+                let mut state = self.inner.write().await;
+                let Some(existing) = state.users.get_mut(idx) else {
+                    return Ok(false);
+                };
+                if !existing.merge_member_of(&user.member_of) {
+                    return Ok(false);
+                }
+                existing.clone()
+            };
+            reader.merge_user_member_of(&mut conn, &merged).await?;
+            emit_op_state(
+                self.recorder(),
+                &operation_id,
+                OpStateEventPayload::UserDiscovered {
+                    user: merged.clone(),
+                },
+            )
+            .await;
+            tracing::debug!(
+                username = %merged.username,
+                domain = %merged.domain,
+                groups = merged.member_of.len(),
+                "Merged LDAP group membership into known user"
+            );
+            return Ok(false);
+        }
+
         let added = reader.add_user(&mut conn, &user).await?;
         if added {
             emit_op_state(
@@ -742,6 +784,41 @@ mod tests {
 
         let s = state.inner.read().await;
         assert_eq!(s.users.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_user_dedup_folds_late_member_of_into_the_stored_row() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let mut bare = make_user("alice", "contoso.local");
+        bare.source = "netexec_user_enum".into();
+        assert!(state.publish_user(&q, bare).await.unwrap());
+
+        let mut with_groups = make_user("alice", "contoso.local");
+        with_groups.member_of = vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".into()];
+        assert!(
+            !state.publish_user(&q, with_groups).await.unwrap(),
+            "a re-sighting is not a new user"
+        );
+
+        {
+            let s = state.inner.read().await;
+            assert_eq!(s.users.len(), 1);
+            assert_eq!(
+                s.users[0].member_of,
+                vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string()]
+            );
+        }
+
+        let reader = RedisStateReader::new("op-1".to_string());
+        let mut conn = q.connection();
+        let stored = reader.get_users(&mut conn).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].member_of,
+            vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string()]
+        );
     }
 
     #[tokio::test]

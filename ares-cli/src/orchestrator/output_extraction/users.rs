@@ -66,6 +66,11 @@ static RE_SMB_TIMESTAMP: LazyLock<Regex> = LazyLock::new(|| {
 static RE_OBJECTCLASS_NONUSER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^\s*objectclass:\s*(?:group|computer)\s*$").unwrap());
 
+static RE_OBJECTCLASS_GROUP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^\s*objectclass:\s*group\s*$").unwrap());
+
+const MAX_GROUP_MEMBERS: usize = 200;
+
 /// Check if a domain string looks like a machine hostname rather than an AD domain.
 ///
 /// Machine FQDNs like `win-g7fpa5zzxzv.w5an.local` or NetBIOS machine names like
@@ -134,46 +139,208 @@ pub fn is_valid_extracted_user(username: &str, domain: &str) -> bool {
     true
 }
 
+/// One LDIF entry's buffered state, held until the record boundary.
+#[derive(Default)]
+struct LdifRecord {
+    dn: String,
+    sam: Vec<(String, String)>,
+    member_of: Vec<String>,
+    members: Vec<String>,
+    is_non_user: bool,
+    is_group: bool,
+}
+
+/// Which multi-line LDIF value the next `  ` continuation line extends.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Folded {
+    None,
+    Dn,
+    MemberOf,
+    Member,
+}
+
+/// The value of `attr` on an LDIF line, or `None` when the line names a
+/// different attribute or carries a base64 (`attr::`) value.
+fn ldif_value<'a>(stripped: &'a str, attr: &str) -> Option<&'a str> {
+    if !stripped.get(..attr.len())?.eq_ignore_ascii_case(attr) {
+        return None;
+    }
+    let rest = stripped.get(attr.len()..)?.strip_prefix(':')?;
+    if rest.starts_with(':') {
+        return None;
+    }
+    Some(rest.trim())
+}
+
+/// Split a distinguished name on its unescaped commas, unescaping `\,` and
+/// `\=` in the components that come back.
+fn split_dn(dn: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for ch in dn.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            ',' => out.push(std::mem::take(&mut current)),
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+/// The realm a DN sits in, assembled from its `DC=` components.
+fn dn_domain(components: &[String]) -> String {
+    let labels: Vec<&str> = components
+        .iter()
+        .filter_map(|c| {
+            let c = c.trim();
+            if c.get(..3)?.eq_ignore_ascii_case("dc=") {
+                Some(c[3..].trim())
+            } else {
+                None
+            }
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    labels.join(".")
+}
+
+/// The principal a group's `member` DN names, as `(sAMAccountName, realm)`.
+///
+/// Computer members are returned with the trailing `$` their sAMAccountName
+/// actually carries, because that is the string a captured machine hash is
+/// keyed by — dropping it would make an ACL edge sourced at a machine-only
+/// group look unmapped when ares in fact holds the member's material.
+fn member_principal_from_dn(dn: &str) -> Option<(String, String)> {
+    let components = split_dn(dn);
+    let first = components.first()?.trim();
+    if !first.get(..3)?.eq_ignore_ascii_case("cn=") {
+        return None;
+    }
+    let name = first[3..].trim();
+    if name.is_empty() || name.to_uppercase().starts_with("S-1-") {
+        return None;
+    }
+    let lower_dn = dn.to_lowercase();
+    if lower_dn.contains(",cn=foreignsecurityprincipals,") {
+        return None;
+    }
+    let is_computer = lower_dn.contains(",cn=computers,")
+        || lower_dn.contains(",ou=domain controllers,")
+        || lower_dn.contains(",cn=domain controllers,");
+    let username = if is_computer && !name.ends_with('$') {
+        format!("{name}$")
+    } else {
+        name.to_string()
+    };
+    Some((username, dn_domain(&components)))
+}
+
+/// A member principal passes the extraction guards, tolerating the `$` a
+/// machine account's sAMAccountName ends with.
+fn is_valid_member_principal(username: &str, domain: &str) -> bool {
+    let bare = username.strip_suffix('$').unwrap_or(username);
+    is_valid_extracted_user(bare, domain)
+}
+
+/// Record `username@domain` as an `ldap_extraction` user, folding `member_of`
+/// into an entry this pass already emitted rather than dropping it.
+fn upsert_user(
+    users: &mut Vec<User>,
+    seen: &mut std::collections::HashMap<String, usize>,
+    username: String,
+    domain: String,
+    source: &str,
+    member_of: Vec<String>,
+) {
+    let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+    if let Some(idx) = seen.get(&key) {
+        users[*idx].merge_member_of(&member_of);
+        return;
+    }
+    seen.insert(key, users.len());
+    users.push(User {
+        username,
+        domain,
+        description: String::new(),
+        is_admin: false,
+        source: source.to_string(),
+        member_of,
+    });
+}
+
 /// Emit buffered `sAMAccountName` finds for one completed LDIF record as
 /// `ldap_extraction` users — unless the record was flagged a group/computer,
 /// in which case they are discarded. Buffering to a record boundary makes the
 /// group/computer decision independent of whether `objectClass:` appears
 /// before or after `sAMAccountName:` in the entry.
+///
+/// A group record's own name stays dropped, but its `member` DNs are emitted
+/// as membership evidence: an ACE whose trustee is a group display name has no
+/// principal to authenticate as until something maps that name to a member.
 fn flush_ldap_record(
-    pending: &mut Vec<(String, String)>,
-    record_is_non_user: bool,
+    record: &mut LdifRecord,
     users: &mut Vec<User>,
-    seen: &mut std::collections::HashSet<String>,
+    seen: &mut std::collections::HashMap<String, usize>,
+    fallback_domain: &str,
 ) {
-    let drained = std::mem::take(pending);
-    if record_is_non_user {
-        return;
-    }
-    for (raw_username, raw_domain) in drained {
-        let username = raw_username.trim().trim_end_matches('.').to_string();
-        let domain = raw_domain.trim().trim_end_matches('.').to_string();
-        if !is_valid_extracted_user(&username, &domain) {
-            continue;
-        }
-        let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
-        if seen.insert(key) {
-            users.push(User {
+    let record = std::mem::take(record);
+    if !record.is_non_user {
+        for (raw_username, raw_domain) in record.sam {
+            let username = raw_username.trim().trim_end_matches('.').to_string();
+            let domain = raw_domain.trim().trim_end_matches('.').to_string();
+            if !is_valid_extracted_user(&username, &domain) {
+                continue;
+            }
+            upsert_user(
+                users,
+                seen,
                 username,
                 domain,
-                description: String::new(),
-                is_admin: false,
-                // High-confidence: sAMAccountName attribute is only
-                // emitted by an LDAP server, not by tool prose.
-                source: "ldap_extraction".to_string(),
-                member_of: Vec::new(),
-            });
+                "ldap_extraction",
+                record.member_of.clone(),
+            );
         }
+    }
+
+    if !record.is_group || record.dn.trim().is_empty() {
+        return;
+    }
+    let group = record.dn.trim().to_string();
+    for member_dn in record.members.iter().take(MAX_GROUP_MEMBERS) {
+        let Some((username, dn_realm)) = member_principal_from_dn(member_dn.trim()) else {
+            continue;
+        };
+        let domain = if dn_realm.is_empty() {
+            fallback_domain.to_string()
+        } else {
+            dn_realm
+        };
+        if !is_valid_member_principal(&username, &domain) {
+            continue;
+        }
+        upsert_user(
+            users,
+            seen,
+            username,
+            domain,
+            "ldap_extraction",
+            vec![group.clone()],
+        );
     }
 }
 
 pub fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
     let mut users = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::HashMap::new();
     let mut current_domain = default_domain.to_string();
 
     // LDAP record buffering: `sAMAccountName` finds are held until the record
@@ -181,21 +348,58 @@ pub fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
     // not a group/computer. netexec/rpcclient output has neither `dn:` lines
     // nor blank-line-delimited records, so its users flow straight through the
     // final flush unaffected.
-    let mut pending_ldap: Vec<(String, String)> = Vec::new();
-    let mut record_is_non_user = false;
+    let mut record = LdifRecord::default();
+    let mut folded = Folded::None;
 
     for line in output.lines() {
+        if folded != Folded::None && line.starts_with(' ') && !line[1..].starts_with(' ') {
+            let continuation = &line[1..];
+            match folded {
+                Folded::Dn => record.dn.push_str(continuation),
+                Folded::MemberOf => {
+                    if let Some(last) = record.member_of.last_mut() {
+                        last.push_str(continuation);
+                    }
+                }
+                Folded::Member => {
+                    if let Some(last) = record.members.last_mut() {
+                        last.push_str(continuation);
+                    }
+                }
+                Folded::None => {}
+            }
+            continue;
+        }
+        folded = Folded::None;
+
         let stripped = line.trim();
 
         // Record boundary: a new `dn:` entry or a blank separator flushes the
         // record that just ended and resets the group/computer flag.
         if stripped.is_empty() || stripped.len() >= 3 && stripped[..3].eq_ignore_ascii_case("dn:") {
-            flush_ldap_record(&mut pending_ldap, record_is_non_user, &mut users, &mut seen);
-            record_is_non_user = false;
+            flush_ldap_record(&mut record, &mut users, &mut seen, &current_domain);
+        }
+
+        if let Some(dn) = ldif_value(stripped, "dn") {
+            record.dn = dn.to_string();
+            folded = Folded::Dn;
+        } else if let Some(group) = ldif_value(stripped, "memberOf") {
+            if !group.is_empty() {
+                record.member_of.push(group.to_string());
+                folded = Folded::MemberOf;
+            }
+        } else if let Some(member) = ldif_value(stripped, "member") {
+            if !member.is_empty() {
+                record.members.push(member.to_string());
+                folded = Folded::Member;
+            }
         }
 
         if RE_OBJECTCLASS_NONUSER.is_match(stripped) {
-            record_is_non_user = true;
+            record.is_non_user = true;
+        }
+        if RE_OBJECTCLASS_GROUP.is_match(stripped) {
+            record.is_group = true;
         }
 
         if let Some(caps) = RE_DOMAIN_CONTEXT.captures(stripped) {
@@ -269,7 +473,7 @@ pub fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
                 .strip_prefix(|c: char| c == ' ' || c == '\t')
                 .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_alphanumeric()));
             if !value_continues {
-                pending_ldap.push((user.to_string(), current_domain.clone()));
+                record.sam.push((user.to_string(), current_domain.clone()));
             }
         }
 
@@ -284,23 +488,20 @@ pub fn extract_users(output: &str, default_domain: &str) -> Vec<User> {
             if !is_valid_extracted_user(&username, &domain) {
                 continue;
             }
-            let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
-            if seen.insert(key) {
-                users.push(User {
-                    username,
-                    domain,
-                    description: String::new(),
-                    is_admin: false,
-                    source: "output_extraction".to_string(),
-                    member_of: Vec::new(),
-                });
-            }
+            upsert_user(
+                &mut users,
+                &mut seen,
+                username,
+                domain,
+                "output_extraction",
+                Vec::new(),
+            );
         }
     }
 
     // Flush the final record (output that doesn't end on a blank line, or
     // netexec/rpcclient output with no record delimiters at all).
-    flush_ldap_record(&mut pending_ldap, record_is_non_user, &mut users, &mut seen);
+    flush_ldap_record(&mut record, &mut users, &mut seen, &current_domain);
 
     users
 }
@@ -579,6 +780,219 @@ SMB  192.168.58.10  445  DC01  [+] user:[alice]";
         let users = extract_users(output, "");
         let alice = users.iter().find(|u| u.username == "alice").unwrap();
         assert_eq!(alice.domain, "contoso.local");
+    }
+
+    #[test]
+    fn extract_users_captures_member_of_from_user_record() {
+        let output = "\
+dn: CN=alice,CN=Users,DC=contoso,DC=local
+objectClass: user
+sAMAccountName: alice
+memberOf: CN=Cert Publishers,CN=Users,DC=contoso,DC=local
+memberOf: CN=Domain Admins,CN=Users,DC=contoso,DC=local
+";
+        let users = extract_users(output, "contoso.local");
+        let alice = users.iter().find(|u| u.username == "alice").unwrap();
+        assert_eq!(
+            alice.member_of,
+            vec![
+                "CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string(),
+                "CN=Domain Admins,CN=Users,DC=contoso,DC=local".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_users_unfolds_wrapped_member_of() {
+        let output = "\
+dn: CN=bob,CN=Users,DC=contoso,DC=local
+objectClass: user
+sAMAccountName: bob
+memberOf: CN=Certificate Service DCOM Access,CN=Builtin,DC=contoso,DC=lo
+ cal
+";
+        let users = extract_users(output, "contoso.local");
+        let bob = users.iter().find(|u| u.username == "bob").unwrap();
+        assert_eq!(
+            bob.member_of,
+            vec!["CN=Certificate Service DCOM Access,CN=Builtin,DC=contoso,DC=local".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_users_ignores_base64_member_of() {
+        let output = "\
+dn: CN=carol,CN=Users,DC=contoso,DC=local
+objectClass: user
+sAMAccountName: carol
+memberOf:: Q049R3JvdXA=
+";
+        let users = extract_users(output, "contoso.local");
+        let carol = users.iter().find(|u| u.username == "carol").unwrap();
+        assert!(carol.member_of.is_empty());
+    }
+
+    #[test]
+    fn extract_users_group_record_emits_its_members() {
+        let output = "\
+dn: CN=Cert Publishers,CN=Users,DC=contoso,DC=local
+objectClass: group
+sAMAccountName: Cert Publishers
+member: CN=alice,CN=Users,DC=contoso,DC=local
+member: CN=svc_ca,OU=Service Accounts,DC=contoso,DC=local
+";
+        let users = extract_users(output, "contoso.local");
+        assert!(
+            !users.iter().any(|u| u.username == "Cert"),
+            "the group's own name must not become a user"
+        );
+        let alice = users.iter().find(|u| u.username == "alice").unwrap();
+        assert_eq!(alice.domain, "contoso.local");
+        assert_eq!(alice.source, "ldap_extraction");
+        assert_eq!(
+            alice.member_of,
+            vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string()]
+        );
+        assert!(users.iter().any(|u| u.username == "svc_ca"));
+    }
+
+    #[test]
+    fn extract_users_group_member_keeps_machine_account_suffix() {
+        let output = "\
+dn: CN=Cert Publishers,CN=Users,DC=contoso,DC=local
+objectClass: group
+member: CN=CA01,CN=Computers,DC=contoso,DC=local
+member: CN=DC01,OU=Domain Controllers,DC=contoso,DC=local
+";
+        let users = extract_users(output, "contoso.local");
+        assert!(users.iter().any(|u| u.username == "CA01$"));
+        assert!(users.iter().any(|u| u.username == "DC01$"));
+    }
+
+    #[test]
+    fn extract_users_group_member_domain_comes_from_the_dn() {
+        let output = "\
+dn: CN=Enterprise Admins,CN=Users,DC=contoso,DC=local
+objectClass: group
+member: CN=bob,CN=Users,DC=child,DC=contoso,DC=local
+";
+        let users = extract_users(output, "contoso.local");
+        let bob = users.iter().find(|u| u.username == "bob").unwrap();
+        assert_eq!(bob.domain, "child.contoso.local");
+    }
+
+    #[test]
+    fn extract_users_group_skips_foreign_security_principals() {
+        let output = "\
+dn: CN=Domain Admins,CN=Users,DC=contoso,DC=local
+objectClass: group
+member: CN=S-1-5-21-1111111111-2222222222-3333333333-1105,CN=ForeignSecurityPrincipals,DC=contoso,DC=local
+";
+        let users = extract_users(output, "contoso.local");
+        assert!(users.is_empty(), "an SID placeholder names no principal");
+    }
+
+    #[test]
+    fn extract_users_group_membership_merges_into_a_known_user() {
+        let output = "\
+dn: CN=alice,CN=Users,DC=contoso,DC=local
+objectClass: user
+sAMAccountName: alice
+memberOf: CN=Domain Admins,CN=Users,DC=contoso,DC=local
+
+dn: CN=Cert Publishers,CN=Users,DC=contoso,DC=local
+objectClass: group
+member: CN=alice,CN=Users,DC=contoso,DC=local
+";
+        let users = extract_users(output, "contoso.local");
+        let alice: Vec<_> = users.iter().filter(|u| u.username == "alice").collect();
+        assert_eq!(alice.len(), 1, "one row per principal");
+        assert_eq!(alice[0].member_of.len(), 2);
+        assert!(alice[0]
+            .member_of
+            .iter()
+            .any(|g| g.starts_with("CN=Cert Publishers,")));
+    }
+
+    #[test]
+    fn extract_users_group_members_are_capped() {
+        let mut output =
+            String::from("dn: CN=Big Group,CN=Users,DC=contoso,DC=local\nobjectClass: group\n");
+        for i in 0..(MAX_GROUP_MEMBERS + 50) {
+            output.push_str(&format!(
+                "member: CN=user{i},CN=Users,DC=contoso,DC=local\n"
+            ));
+        }
+        let users = extract_users(&output, "contoso.local");
+        assert_eq!(users.len(), MAX_GROUP_MEMBERS);
+    }
+
+    #[test]
+    fn extract_users_netexec_output_is_unchanged_by_ldif_handling() {
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*] Windows Server 2019 (name:DC01) (domain:contoso.local) (signing:True)
+SMB  192.168.58.10  445  DC01  [+] user:[alice] rid:[0x44f]
+SMB  192.168.58.10  445  DC01  [+] user:[bob] rid:[0x450]";
+        let users = extract_users(output, "contoso.local");
+        assert_eq!(users.len(), 2);
+        assert!(users.iter().all(|u| u.member_of.is_empty()));
+    }
+
+    #[test]
+    fn extracted_membership_resolves_a_group_sourced_acl_edge() {
+        use crate::orchestrator::acl_graph::{resolve_group_source, SourceMaterial};
+        use crate::orchestrator::state::StateInner;
+
+        let output = "\
+dn: CN=Cert Publishers,CN=Users,DC=contoso,DC=local
+objectClass: group
+member: CN=alice,CN=Users,DC=contoso,DC=local
+";
+        let mut state = StateInner::new("op-1".into());
+        state.users = extract_users(output, "contoso.local");
+        state.credentials.push(ares_core::models::Credential {
+            id: "cred-alice".into(),
+            username: "alice".into(),
+            password: "P@ssw0rd!".into(), // pragma: allowlist secret
+            domain: "contoso.local".into(),
+            source: "test".into(),
+            is_admin: false,
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+        });
+
+        match resolve_group_source(&state, "Cert Publishers", "contoso.local") {
+            Ok(SourceMaterial::Credential(c)) => assert_eq!(c.username, "alice"),
+            other => panic!("expected alice's credential, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn machine_only_group_is_owned_member_missing_not_unmapped() {
+        use crate::orchestrator::acl_graph::{resolve_group_source, UnresolvedSource};
+        use crate::orchestrator::state::StateInner;
+
+        let output = "\
+dn: CN=Cert Publishers,CN=Users,DC=contoso,DC=local
+objectClass: group
+member: CN=CA01,CN=Computers,DC=contoso,DC=local
+";
+        let mut state = StateInner::new("op-1".into());
+        state.users = extract_users(output, "contoso.local");
+        state.users.push(User {
+            username: "alice".into(),
+            domain: "contoso.local".into(),
+            description: String::new(),
+            is_admin: false,
+            source: "ldap_extraction".into(),
+            member_of: Vec::new(),
+        });
+
+        assert_eq!(
+            resolve_group_source(&state, "Cert Publishers", "contoso.local"),
+            Err(UnresolvedSource::GroupNoOwnedMember)
+        );
     }
 
     #[test]

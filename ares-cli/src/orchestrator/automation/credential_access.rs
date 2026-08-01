@@ -514,6 +514,7 @@ pub(crate) fn select_username_spray_work(
         .users
         .iter()
         .filter(|u| !u.domain.is_empty())
+        .filter(|u| !u.username.ends_with('$'))
         .filter(|u| !ares_core::models::is_always_disabled_account(&u.username))
         .filter(|u| !delegation.contains(&u.username.to_lowercase()))
         .filter(|u| !state.is_principal_quarantined(&u.username, &u.domain))
@@ -1729,6 +1730,18 @@ mod tests {
         s.users.push(make_user("alice", "contoso.local"));
         let work = select_username_spray_work(&s, 10);
         // Only alice survives.
+        assert_eq!(work.len(), 1);
+        assert!(work[0].0.contains(":alice"));
+    }
+
+    #[test]
+    fn select_spray_skips_machine_accounts() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.users.push(make_user("CA01$", "contoso.local"));
+        s.users.push(make_user("alice", "contoso.local"));
+        let work = select_username_spray_work(&s, 10);
         assert_eq!(work.len(), 1);
         assert!(work[0].0.contains(":alice"));
     }
