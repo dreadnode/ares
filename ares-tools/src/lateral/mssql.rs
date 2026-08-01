@@ -62,12 +62,12 @@ fn mssql_auth_args(
 }
 
 /// Pipe a SQL query via stdin to an mssqlclient CommandBuilder and execute.
-async fn mssql_query(cmd: CommandBuilder, query: &str) -> Result<ToolOutput> {
+pub(crate) async fn mssql_query(cmd: CommandBuilder, query: &str) -> Result<ToolOutput> {
     cmd.stdin(format!("{query}\nexit\n")).execute().await
 }
 
 /// Extract common MSSQL args from JSON and build a base CommandBuilder.
-fn mssql_from_args(args: &Value) -> Result<CommandBuilder> {
+pub(crate) fn mssql_from_args(args: &Value) -> Result<CommandBuilder> {
     let target = required_str(args, "target")?;
     let username = required_str(args, "username")?;
     let password = optional_str(args, "password");
@@ -396,7 +396,7 @@ Remove-Item $a,$b,$c -Force -ErrorAction SilentlyContinue"#,
 /// standard-base64. This is the encoding `powershell.exe -EncodedCommand`
 /// expects and it means no single-quote / double-quote escaping is
 /// required through the `EXEC ('xp_cmdshell ''<cmd>''') AT [link]` wrapper.
-fn ps_encoded_command(script: &str) -> String {
+pub(crate) fn ps_encoded_command(script: &str) -> String {
     let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     base64::engine::general_purpose::STANDARD.encode(utf16)
 }

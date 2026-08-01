@@ -205,6 +205,7 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "nopac" => privesc::nopac(arguments).await,
         "printnightmare" => privesc::printnightmare(arguments).await,
         "petitpotam_unauth" => privesc::petitpotam_unauth(arguments).await,
+        "windows_stage_and_run" => privesc::windows_stage_and_run(arguments).await,
 
         // ── ACL Exploitation ────────────────────────────────────────
         "bloodyad_add_group_member" => acl::bloodyad_add_group_member(arguments).await,

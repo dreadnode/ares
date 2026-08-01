@@ -54,6 +54,7 @@ const LLM_DIRECTED_SHELLS: &[&str] = &[
     "mssql_command",
     "mssql_exec_linked",
     "mssql_linked_xpcmdshell",
+    "windows_stage_and_run",
     "pth_winexe",
     "pth_wmic",
     "ssh_with_password",

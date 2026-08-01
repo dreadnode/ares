@@ -123,6 +123,7 @@ pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("certipy_esc4_full_chain", "T1649"),
         ("rbcd_write", "T1134.001"),
         ("s4u_attack", "T1134.001"),
+        ("windows_stage_and_run", "T1134.001"),
         ("find_delegation", "T1087.002"),
         ("unconstrained_tgt_dump", "T1558.001"),
         ("unconstrained_coerce_and_capture", "T1558.001"),
@@ -265,6 +266,7 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         // ── PrivilegeEscalationTools ────────────────────────────────────
         ("dnstool", "PrivilegeEscalationTools"),
         ("add_computer", "PrivilegeEscalationTools"),
+        ("windows_stage_and_run", "PrivilegeEscalationTools"),
         // ── CVEExploitTools ─────────────────────────────────────────────
         ("nopac", "CVEExploitTools"),
         ("printnightmare", "CVEExploitTools"),

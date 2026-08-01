@@ -114,6 +114,9 @@ roles:
           - impacket-secretsdump
           - impacket-psexec
         fn_names: [generate_golden_ticket, generate_silver_ticket, add_computer, rbcd_write, extract_trust_key, create_inter_realm_ticket, get_sid]
+      - category: On-target payload staging
+        binaries: [impacket-smbserver]
+        fn_names: [windows_stage_and_run]
 
   lateral:
     provisioned_by: ansible/playbooks/ares/lateral_movement.yml

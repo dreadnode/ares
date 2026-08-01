@@ -425,7 +425,24 @@ impl RunOptions {
 /// 250ms via a connect probe to `127.0.0.1:<port>`; a connection refused
 /// means nothing is listening. Returns `Ok(())` as soon as the port is
 /// free, `Err(reason)` if `timeout` elapses while it's still held.
-async fn wait_for_port_free(port: u16, timeout: Duration) -> std::result::Result<(), String> {
+/// True when `ip` parses as a routable address bound to a local interface.
+/// Rejects loopback, unspecified and multicast addresses outright.
+pub(crate) fn is_local_interface_ip(ip: &str) -> bool {
+    use std::net::{IpAddr, UdpSocket};
+    let parsed: IpAddr = match ip.parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    if parsed.is_loopback() || parsed.is_unspecified() || parsed.is_multicast() {
+        return false;
+    }
+    UdpSocket::bind((parsed, 0)).is_ok()
+}
+
+pub(crate) async fn wait_for_port_free(
+    port: u16,
+    timeout: Duration,
+) -> std::result::Result<(), String> {
     use tokio::net::TcpStream;
     let deadline = std::time::Instant::now() + timeout;
     let addr = format!("127.0.0.1:{port}");
@@ -493,15 +510,7 @@ impl CoerceProcs for RealCoerceProcs {
     type Handle = RealRelayHandle;
 
     fn is_local_ip(&self, ip: &str) -> bool {
-        use std::net::{IpAddr, UdpSocket};
-        let parsed: IpAddr = match ip.parse() {
-            Ok(addr) => addr,
-            Err(_) => return false,
-        };
-        if parsed.is_loopback() || parsed.is_unspecified() || parsed.is_multicast() {
-            return false;
-        }
-        UdpSocket::bind((parsed, 0)).is_ok()
+        is_local_interface_ip(ip)
     }
 
     fn list_local_ips(&self) -> Vec<String> {

@@ -851,15 +851,39 @@ Provisioned by: `ansible/playbooks/ares/privesc.yml` → `dreadnode.nimbus_range
   impacket-ticketer, impacket-secretsdump, impacket-psexec
 - **GPO abuse**: SharpGPOAbuse (run locally under `mono`, speaks LDAP to the DC), pygpoabuse
 
+#### On-target payload staging
+
+Ares stages a Windows binary on an `impacket-smbserver` share hosted by the PRIVESC
+worker and executes it over its UNC path through MSSQL `xp_cmdshell`
+(`windows_stage_and_run`). `xp_cmdshell` runs as the SQL Server **service account** —
+not a local administrator, but a principal holding `SeImpersonatePrivilege`. That is
+the unprivileged on-target context the potato family requires, and it is the only
+execution channel here that is not already administrative: `psexec`, `wmiexec`,
+`smbexec` and `evil_winrm` all need local admin first, so a potato launched through
+any of them would escalate from SYSTEM to SYSTEM.
+
+Nothing is written to the target's disk. The payload executes from the UNC path and
+its escalated child writes output back to the same share, so there is no artifact to
+clean up and no dependency on stdout inheritance through `CreateProcessAsUser`.
+
+Two independent conditions must hold before an escalation is credited: the
+pre-execution identity must NOT already be SYSTEM, and the child command must report
+SYSTEM. The first condition is what prevents an already-administrative channel from
+being credited with an escalation it did not perform.
+
+Registered payloads live in `WINDOWS_PAYLOADS` (`ares-tools/src/privesc/windows_payload.rs`).
+A payload is added only once its file is confirmed present on the image and its
+UNC-launch behaviour observed:
+
+- **PrintSpoofer** — `PrintSpoofer/PrintSpoofer64.exe`, native PE, UNC-safe, T1134.001
+
 #### Provisioned but NOT reachable
 
-Ares is a Linux-side remote-protocol orchestrator: it drives SMB/LDAP/Kerberos/MSSQL
-against a target but has no primitive for staging or executing a binary *on* a Windows
-host. The following are installed on the PRIVESC pod by the Ansible role, but nothing
-in the tool registry can run them on a target, so they are deliberately excluded from
-the LLM's toolset:
+Still installed on the PRIVESC pod with no registry entry:
 
-- **Windows potato exploits**: PrintSpoofer, GodPotato, SweetPotato
+- **Windows potato exploits**: GodPotato (`.NET`, needs a `loadFromRemoteSources`
+  verdict from a lab run before it can be staged over UNC); SweetPotato ships as
+  **unbuilt C# source**, so there is no binary to stage at all
 - **Windows enumeration**: Seatbelt, SharpUp, winPEAS
 - **Linux enumeration**: linPEAS
 - **User impersonation**: RunasCs
@@ -877,12 +901,17 @@ to is executing code *as an unprivileged user*, which is the state every tool ab
 from. That is why the boundary bites local privilege escalation specifically and leaves
 remote exploitation untouched.
 
-Consequence: the GOAD local-privilege-escalation category (SeImpersonate → SYSTEM and
-the potato family) is out of scope by construction. `SeImpersonatePrivilege` is published
-as an operator lead, declined by name in the exploitation queue
-(`exploitation.rs::NO_EXECUTION_PRIMITIVE_VULN_TYPES`), and never credited as exploited.
-Reversing this requires an upload + execute primitive, which is an architectural decision,
-not a missing parser.
+`SeImpersonatePrivilege` now has a staging path: `windows_stage_and_run` drops a
+UNC-safe payload over SMB and executes it through MSSQL `xp_cmdshell`, which runs as the
+SQL service account that holds the privilege. The remaining potato binaries need no new
+architecture — each is a `WINDOWS_PAYLOADS` entry plus an output parser. The .NET ones
+additionally need the UNC-launch question settled, since .NET assemblies can refuse to
+load from a remote share where native PEs do not.
+
+The exploitation queue has not caught up. `seimpersonate` is still declined by name in
+`exploitation.rs::NO_EXECUTION_PRIMITIVE_VULN_TYPES`, so the tool is reachable only as an
+LLM-directed call — an automated dispatch on a `seimpersonate` finding is still dropped
+before it reaches the privesc agent.
 
 ### LATERAL Agent
 

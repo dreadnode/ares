@@ -7,6 +7,67 @@ use crate::ToolDefinition;
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
+            name: "windows_stage_and_run".into(),
+            description: "Escalate to SYSTEM on a Windows host by staging a privilege \
+                escalation binary on an SMB share and running it through MSSQL \
+                xp_cmdshell. xp_cmdshell executes as the SQL Server service account, \
+                which is NOT a local administrator but does hold SeImpersonatePrivilege \
+                — the context the potato family exploits. Use this after \
+                mssql_enum_impersonation shows a login that can reach sysadmin. \
+                Nothing is written to the target's disk. Fails deliberately when the \
+                execution channel is already SYSTEM, because that is not an escalation."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "MSSQL server IP or hostname to escalate on"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for MSSQL authentication"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NT hash for pass-the-hash authentication"
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Domain name for Windows authentication"
+                    },
+                    "windows_auth": {
+                        "type": "boolean",
+                        "description": "Use Windows authentication instead of SQL auth",
+                        "default": true
+                    },
+                    "impersonate_user": {
+                        "type": "string",
+                        "description": "SQL login to impersonate via EXECUTE AS LOGIN (e.g. 'sa') when the connecting login is not sysadmin"
+                    },
+                    "attacker_ip": {
+                        "type": "string",
+                        "description": "Listener IP on this worker that the target reaches over SMB. Must be a local interface address — pass it exactly as supplied, do not guess."
+                    },
+                    "payload": {
+                        "type": "string",
+                        "enum": ["printspoofer"],
+                        "description": "Registered payload to stage. 'printspoofer' abuses SeImpersonatePrivilege via the print spooler named pipe."
+                    },
+                    "child_command": {
+                        "type": "string",
+                        "description": "Command to run as SYSTEM. Defaults to 'whoami /all', which is what proves the escalation. Restricted to alphanumerics, space, and / \\ . : - _ = , — no quotes, pipes or redirects.",
+                        "default": "whoami /all"
+                    }
+                },
+                "required": ["target", "username", "attacker_ip", "payload"]
+            }),
+        },
+        ToolDefinition {
             name: "unconstrained_coerce_and_capture".into(),
             description: "Coerce authentication from a remote host to an unconstrained \
                     delegation host using SpoolService (PrinterBug). The target's TGT \
