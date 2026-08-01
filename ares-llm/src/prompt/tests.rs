@@ -584,6 +584,43 @@ fn exploit_adcs_esc8_omits_fallback_block_when_only_one_candidate() {
 }
 
 #[test]
+fn exploit_adcs_esc9_renders_the_victim_account() {
+    let payload = serde_json::json!({
+        "vuln_type": "adcs_esc9",
+        "target": "192.168.58.15",
+        "ca_server": "192.168.58.50",
+        "template": "ESC9Tmpl",
+        "domain": "contoso.local",
+        "username": "alice",
+        "password": "P@ssw0rd!",
+        "victim_account": "bob",
+        "victim_write_source": "alice",
+        "victim_write_right": "genericwrite",
+        "victim_credential_known": false,
+    });
+    let prompt = generate_task_prompt("exploit", "t-27", &payload, None).unwrap();
+    assert!(prompt.contains("Victim Account (rewrite THIS account's userPrincipalName): bob"));
+    assert!(prompt.contains("write held by alice via genericwrite"));
+    assert!(prompt.contains("`user` for certipy_account_update = bob, NEVER alice"));
+    assert!(prompt.contains("certipy_shadow it first"));
+}
+
+#[test]
+fn exploit_adcs_esc9_without_a_victim_renders_no_victim_block() {
+    let payload = serde_json::json!({
+        "vuln_type": "adcs_esc9",
+        "target": "192.168.58.15",
+        "ca_server": "192.168.58.50",
+        "template": "ESC9Tmpl",
+        "domain": "contoso.local",
+        "username": "alice",
+    });
+    let prompt = generate_task_prompt("exploit", "t-28", &payload, None).unwrap();
+    assert!(!prompt.contains("Victim Account"));
+    assert!(!prompt.contains("certipy_account_update ="));
+}
+
+#[test]
 fn exploit_trust_key_extraction() {
     let payload = serde_json::json!({
         "vuln_type": "trust_key",
