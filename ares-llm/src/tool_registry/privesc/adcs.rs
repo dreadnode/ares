@@ -4,8 +4,55 @@ use serde_json::json;
 
 use crate::ToolDefinition;
 
+pub fn certipy_shadow_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "certipy_shadow".into(),
+        description: "Exploit Shadow Credentials by adding a Key Credential to a target \
+            account's msDS-KeyCredentialLink attribute via Certipy, then authenticating \
+            with the resulting certificate. You MUST provide exactly one of `password` \
+            OR `hashes` — never pass an empty string for the unused field; omit it \
+            entirely. If the orchestrator handed you a plaintext password, pass \
+            `password` and DO NOT include `hashes` at all."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "description": "Target domain (e.g. contoso.local)"
+                },
+                "username": {
+                    "type": "string",
+                    "description": "Username for authentication (must have write access to target)"
+                },
+                "password": {
+                    "type": "string",
+                    "description": "Plaintext password for the source account. Use this when the orchestrator provides a `password` field — do NOT also pass `hashes`."
+                },
+                "hashes": {
+                    "type": "string",
+                    "description": "NTLM hash for pass-the-hash (format: 'lmhash:nthash' or ':nthash'). Use ONLY when the orchestrator provides a `hash` / `nt_hash` field and NO password. Omit this field entirely — do not pass an empty string — when using `password`."
+                },
+                "dc_ip": {
+                    "type": "string",
+                    "description": "Domain controller IP address"
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Target account to add shadow credentials to"
+                },
+                "ticket_path": {
+                    "type": "string",
+                    "description": "Path to a forged inter-realm Kerberos ccache for a cross-forest shadow-credentials write. Injected automatically by the credential resolver when the target forest has no reusable credential; when present, certipy authenticates via `-k -no-pass` (KRB5CCNAME) and password/hash are ignored. Auth precedence: ticket_path > hashes > password."
+                }
+            },
+            "required": ["domain", "username", "dc_ip", "target"]
+        }),
+    }
+}
+
 pub fn definitions() -> Vec<ToolDefinition> {
-    vec![
+    let mut tools = vec![
         ToolDefinition {
             name: "certipy_find".into(),
             description: "Find vulnerable certificate templates in Active Directory Certificate \
@@ -137,50 +184,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["domain", "dc_ip", "pfx_path"]
-            }),
-        },
-        ToolDefinition {
-            name: "certipy_shadow".into(),
-            description: "Exploit Shadow Credentials by adding a Key Credential to a target \
-                account's msDS-KeyCredentialLink attribute via Certipy, then authenticating \
-                with the resulting certificate. You MUST provide exactly one of `password` \
-                OR `hashes` — never pass an empty string for the unused field; omit it \
-                entirely. If the orchestrator handed you a plaintext password, pass \
-                `password` and DO NOT include `hashes` at all."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "domain": {
-                        "type": "string",
-                        "description": "Target domain (e.g. contoso.local)"
-                    },
-                    "username": {
-                        "type": "string",
-                        "description": "Username for authentication (must have write access to target)"
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "Plaintext password for the source account. Use this when the orchestrator provides a `password` field — do NOT also pass `hashes`."
-                    },
-                    "hashes": {
-                        "type": "string",
-                        "description": "NTLM hash for pass-the-hash (format: 'lmhash:nthash' or ':nthash'). Use ONLY when the orchestrator provides a `hash` / `nt_hash` field and NO password. Omit this field entirely — do not pass an empty string — when using `password`."
-                    },
-                    "dc_ip": {
-                        "type": "string",
-                        "description": "Domain controller IP address"
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "Target account to add shadow credentials to"
-                    },
-                    "ticket_path": {
-                        "type": "string",
-                        "description": "Path to a forged inter-realm Kerberos ccache for a cross-forest shadow-credentials write. Injected automatically by the credential resolver when the target forest has no reusable credential; when present, certipy authenticates via `-k -no-pass` (KRB5CCNAME) and password/hash are ignored. Auth precedence: ticket_path > hashes > password."
-                    }
-                },
-                "required": ["domain", "username", "dc_ip", "target"]
             }),
         },
         ToolDefinition {
@@ -671,5 +674,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["domain", "username", "password", "dc_ip", "ca"]
             }),
         },
-    ]
+    ];
+    tools.push(certipy_shadow_definition());
+    tools
 }

@@ -292,7 +292,11 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
         }
         AgentRole::CredentialAccess => credential_access::tool_definitions(),
         AgentRole::Cracker => cracker::tool_definitions(),
-        AgentRole::Acl => acl::tool_definitions(),
+        AgentRole::Acl => {
+            let mut t = acl::tool_definitions();
+            t.push(privesc::adcs::certipy_shadow_definition());
+            t
+        }
         AgentRole::Privesc => {
             let mut t = privesc::tool_definitions();
             // MSSQL tools are implemented in the lateral module but privesc
@@ -665,6 +669,36 @@ mod tests {
             .filter_map(|v| v.as_str())
             .collect();
         assert_eq!(required, vec!["username", "domain", "spn"]);
+    }
+
+    #[test]
+    fn acl_has_shadow_credential_tools() {
+        let tools = tools_for_role(AgentRole::Acl);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"dacl_edit"));
+        assert!(names.contains(&"owner_edit"));
+        assert!(names.contains(&"pywhisker"));
+        assert!(names.contains(&"certipy_auth"));
+        assert!(
+            names.contains(&"certipy_shadow"),
+            "the acl role is the only role that discovers GenericWrite/GenericAll edges and \
+             auto_shadow_credentials routes those dispatches to the acl worker, so without \
+             certipy_shadow the shadow-credential spine has no one-step primitive: {names:?}"
+        );
+    }
+
+    #[test]
+    fn acl_certipy_shadow_matches_the_privesc_definition() {
+        let acl_tool = tools_for_role(AgentRole::Acl)
+            .into_iter()
+            .find(|t| t.name == "certipy_shadow")
+            .expect("acl registry must advertise certipy_shadow");
+        let privesc_tool = tools_for_role(AgentRole::Privesc)
+            .into_iter()
+            .find(|t| t.name == "certipy_shadow")
+            .expect("privesc registry must advertise certipy_shadow");
+        assert_eq!(acl_tool.description, privesc_tool.description);
+        assert_eq!(acl_tool.input_schema, privesc_tool.input_schema);
     }
 
     #[test]

