@@ -41,6 +41,8 @@ pub const CREDENTIAL_KEYS: &[&str] = &[
     "coerce_hash",
 ];
 
+pub const UNRESOLVED_PRINCIPAL_KEY: &str = "ares_unresolved_principal";
+
 /// Validate that no credential argument carries a placeholder/literal value.
 ///
 /// Defense-in-depth backstop for the worker credential resolver. The schema
@@ -52,6 +54,9 @@ pub fn validate_arguments(tool_name: &str, arguments: &Value) -> Result<()> {
     let Some(obj) = arguments.as_object() else {
         return Ok(());
     };
+    if let Some(detail) = obj.get(UNRESOLVED_PRINCIPAL_KEY).and_then(|v| v.as_str()) {
+        anyhow::bail!("tool '{tool_name}' refused before dispatch: {detail}");
+    }
     for &key in CREDENTIAL_KEYS {
         if let Some(v) = obj.get(key) {
             if is_placeholder_value(v) {
@@ -501,6 +506,21 @@ mod tests {
             "domain_sid": "S-1-5-21-1234-5678-9012",
         });
         validate_arguments("secretsdump", &args).expect("real values must pass");
+    }
+
+    #[test]
+    fn validate_arguments_rejects_an_unresolved_principal_marker() {
+        let args = serde_json::json!({
+            "target": "192.168.58.10",
+            "domain": "contoso.local",
+            "username": "alice",
+            UNRESOLVED_PRINCIPAL_KEY: "no credential in state for 'alice'",
+        });
+        let err = validate_arguments("ldap_search", &args)
+            .expect_err("a principal that never authenticated must not reach a subprocess");
+        let msg = err.to_string();
+        assert!(msg.contains("refused before dispatch"), "{msg}");
+        assert!(msg.contains("no credential in state for 'alice'"), "{msg}");
     }
 
     #[test]

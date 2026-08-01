@@ -402,6 +402,12 @@ pub fn build_ldap_search(args: &Value) -> Result<CommandBuilder> {
         let auth_domain = bind_domain.unwrap_or(domain);
         let bind_dn = format!("{u}@{auth_domain}");
         cmd = cmd.arg("-x").flag("-D", bind_dn).flag("-w", p);
+    } else if let Some(u) = username {
+        anyhow::bail!(
+            "ldap_search was told to bind as '{u}' but carries neither a password nor a \
+             ticket_path. Refusing to substitute an anonymous bind: its result would be \
+             recorded as if '{u}' had queried the directory."
+        );
     } else {
         cmd = cmd.arg("-x");
     }
@@ -1466,6 +1472,21 @@ mod tests {
         );
         assert!(args_vec.iter().all(|a| a != "-w"));
         assert!(args_vec.iter().all(|a| a != "-Y"));
+    }
+
+    #[test]
+    fn ldap_search_refuses_an_anonymous_bind_once_a_principal_is_named() {
+        let args = json!({
+            "target": "192.168.58.10",
+            "domain": "contoso.local",
+            "username": "alice",
+        });
+        let Err(err) = super::build_ldap_search(&args) else {
+            panic!("a named principal with no credential must not degrade to -x");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("alice"), "{msg}");
+        assert!(msg.contains("anonymous bind"), "{msg}");
     }
 
     // ── Bug B (enumerate_domain_trusts): ticket_path → KRB5CCNAME ───────

@@ -375,7 +375,81 @@ pub async fn resolve_credentials(
         }
     }
 
+    guard_unauthenticated_principal(
+        args_obj,
+        redirected_tool.as_deref().unwrap_or(tool_name),
+        primary_username.as_deref(),
+        primary_domain.as_deref(),
+    );
+
     Ok(redirected_tool)
+}
+
+const AUTH_MATERIAL_KEYS: &[&str] = &[
+    "password",
+    "hash",
+    "hashes",
+    "nt_hash",
+    "ntlm_hash",
+    "aes_key",
+    "aes256_key",
+    "ticket_path",
+    "kerberos_keys",
+    "pfx",
+    "pfx_path",
+    "cert",
+    "certificate",
+];
+
+const AUTH_BYPASS_FLAGS: &[&str] = &["no_pass", "null_session", "anonymous"];
+
+pub(crate) fn binds_as_named_principal(tool_name: &str) -> bool {
+    requires_exact_realm(tool_name)
+        || supports_kerberos_auth_mode(tool_name)
+        || is_cross_forest_certipy_tool(tool_name)
+        || tool_consumes_ticket_path(tool_name)
+}
+
+fn has_auth_material(args: &Map<String, Value>) -> bool {
+    AUTH_MATERIAL_KEYS
+        .iter()
+        .any(|key| string_field(args, key).is_some())
+        || AUTH_BYPASS_FLAGS.iter().any(|key| {
+            args.get(*key)
+                .is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"))
+        })
+}
+
+fn guard_unauthenticated_principal(
+    args: &mut Map<String, Value>,
+    tool_name: &str,
+    username: Option<&str>,
+    domain: Option<&str>,
+) {
+    let Some(user) = username else {
+        return;
+    };
+    if !binds_as_named_principal(tool_name) || has_auth_material(args) {
+        return;
+    }
+    let realm = domain.unwrap_or("(none)");
+    warn!(
+        tool = %tool_name,
+        user = %user,
+        domain = %realm,
+        "credential_resolver: refusing dispatch — principal has no resolvable identity"
+    );
+    args.insert(
+        ares_tools::credentials::UNRESOLVED_PRINCIPAL_KEY.to_string(),
+        Value::String(format!(
+            "'{tool_name}' was told to authenticate as '{user}' in realm '{realm}', but operation \
+             state holds no password, no NTLM/AES hash, and no realm-matched Kerberos ccache for \
+             that principal. Refusing the dispatch rather than falling through to an anonymous or \
+             foreign-identity bind: a negative result produced without authenticating must never \
+             be recorded as if '{user}' had been tested. Harvest a credential for this principal, \
+             or name a principal whose credential is already in state, then retry."
+        )),
+    );
 }
 
 /// Remove any credential-shaped argument whose value is empty, null, or a
@@ -1179,35 +1253,126 @@ fn expects_ticket(tool_name: &str, args: &Map<String, Value>) -> bool {
 /// Convention: tools that forge tickets save them as `<Username>.ccache` in CWD.
 /// We accept either an exact match or any ccache when the principal matches by
 /// stem.
-fn find_ccache(username: &str, _domain: &str) -> Option<String> {
+fn find_ccache(username: &str, domain: &str) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
-    let user_lower = username.to_lowercase();
+    find_ccache_in(&cwd, username, domain)
+}
 
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    let entries = std::fs::read_dir(&cwd).ok()?;
-    for entry in entries.flatten() {
+fn find_ccache_in(dir: &std::path::Path, username: &str, domain: &str) -> Option<String> {
+    let (user_lower, upn_realm) = split_user_realm(username);
+    let mut domain_lower = domain.trim().to_lowercase();
+    if domain_lower.is_empty() {
+        if let Some(realm) = upn_realm {
+            domain_lower = realm;
+        }
+    }
+
+    let mut realm_matched: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut realm_unknown: Option<(std::time::SystemTime, PathBuf)> = None;
+
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if !name.ends_with(".ccache") {
+        let Some(stem) = name.strip_suffix(".ccache") else {
             continue;
-        }
-        let stem = name.trim_end_matches(".ccache").to_lowercase();
-        if stem != user_lower && !stem.starts_with(&user_lower) {
+        };
+        let stem_lower = stem.to_lowercase();
+        if !ccache_principal_matches(&stem_lower, &user_lower) {
             continue;
         }
         let mtime = entry
             .metadata()
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        match &best {
-            None => best = Some((mtime, path)),
-            Some((t, _)) if mtime >= *t => best = Some((mtime, path)),
-            _ => {}
+        let realms = ccache_realms(&stem_lower, &user_lower);
+        if realms.is_empty() || domain_lower.is_empty() {
+            keep_newer_path(&mut realm_unknown, mtime, path);
+        } else if realms.iter().any(|r| same_forest(r, &domain_lower)) {
+            keep_newer_path(&mut realm_matched, mtime, path);
+        } else {
+            warn!(
+                user = %user_lower,
+                domain = %domain_lower,
+                ccache = %name,
+                ccache_realms = %realms.join(","),
+                "credential_resolver: discarding ccache forged in a foreign realm — \
+                 binding with it would authenticate as a principal from another forest"
+            );
         }
     }
-    best.map(|(_, p)| p.to_string_lossy().to_string())
+
+    if let Some((_, path)) = realm_matched {
+        return Some(path.to_string_lossy().to_string());
+    }
+    let (_, path) = realm_unknown?;
+    warn!(
+        user = %user_lower,
+        domain = %domain_lower,
+        ccache = %path.display(),
+        "credential_resolver: ccache filename carries no realm — accepting it for the \
+         requested domain unverified"
+    );
+    Some(path.to_string_lossy().to_string())
+}
+
+fn keep_newer_path(
+    slot: &mut Option<(std::time::SystemTime, PathBuf)>,
+    mtime: std::time::SystemTime,
+    path: PathBuf,
+) {
+    if slot.as_ref().is_none_or(|(seen, _)| mtime >= *seen) {
+        *slot = Some((mtime, path));
+    }
+}
+
+fn ccache_principal_matches(stem_lower: &str, user_lower: &str) -> bool {
+    if user_lower.is_empty() {
+        return false;
+    }
+    if stem_lower == user_lower {
+        return true;
+    }
+    if stem_lower
+        .rsplit("__")
+        .next()
+        .is_some_and(|last| last == user_lower)
+    {
+        return true;
+    }
+    stem_lower
+        .trim_start_matches('_')
+        .split(['@', '_'])
+        .next()
+        .is_some_and(|first| first == user_lower)
+}
+
+fn ccache_realms(stem_lower: &str, user_lower: &str) -> Vec<String> {
+    let mut realms: Vec<String> = Vec::new();
+    let segments: Vec<&str> = stem_lower.split("__").collect();
+    if segments.len() >= 3 {
+        for seg in &segments[..segments.len() - 1] {
+            let dotted = seg.replace('_', ".");
+            if looks_like_realm(&dotted) && dotted != user_lower && !realms.contains(&dotted) {
+                realms.push(dotted);
+            }
+        }
+    }
+    for token in stem_lower.split(['@', '_', '/']) {
+        if looks_like_realm(token) && token != user_lower && !realms.iter().any(|r| r == token) {
+            realms.push(token.to_string());
+        }
+    }
+    realms
+}
+
+fn looks_like_realm(token: &str) -> bool {
+    let trimmed = token.trim_matches('.');
+    let Some((label, tld)) = trimmed.rsplit_once('.') else {
+        return false;
+    };
+    !label.is_empty() && !tld.is_empty() && tld.chars().all(|c| c.is_ascii_alphabetic())
 }
 
 /// Inject `ticket_path` for a cross-forest tool using a forged inter-realm
@@ -3002,6 +3167,213 @@ mod tests {
     /// `split_user_realm` (used by the resolver's new fallback) and
     /// `find_credential`'s internal peel must converge on the same stored
     /// cred. If either regresses, the tool dispatches with a missing password.
+    fn ccache_dir(files: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in files {
+            std::fs::write(dir.path().join(name), b"ccache").expect("write ccache");
+        }
+        dir
+    }
+
+    fn picked_ccache(dir: &tempfile::TempDir, user: &str, domain: &str) -> Option<String> {
+        find_ccache_in(dir.path(), user, domain).map(|p| {
+            std::path::Path::new(&p)
+                .file_name()
+                .expect("file name")
+                .to_string_lossy()
+                .to_string()
+        })
+    }
+
+    #[test]
+    fn find_ccache_rejects_a_ccache_for_the_same_username_in_another_realm() {
+        let dir = ccache_dir(&["alice@fabrikam.local.ccache"]);
+        assert_eq!(
+            picked_ccache(&dir, "alice", "contoso.local"),
+            None,
+            "a fabrikam.local ticket must never be handed to a contoso.local task"
+        );
+        assert_eq!(
+            picked_ccache(&dir, "alice", "fabrikam.local"),
+            Some("alice@fabrikam.local.ccache".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ccache_rejects_the_username_prefix_collision() {
+        let dir = ccache_dir(&["alice.smith.ccache", "alice.smith@contoso.local.ccache"]);
+        assert_eq!(
+            picked_ccache(&dir, "alice", "contoso.local"),
+            None,
+            "`alice` must not match `alice.smith`"
+        );
+        assert_eq!(
+            picked_ccache(&dir, "alice.smith", "contoso.local"),
+            Some("alice.smith@contoso.local.ccache".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ccache_rejects_a_realm_bearing_ccache_from_the_wrong_forest() {
+        let dir = ccache_dir(&["_krbtgt_fabrikam.local_42_1700000000.ccache"]);
+        assert_eq!(picked_ccache(&dir, "krbtgt", "contoso.local"), None);
+        assert_eq!(
+            picked_ccache(&dir, "krbtgt", "fabrikam.local"),
+            Some("_krbtgt_fabrikam.local_42_1700000000.ccache".to_string()),
+            "the realm is right there in the filename and must be honoured"
+        );
+    }
+
+    #[test]
+    fn find_ccache_prefers_a_realm_match_over_a_realmless_candidate() {
+        let dir = ccache_dir(&["alice@contoso.local.ccache"]);
+        std::fs::write(dir.path().join("alice.ccache"), b"newer").expect("write");
+        assert_eq!(
+            picked_ccache(&dir, "alice", "contoso.local"),
+            Some("alice@contoso.local.ccache".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ccache_accepts_a_realmless_ccache_when_nothing_encodes_a_realm() {
+        let dir = ccache_dir(&["alice.ccache"]);
+        assert_eq!(
+            picked_ccache(&dir, "alice", "contoso.local"),
+            Some("alice.ccache".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ccache_keeps_the_forged_inter_realm_filename_usable_in_both_realms() {
+        let dir = ccache_dir(&["contoso_local__fabrikam_local__administrator.ccache"]);
+        for realm in ["contoso.local", "fabrikam.local"] {
+            assert_eq!(
+                picked_ccache(&dir, "administrator", realm),
+                Some("contoso_local__fabrikam_local__administrator.ccache".to_string()),
+                "forged inter-realm ccache must stay usable for {realm}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_ccache_accepts_a_child_domain_ticket_inside_the_same_forest() {
+        let dir = ccache_dir(&["alice@child.contoso.local.ccache"]);
+        assert_eq!(
+            picked_ccache(&dir, "alice", "contoso.local"),
+            Some("alice@child.contoso.local.ccache".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ccache_accepts_the_impacket_service_ticket_filename() {
+        let dir = ccache_dir(&["administrator@cifs_dc01@contoso.local.ccache"]);
+        assert_eq!(
+            picked_ccache(&dir, "administrator", "contoso.local"),
+            Some("administrator@cifs_dc01@contoso.local.ccache".to_string())
+        );
+        assert_eq!(picked_ccache(&dir, "administrator", "fabrikam.local"), None);
+    }
+
+    fn guarded(tool: &str, args: Value) -> Map<String, Value> {
+        let mut obj = args.as_object().expect("object").clone();
+        let user = string_field(&obj, "username");
+        let domain = string_field(&obj, "domain");
+        guard_unauthenticated_principal(&mut obj, tool, user.as_deref(), domain.as_deref());
+        obj
+    }
+
+    fn refusal(args: &Map<String, Value>) -> Option<String> {
+        args.get(ares_tools::credentials::UNRESOLVED_PRINCIPAL_KEY)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn unresolved_principal_on_an_ldap_bind_tool_refuses_the_dispatch() {
+        let args = guarded(
+            "ldap_acl_enumeration",
+            json!({
+                "target": "192.168.58.10",
+                "domain": "contoso.local",
+                "username": "alice",
+            }),
+        );
+        let detail = refusal(&args).expect("resolver must mark the principal unauthenticated");
+        assert!(detail.contains("alice"), "detail must name the principal");
+
+        let err = ares_tools::credentials::validate_arguments(
+            "ldap_acl_enumeration",
+            &Value::Object(args),
+        )
+        .expect_err("dispatch must refuse a tool whose principal never authenticated");
+        assert!(err.to_string().contains("refused before dispatch"));
+    }
+
+    #[test]
+    fn a_resolved_credential_leaves_the_dispatch_alone() {
+        for material in ["password", "hash", "ticket_path", "no_pass"] {
+            let mut args = json!({
+                "target": "192.168.58.10",
+                "domain": "contoso.local",
+                "username": "alice",
+            });
+            args[material] = if material == "no_pass" {
+                Value::Bool(true)
+            } else {
+                Value::String("P@ssw0rd!".into())
+            };
+            let out = guarded("ldap_search", args);
+            assert_eq!(
+                refusal(&out),
+                None,
+                "{material} is usable auth material — dispatch must proceed"
+            );
+        }
+    }
+
+    #[test]
+    fn unauthenticated_tools_and_nameless_calls_are_not_refused() {
+        let out = guarded(
+            "nmap_scan",
+            json!({"target": "192.168.58.10", "domain": "contoso.local", "username": "alice"}),
+        );
+        assert_eq!(refusal(&out), None, "nmap_scan binds as nobody");
+
+        let out = guarded(
+            "ldap_search",
+            json!({"target": "192.168.58.10", "domain": "contoso.local"}),
+        );
+        assert_eq!(
+            refusal(&out),
+            None,
+            "an anonymous enumeration that claims no principal stays allowed"
+        );
+    }
+
+    #[test]
+    fn binds_as_named_principal_covers_the_ldap_and_kerberos_tool_sets() {
+        for tool in [
+            "ldap_search",
+            "ldap_acl_enumeration",
+            "ldap_search_descriptions",
+            "enumerate_domain_trusts",
+            "dacl_edit",
+            "bloodyad_set_password",
+            "secretsdump",
+            "secretsdump_kerberos",
+            "certipy_find",
+            "kerberoast",
+        ] {
+            assert!(binds_as_named_principal(tool), "{tool} authenticates");
+        }
+        for tool in ["nmap_scan", "smb_sweep", "asrep_roast", "dig_query"] {
+            assert!(
+                !binds_as_named_principal(tool),
+                "{tool} has an unauthenticated mode and must not be gated"
+            );
+        }
+    }
+
     #[test]
     fn upn_suffix_extraction_matches_stored_cred_via_empty_domain_path() {
         let creds = vec![cred("alice", "contoso.local", "P@ss1")];
