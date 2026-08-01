@@ -22,6 +22,9 @@ certipy_auth(
 - The PFX path above is the whole input — do NOT ask for one, do NOT re-run the
   attack that produced it, and do NOT report missing context. It is on disk.
 - If the PFX is passphrase-protected, the passphrase is applied for you.
+- A shadow-credential certificate names no user inside itself. The account
+  (`{{ target_user }}`) is applied for you from the path, so do NOT add a
+  `username` argument and do NOT abandon the call over a missing identity.
 - PKINIT returns `{{ target_user }}`'s NT hash and writes a ccache. The hash is
   the deliverable; report it.
 - `Failed to extract NT hash: KDC_ERR_ETYPE_NOSUPP` means the KDC refuses RC4

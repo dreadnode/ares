@@ -315,7 +315,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "certipy_auth".into(),
-            description: "Authenticate to Active Directory using a PFX certificate file. Performs PKINIT Kerberos authentication and retrieves the NT hash of the certificate's subject. This is the second and final stage of the Shadow Credentials attack: run it on the PFX that pywhisker saved to convert the msDS-KeyCredentialLink write into the target's NT hash. A pywhisker success alone recovers no credential and does not exploit the vulnerability. The PFX pywhisker exports is passphrase-protected; that passphrase is applied for you, so pass only the path and never treat 'Must be used with password' in pywhisker's output as something you must act on.".into(),
+            description: "Authenticate to Active Directory using a PFX certificate file. Performs PKINIT Kerberos authentication and retrieves the NT hash of the certificate's subject. This is the second and final stage of the Shadow Credentials attack: run it on the PFX that pywhisker saved to convert the msDS-KeyCredentialLink write into the target's NT hash. A pywhisker success alone recovers no credential and does not exploit the vulnerability. The PFX pywhisker exports is passphrase-protected and carries no subject identity certipy can read; the passphrase and the PKINIT identity are both applied for you from the path, so pass only the path. Never treat 'Must be used with password' in pywhisker's output as something you must act on, and never abandon the call because the certificate names no user.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

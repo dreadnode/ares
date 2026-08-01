@@ -82,19 +82,37 @@ mod tests {
         let rendered = prompt(json!({
             "technique": "certipy_auth",
             "vuln_id": "certificate_obtained_svc_sql_contoso_local",
-            "pfx_path": "/tmp/ares_shadowcred_svc_sql_1754000000000.pfx",
+            "pfx_path": "/tmp/ares_shadowcred_1754000000000-4242-0_svc_sql.pfx",
             "domain": "contoso.local",
             "target_user": "svc_sql",
             "dc_ip": "192.168.58.10",
             "target_ip": "192.168.58.10",
         }));
         assert!(
-            rendered.contains("/tmp/ares_shadowcred_svc_sql_1754000000000.pfx"),
+            rendered.contains("/tmp/ares_shadowcred_1754000000000-4242-0_svc_sql.pfx"),
             "the PFX path must reach the agent: {rendered}"
         );
         assert!(rendered.contains("certipy_auth("));
         assert!(rendered.contains("svc_sql"));
         assert!(rendered.contains("192.168.58.10"));
+    }
+
+    #[test]
+    fn the_agent_is_told_not_to_supply_the_missing_identity_itself() {
+        let rendered = prompt(json!({
+            "technique": "certipy_auth",
+            "pfx_path": "/tmp/ares_shadowcred_1754000000000-4242-0_svc_sql.pfx",
+            "domain": "contoso.local",
+            "target_user": "svc_sql",
+            "dc_ip": "192.168.58.10",
+        }));
+        assert!(
+            rendered.contains("names no user inside itself"),
+            "certipy reports `Could not find identity in the provided certificate` \
+             for a pywhisker export; the agent's own note last op was to retry with \
+             an explicit -username, which the wrapper already does: {rendered}"
+        );
+        assert!(!rendered.contains("username='"));
     }
 
     #[test]

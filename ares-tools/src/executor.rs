@@ -238,6 +238,14 @@ impl CommandBuilder {
         &self.env_vars
     }
 
+    /// Test accessor for the stdin payload. Used to assert that a tool known to
+    /// prompt is given an answer, since the alternative — a null stdin — turns
+    /// the prompt into an `EOFError` the tool reports as a failed run.
+    #[doc(hidden)]
+    pub fn stdin_for_test(&self) -> Option<&str> {
+        self.stdin_data.as_deref()
+    }
+
     /// The command line with every secret masked, safe for logs, span
     /// attributes, and error messages surfaced to the LLM.
     ///

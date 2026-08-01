@@ -738,7 +738,7 @@ mod tests {
             "pywhisker",
             "[+] Updated the msDS-KeyCredentialLink attribute of the target object\n\
              [+] Saved PFX (#PKCS12) certificate & key at path: \
-             /tmp/ares_shadowcred_svc_sql_1754000000000.pfx\n\
+             /tmp/ares_shadowcred_1754000000000-4242-0_svc_sql.pfx\n\
              [*] Must be used with password: ares-shadow-cred",
             &serde_json::json!({
                 "target_samaccountname": "svc_sql",
@@ -763,11 +763,34 @@ mod tests {
         assert_eq!(work.len(), 1);
         assert_eq!(
             work[0].pfx_path,
-            "/tmp/ares_shadowcred_svc_sql_1754000000000.pfx"
+            "/tmp/ares_shadowcred_1754000000000-4242-0_svc_sql.pfx"
         );
         assert_eq!(work[0].target_user, "svc_sql");
         assert_eq!(work[0].domain, "contoso.local");
         assert_eq!(work[0].dc_ip, Some("192.168.58.10".into()));
+
+        let argv = ares_tools::privesc::build_certipy_auth(&serde_json::json!({
+            "pfx_path": work[0].pfx_path,
+            "domain": work[0].domain,
+            "dc_ip": work[0].dc_ip,
+        }))
+        .expect("stage two builds from the dispatched payload alone")
+        .args_for_test()
+        .to_vec();
+        for expected in ["-pfx", "-username", "-password"] {
+            assert!(
+                argv.iter().any(|a| a == expected),
+                "the whole chain must reach certipy with {expected}: {argv:?}"
+            );
+        }
+        let idx = argv.iter().position(|a| a == "-username").unwrap();
+        assert_eq!(
+            argv[idx + 1],
+            "svc_sql",
+            "certipy reads identities from the SAN, and pywhisker's self-signed \
+             certificate has none — without this the run ends on `Could not find \
+             identity in the provided certificate`"
+        );
     }
 
     #[tokio::test]

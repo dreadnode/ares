@@ -115,8 +115,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
             description: "Authenticate to Active Directory using a PFX certificate file. \
                 Performs PKINIT Kerberos authentication and retrieves the NT hash of the \
                 certificate's subject. Works on both an unprotected PFX from certipy_req \
-                and the passphrase-protected PFX pywhisker writes — the passphrase for the \
-                latter is applied for you, so pass only the path."
+                and the passphrase-protected PFX pywhisker writes — for the latter both \
+                the passphrase and the PKINIT identity (-username) are applied for you \
+                from the path, so pass only the path. Never abandon this call for want of \
+                a username, and never re-run pywhisker to get one."
                 .into(),
             input_schema: json!({
                 "type": "object",
