@@ -4,6 +4,7 @@
 use regex::Regex;
 use serde_json::{json, Value};
 use std::sync::LazyLock;
+use tracing::{debug, warn};
 
 // ── Lsassy ──────────────────────────────────────────────────────────────────
 
@@ -88,6 +89,10 @@ pub fn parse_lsassy(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) {
         }
     }
 
+    if hashes.is_empty() && creds.is_empty() {
+        report_empty_lsassy_dump(output, params);
+    }
+
     (hashes, creds)
 }
 
@@ -107,6 +112,168 @@ fn is_lsassy_noise(line: &str) -> bool {
         // can't carry a DOMAIN\user pair — skip them up-front.
         || ((line.starts_with('[') || line.starts_with('('))
             && !line.contains('\\'))
+}
+
+static LSASSY_PPL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(runasppl|pplkiller|ppldump|mimidrv|ppl)\b|lsa protection|protected process|protectedprocesslight")
+        .expect("lsassy ppl regex")
+});
+
+const LSASSY_PPL_REMEDIATION: &str =
+    "LSA protection (RunAsPPL) refuses the userland LSASS read and no lsassy dump method \
+     bypasses it — take this host's secrets via secretsdump against its machine account, or \
+     DCSync once a replication-capable principal is held. Do not re-dispatch lsassy here.";
+
+const LSASSY_FAILURE_CASES: &[(&[&str], &str, &str)] = &[
+    (
+        &["defender", "antivirus", "quarantin", "malware"],
+        "av_blocked",
+        "An endpoint control removed or blocked the dump — change dump method or pick a \
+         technique that never touches LSASS.",
+    ),
+    (
+        &[
+            "authentication error",
+            "authentication failed",
+            "status_logon_failure",
+            "status_account_restriction",
+            "status_password_expired",
+            "status_password_must_change",
+            "status_trusted_relationship_failure",
+            "kdc_err",
+        ],
+        "auth_failed",
+        "The credential did not authenticate to this host — re-check account, secret and realm \
+         before re-running.",
+    ),
+    (
+        &[
+            "not enough privileges",
+            "insufficient privileges",
+            "you need to be admin",
+            "is not an admin",
+            "requires admin",
+        ],
+        "no_admin",
+        "lsassy needs local administrator rights on the target — obtain an admin principal for \
+         this host first.",
+    ),
+    (
+        &[
+            "access is denied",
+            "access denied",
+            "access_denied",
+            "0x00000005",
+            "requires elevation",
+            "permission denied",
+        ],
+        "access_denied",
+        "The LSASS read was refused. If this principal is already local admin here, LSA \
+         protection (RunAsPPL) is the usual cause — pivot to secretsdump against the machine \
+         account rather than re-running lsassy.",
+    ),
+    (
+        &[
+            "status_bad_network_name",
+            "status_object_name_not_found",
+            "connection refused",
+            "unable to connect",
+            "connection reset",
+            "network is unreachable",
+            "no route to host",
+        ],
+        "unreachable",
+        "The host did not accept the SMB connection — confirm reachability and that 445 is open \
+         before re-running.",
+    ),
+    (
+        &["timed out"],
+        "timeout",
+        "The dump did not finish inside the tool timeout — retry at most once, then pivot.",
+    ),
+    (
+        &[
+            "unable to dump",
+            "error while dumping",
+            "could not dump",
+            "dump failed",
+            "dumping lsass failed",
+            "no dump file",
+            "lsass was not dumped",
+        ],
+        "dump_failed",
+        "lsassy reached the host and produced no dump — try another dump method, and treat LSA \
+         protection (RunAsPPL) as the leading hypothesis when the principal is already admin.",
+    ),
+];
+
+struct LsassyFailure {
+    reason: &'static str,
+    detail: String,
+    remediation: &'static str,
+}
+
+fn classify_lsassy_failure(output: &str) -> Option<LsassyFailure> {
+    let mut generic: Option<LsassyFailure> = None;
+
+    for raw in output.lines() {
+        let line = strip_ansi(raw.trim());
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+
+        if LSASSY_PPL_RE.is_match(&lower) {
+            return Some(LsassyFailure {
+                reason: "lsa_protection",
+                detail: line.to_string(),
+                remediation: LSASSY_PPL_REMEDIATION,
+            });
+        }
+
+        if generic.is_none() {
+            if let Some(&(_, reason, remediation)) = LSASSY_FAILURE_CASES
+                .iter()
+                .find(|(markers, _, _)| markers.iter().any(|m| lower.contains(m)))
+            {
+                generic = Some(LsassyFailure {
+                    reason,
+                    detail: line.to_string(),
+                    remediation,
+                });
+            }
+        }
+    }
+
+    generic
+}
+
+fn report_empty_lsassy_dump(output: &str, params: &Value) {
+    let host = params
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let method = params
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
+
+    match classify_lsassy_failure(output) {
+        Some(failure) => warn!(
+            host = %host,
+            method = %method,
+            reason = failure.reason,
+            detail = %failure.detail,
+            remediation = failure.remediation,
+            "lsassy produced no credentials and reported a failure"
+        ),
+        None => debug!(
+            host = %host,
+            method = %method,
+            "lsassy produced no credentials and reported no failure line"
+        ),
+    }
 }
 
 fn parse_lsassy_line(line: &str) -> Option<(String, String, String)> {
@@ -624,6 +791,84 @@ CONTOSO\\alice  (null)
         let (hashes, creds) = parse_lsassy(output, &params);
         assert!(hashes.is_empty());
         assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn lsassy_access_denied_is_classified_not_discarded() {
+        let output = "\
+[+] 192.168.58.30 Authentication successful
+[!] 192.168.58.30 Unable to dump lsass: STATUS_ACCESS_DENIED";
+        let failure = classify_lsassy_failure(output).expect("failure reason must survive");
+        assert_eq!(failure.reason, "access_denied");
+        assert!(failure.detail.contains("STATUS_ACCESS_DENIED"));
+        assert!(failure.remediation.contains("RunAsPPL"));
+    }
+
+    #[test]
+    fn lsassy_ppl_line_classifies_as_lsa_protection() {
+        let output = "[!] 192.168.58.30 lsass.exe is a protected process (RunAsPPL enabled)";
+        let failure = classify_lsassy_failure(output).expect("PPL refusal must be classified");
+        assert_eq!(failure.reason, "lsa_protection");
+        assert!(failure.remediation.contains("secretsdump"));
+    }
+
+    #[test]
+    fn lsassy_lsa_protection_outranks_a_generic_dump_failure() {
+        let output = "\
+[!] 192.168.58.30 Unable to dump lsass
+[!] 192.168.58.30 LSA protection is enabled on the host";
+        let failure = classify_lsassy_failure(output).expect("must classify");
+        assert_eq!(failure.reason, "lsa_protection");
+    }
+
+    #[test]
+    fn lsassy_auth_failure_is_classified_despite_the_noise_filter() {
+        let output = "[!] 192.168.58.30 Authentication error: STATUS_LOGON_FAILURE";
+        let params = json!({"domain": "contoso.local"});
+        let (hashes, creds) = parse_lsassy(output, &params);
+        assert!(hashes.is_empty());
+        assert!(creds.is_empty());
+        let failure = classify_lsassy_failure(output).expect("must classify");
+        assert_eq!(failure.reason, "auth_failed");
+    }
+
+    #[test]
+    fn lsassy_clean_empty_dump_reports_no_failure() {
+        let output = "\
+[+] 192.168.58.30 Authentication successful
+[+] 192.168.58.30 Lsass dumped in C:\\Windows\\Temp\\dump.dmp (12 MB)
+[+] 192.168.58.30 Lsass dump deleted";
+        assert!(
+            classify_lsassy_failure(output).is_none(),
+            "a clean empty dump must stay distinguishable from a refusal"
+        );
+    }
+
+    #[test]
+    fn lsassy_failure_classification_survives_ansi_decoration() {
+        let output = "\x1b[1;31m[!] 192.168.58.30 Unable to dump lsass: Access is denied\x1b[0m";
+        let failure = classify_lsassy_failure(output).expect("ANSI must not hide the reason");
+        assert_eq!(failure.reason, "access_denied");
+        assert!(!failure.detail.contains('\x1b'));
+    }
+
+    #[test]
+    fn lsassy_dump_failure_falls_back_to_the_generic_reason() {
+        let output = "[!] 192.168.58.30 Unable to dump lsass (all methods failed)";
+        let failure = classify_lsassy_failure(output).expect("must classify");
+        assert_eq!(failure.reason, "dump_failed");
+        assert!(failure.remediation.contains("RunAsPPL"));
+    }
+
+    #[test]
+    fn lsassy_successful_credential_line_is_not_read_as_a_failure() {
+        let output = "\
+[+] 192.168.58.30 Authentication successful
+CONTOSO\\alice  P@ssw0rd!";
+        let params = json!({"domain": "contoso.local"});
+        let (_, creds) = parse_lsassy(output, &params);
+        assert_eq!(creds.len(), 1);
+        assert!(classify_lsassy_failure(output).is_none());
     }
 
     #[test]
