@@ -48,6 +48,210 @@ fn is_hash32(s: &str) -> bool {
     s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+pub const DCC2_HASH_TYPE: &str = "dcc2";
+
+pub const DPAPI_SYSTEM_HASH_TYPE: &str = "dpapi_system";
+
+const MAX_DCC2_PER_DUMP: usize = 12;
+
+pub fn is_dcc2_hash_value(s: &str) -> bool {
+    let Some(body) = s.strip_prefix("$DCC2$") else {
+        return false;
+    };
+    let mut parts = body.split('#');
+    let (Some(iterations), Some(salt), Some(digest), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    !iterations.is_empty()
+        && iterations.bytes().all(|b| b.is_ascii_digit())
+        && !salt.is_empty()
+        && is_hash32(digest)
+}
+
+fn split_principal(raw: &str) -> (String, String) {
+    let raw = raw.trim();
+    if let Some((prefix, user)) = raw.rsplit_once(['\\', '/']) {
+        return (prefix.trim().to_string(), user.trim().to_string());
+    }
+    if let Some((user, realm)) = raw.rsplit_once('@') {
+        return (realm.trim().to_string(), user.trim().to_string());
+    }
+    (String::new(), raw.to_string())
+}
+
+fn is_builtin_service_principal(domain: &str, username: &str) -> bool {
+    let d = domain.trim().to_ascii_lowercase();
+    let u = username.trim().to_ascii_lowercase();
+    if matches!(d.as_str(), "nt authority" | "nt service" | "builtin") {
+        return true;
+    }
+    matches!(
+        u.as_str(),
+        "localsystem"
+            | "system"
+            | "localservice"
+            | "local service"
+            | "networkservice"
+            | "network service"
+            | "(unknown user)"
+    )
+}
+
+fn trim_secret_value(s: &str) -> &str {
+    s.trim_end_matches(['\0', '\r', '\n'])
+}
+
+fn parse_cached_domain_logons(output: &str, target_domain: &str) -> Vec<Value> {
+    let mut hashes = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for raw_line in output.lines() {
+        if hashes.len() >= MAX_DCC2_PER_DUMP {
+            break;
+        }
+        let line = strip_nxc_framing(raw_line).trim();
+        let Some(idx) = line.find(":$DCC2$") else {
+            continue;
+        };
+        let hash_value = line[idx + 1..].split(':').next().unwrap_or("").trim();
+        if !is_dcc2_hash_value(hash_value) {
+            continue;
+        }
+        let (raw_domain, username) = split_principal(&line[..idx]);
+        if username.is_empty() || username.ends_with('$') {
+            continue;
+        }
+        let user_domain = if raw_domain.is_empty() {
+            target_domain.to_string()
+        } else {
+            let resolved = resolve_netbios_to_fqdn(&raw_domain, target_domain);
+            if resolved.contains('.') {
+                resolved.to_lowercase()
+            } else {
+                resolved
+            }
+        };
+        let key = format!(
+            "{}\\{}\\{}",
+            user_domain.to_lowercase(),
+            username.to_lowercase(),
+            hash_value.to_lowercase()
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        hashes.push(json!({
+            "username": username,
+            "domain": user_domain,
+            "hash_value": hash_value,
+            "hash_type": DCC2_HASH_TYPE,
+            "source": "secretsdump",
+        }));
+    }
+
+    hashes
+}
+
+fn parse_lsa_secrets(output: &str, target_domain: &str) -> (Vec<Value>, Vec<Value>) {
+    let mut hashes = Vec::new();
+    let mut creds = Vec::new();
+    let mut in_lsa = false;
+    let mut current: String = String::new();
+    let mut machine_key: Option<String> = None;
+    let mut user_key: Option<String> = None;
+
+    for raw_line in output.lines() {
+        let line = strip_nxc_framing(raw_line).trim();
+        if line.starts_with('[') {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("dumping lsa secrets") {
+                in_lsa = true;
+                current.clear();
+            } else if lower.contains("dumping local sam")
+                || lower.contains("dumping sam")
+                || lower.contains("dumping cached domain")
+                || lower.contains("dumping domain credentials")
+                || lower.contains("ntds")
+                || lower.contains("searching for peklist")
+                || lower.contains("reading and decrypting hashes from")
+                || lower.contains("cleaning up")
+            {
+                in_lsa = false;
+                current.clear();
+            } else if in_lsa {
+                current = line
+                    .trim_start_matches(['[', '*', '+', '-', ']'])
+                    .trim()
+                    .to_string();
+            }
+            continue;
+        }
+        if !in_lsa || line.is_empty() {
+            continue;
+        }
+
+        let upper = current.to_ascii_uppercase();
+        if upper.ends_with("_HISTORY") {
+            continue;
+        }
+
+        if upper.starts_with("DPAPI_SYSTEM") {
+            if let Some(hex) = line
+                .strip_prefix("dpapi_machinekey:")
+                .and_then(|v| v.trim().strip_prefix("0x"))
+            {
+                machine_key = Some(hex.trim().to_string());
+            } else if let Some(hex) = line
+                .strip_prefix("dpapi_userkey:")
+                .and_then(|v| v.trim().strip_prefix("0x"))
+            {
+                user_key = Some(hex.trim().to_string());
+            }
+            continue;
+        }
+
+        if !upper.starts_with("_SC_") && !upper.starts_with("DEFAULTPASSWORD") {
+            continue;
+        }
+        let Some((account, password)) = line.split_once(':') else {
+            continue;
+        };
+        let password = trim_secret_value(password);
+        if password.is_empty() {
+            continue;
+        }
+        let (raw_domain, username) = split_principal(account);
+        if username.is_empty() || is_builtin_service_principal(&raw_domain, &username) {
+            continue;
+        }
+        let user_domain = if raw_domain.is_empty() || raw_domain == "." {
+            String::new()
+        } else {
+            resolve_netbios_to_fqdn(&raw_domain, target_domain)
+        };
+        creds.push(json!({
+            "username": username,
+            "password": password,
+            "domain": user_domain,
+            "source": "lsa_secrets",
+        }));
+    }
+
+    if let (Some(machine), Some(user)) = (machine_key, user_key) {
+        hashes.push(json!({
+            "username": "DPAPI_SYSTEM",
+            "domain": "",
+            "hash_value": format!("{machine}:{user}"),
+            "hash_type": DPAPI_SYSTEM_HASH_TYPE,
+            "source": "dpapi",
+        }));
+    }
+
+    (hashes, creds)
+}
+
 pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) {
     // Prefer target_domain (the domain being dumped) over domain (auth credential's domain)
     // to correctly attribute hashes when authenticating cross-domain.
@@ -58,7 +262,7 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
         .unwrap_or("");
 
     let mut hashes = Vec::new();
-    let creds = Vec::new();
+    let mut creds = Vec::new();
     let mut section = DumpSection::Unknown;
 
     // First pass: collect AES256 trust/account keys keyed by lowercase username.
@@ -198,7 +402,7 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
                     (unprefixed_domain.to_string(), raw_user.to_string())
                 };
 
-                if nt_hash.len() == 32 && nt_hash != "31d6cfe0d16ae931b73c59d7e0c089c0" {
+                if is_hash32(nt_hash) && nt_hash != "31d6cfe0d16ae931b73c59d7e0c089c0" {
                     // Skip empty/disabled hashes
                     let hash_value = format!("{}:{}", lm_hash, nt_hash);
 
@@ -249,10 +453,12 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
                 }
             }
         }
-
-        // Cleartext passwords: "[*] Dumping DPAPI creds..." then "username:password"
-        // or from LSA: "[*] DefaultPassword\n  username = ...\n  password = ..."
     }
+
+    hashes.extend(parse_cached_domain_logons(output, domain));
+    let (lsa_hashes, lsa_creds) = parse_lsa_secrets(output, domain);
+    hashes.extend(lsa_hashes);
+    creds.extend(lsa_creds);
 
     (hashes, creds)
 }
@@ -386,6 +592,65 @@ fn resolve_netbios_to_fqdn(netbios: &str, target_domain: &str) -> String {
 
     // No match — keep the raw NetBIOS name (recovery normalization will resolve it later)
     netbios.to_string()
+}
+
+pub fn parse_local_auth_reuse(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) {
+    let arg = |key: &str| {
+        params
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+    };
+    let username = arg("username");
+    let hash = arg("hash");
+    let target = arg("target");
+    if username.is_empty() || hash.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut accepted = false;
+    let mut admin = false;
+    for raw_line in output.lines() {
+        let line = strip_ansi(raw_line);
+        let line = line.trim();
+        if !line.contains("[+]") || line.contains("STATUS_") {
+            continue;
+        }
+        accepted = true;
+        if line.contains("(Pwn3d!)") {
+            admin = true;
+        }
+    }
+    if !accepted {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut entry = json!({
+        "username": username,
+        "domain": "",
+        "hash_value": hash,
+        "hash_type": "ntlm",
+        "source": "smb_local_auth",
+    });
+    if !target.is_empty() {
+        entry["source_host"] = json!(target);
+    }
+
+    let mut hosts = Vec::new();
+    if admin && !target.is_empty() && target.parse::<std::net::IpAddr>().is_ok() {
+        hosts.push(json!({
+            "ip": target,
+            "hostname": "",
+            "os": "",
+            "roles": [],
+            "services": ["445/tcp (microsoft-ds)"],
+            "is_dc": false,
+            "owned": true,
+        }));
+    }
+
+    (vec![entry], hosts)
 }
 
 pub fn parse_kerberoast(output: &str, params: &Value) -> Vec<Value> {
@@ -1139,6 +1404,315 @@ FABRIKAM\\CONTOSO$:aes128-cts-hmac-sha1-96:55555555555555555555555555555555
         let (hashes, creds) = parse_secretsdump("", &json!({}));
         assert!(hashes.is_empty());
         assert!(creds.is_empty());
+    }
+
+    fn member_server_dump() -> &'static str {
+        "\
+[*] Service RemoteRegistry is in stopped state
+[*] Target system bootKey: 0x1122334455667788990011223344556677
+[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
+Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+[*] Dumping cached domain logon information (domain/username:hash)
+contoso.local/alice:$DCC2$10240#alice#e2829c8af2232fa53797e2f0e35e4626: (2026-07-30 21:12:03.123456+00:00)
+contoso.local/admin:$DCC2$10240#admin#a1b2c3d4e5f60718293a4b5c6d7e8f90: (2026-07-29 08:00:00.000000+00:00)
+[*] Dumping LSA Secrets
+[*] $MACHINE.ACC
+CONTOSO\\WEB01$:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::
+CONTOSO\\WEB01$:aes256-cts-hmac-sha1-96:1111111111111111111111111111111111111111111111111111111111111111
+CONTOSO\\WEB01$:plain_password_hex:00112233445566778899aabbccddeeff
+[*] DPAPI_SYSTEM
+dpapi_machinekey:0x1111111111111111111111111111111111111111
+dpapi_userkey:0x2222222222222222222222222222222222222222
+[*] NL$KM
+ 0000   AA BB CC DD EE FF 00 11  22 33 44 55 66 77 88 99   ................
+[*] _SC_MSSQLSERVER
+CONTOSO\\svc_sql:P@ssw0rd!
+[*] _SC_BackupSvc
+.\\svc_backup:P@ssw0rd!
+[*] _SC_Spooler
+NT AUTHORITY\\LocalSystem:(Unknown)
+[*] DefaultPassword
+CONTOSO\\bob:P@ssw0rd!
+[*] Cleaning up...
+"
+    }
+
+    #[test]
+    fn parse_secretsdump_captures_cached_domain_logons_as_dcc2() {
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(member_server_dump(), &params);
+        let dcc2: Vec<_> = hashes
+            .iter()
+            .filter(|h| h["hash_type"] == DCC2_HASH_TYPE)
+            .collect();
+        assert_eq!(dcc2.len(), 2, "both cached logons must be captured");
+        assert_eq!(dcc2[0]["username"], "alice");
+        assert_eq!(dcc2[0]["domain"], "contoso.local");
+        assert_eq!(
+            dcc2[0]["hash_value"],
+            "$DCC2$10240#alice#e2829c8af2232fa53797e2f0e35e4626"
+        );
+        assert_eq!(dcc2[1]["username"], "admin");
+        assert_eq!(
+            dcc2[1]["hash_value"],
+            "$DCC2$10240#admin#a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        );
+    }
+
+    #[test]
+    fn parse_secretsdump_dcc2_rows_never_labelled_ntlm() {
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(member_server_dump(), &params);
+        for h in &hashes {
+            let value = h["hash_value"].as_str().unwrap();
+            if value.starts_with("$DCC2$") {
+                assert_eq!(h["hash_type"], DCC2_HASH_TYPE);
+            } else {
+                assert_ne!(h["hash_type"], DCC2_HASH_TYPE);
+            }
+        }
+    }
+
+    #[test]
+    fn parse_secretsdump_captures_lsa_service_account_plaintext() {
+        let params = json!({"target_domain": "contoso.local"});
+        let (_, creds) = parse_secretsdump(member_server_dump(), &params);
+        assert_eq!(creds.len(), 3, "two _SC_ secrets plus DefaultPassword");
+        assert_eq!(creds[0]["username"], "svc_sql");
+        assert_eq!(creds[0]["domain"], "contoso.local");
+        assert_eq!(creds[0]["password"], "P@ssw0rd!");
+        assert_eq!(creds[0]["source"], "lsa_secrets");
+        assert_eq!(creds[1]["username"], "svc_backup");
+        assert_eq!(
+            creds[1]["domain"], "",
+            "`.\\user` is machine-local, never the AD realm"
+        );
+        assert_eq!(creds[2]["username"], "bob");
+        assert_eq!(creds[2]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn parse_secretsdump_skips_builtin_service_principals() {
+        let params = json!({"target_domain": "contoso.local"});
+        let (_, creds) = parse_secretsdump(member_server_dump(), &params);
+        assert!(
+            !creds.iter().any(|c| c["username"]
+                .as_str()
+                .unwrap()
+                .eq_ignore_ascii_case("LocalSystem")),
+            "NT AUTHORITY\\LocalSystem has no stored password"
+        );
+    }
+
+    #[test]
+    fn parse_secretsdump_captures_dpapi_system_key_pair() {
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(member_server_dump(), &params);
+        let dpapi: Vec<_> = hashes
+            .iter()
+            .filter(|h| h["hash_type"] == DPAPI_SYSTEM_HASH_TYPE)
+            .collect();
+        assert_eq!(dpapi.len(), 1);
+        assert_eq!(dpapi[0]["username"], "DPAPI_SYSTEM");
+        assert_eq!(dpapi[0]["domain"], "");
+        assert_eq!(
+            dpapi[0]["hash_value"],
+            "1111111111111111111111111111111111111111:2222222222222222222222222222222222222222"
+        );
+    }
+
+    #[test]
+    fn parse_secretsdump_machine_account_stays_ntlm_and_local_sam_unattributed() {
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(member_server_dump(), &params);
+        let machine = hashes
+            .iter()
+            .find(|h| h["username"] == "WEB01$")
+            .expect("$MACHINE.ACC row captured");
+        assert_eq!(machine["hash_type"], "ntlm");
+        assert_eq!(machine["domain"], "contoso.local");
+        assert_eq!(
+            machine["aes_key"],
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
+        let sam_admin = hashes
+            .iter()
+            .find(|h| h["username"] == "Administrator")
+            .expect("local SAM row captured");
+        assert_eq!(sam_admin["domain"], "");
+    }
+
+    #[test]
+    fn is_dcc2_hash_value_accepts_hashcat_example_layout() {
+        assert!(is_dcc2_hash_value(
+            "$DCC2$10240#6848#e2829c8af2232fa53797e2f0e35e4626"
+        ));
+    }
+
+    #[test]
+    fn is_dcc2_hash_value_rejects_malformed_and_foreign_shapes() {
+        for bad in [
+            "$DCC2$10240#alice#e2829c8af2232fa53797e2f0e35e46",
+            "$DCC2$#alice#e2829c8af2232fa53797e2f0e35e4626",
+            "$DCC2$abcd#alice#e2829c8af2232fa53797e2f0e35e4626",
+            "$DCC2$10240##e2829c8af2232fa53797e2f0e35e4626",
+            "$DCC2$10240#alice#e2829c8af2232fa53797e2f0e35e4626#extra",
+            "aad3b435b51404eeaad3b435b51404ee",
+            "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$abcd",
+            "",
+        ] {
+            assert!(!is_dcc2_hash_value(bad), "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn parse_secretsdump_rejects_malformed_dcc2_rows() {
+        let output = "\
+[*] Dumping cached domain logon information (domain/username:hash)
+contoso.local/alice:$DCC2$10240#alice#nothexnothexnothexnothexnothex12: (2026-07-30 21:12:03+00:00)
+contoso.local/WS01$:$DCC2$10240#WS01$#e2829c8af2232fa53797e2f0e35e4626: (2026-07-30 21:12:03+00:00)";
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert!(
+            hashes.is_empty(),
+            "non-hex digest and machine accounts must both be dropped"
+        );
+    }
+
+    #[test]
+    fn parse_secretsdump_caps_dcc2_capture_per_dump() {
+        let mut output =
+            String::from("[*] Dumping cached domain logon information (domain/username:hash)\n");
+        for i in 0..(MAX_DCC2_PER_DUMP + 8) {
+            output.push_str(&format!(
+                "contoso.local/user{i}:$DCC2$10240#user{i}#{:032x}: (2026-07-30 21:12:03+00:00)\n",
+                i + 1
+            ));
+        }
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(&output, &params);
+        assert_eq!(hashes.len(), MAX_DCC2_PER_DUMP);
+    }
+
+    #[test]
+    fn parse_secretsdump_dcc2_survives_nxc_framing() {
+        let output = "\
+SMB         192.168.58.30   445    WEB01            [*] Dumping cached domain logon information (domain/username:hash)
+SMB         192.168.58.30   445    WEB01            contoso.local/alice:$DCC2$10240#alice#e2829c8af2232fa53797e2f0e35e4626: (2026-07-30 21:12:03+00:00)";
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "alice");
+        assert_eq!(hashes[0]["hash_type"], DCC2_HASH_TYPE);
+    }
+
+    #[test]
+    fn parse_secretsdump_dcc2_keeps_foreign_realm_of_cached_user() {
+        let output = "\
+[*] Dumping cached domain logon information (domain/username:hash)
+FABRIKAM.LOCAL/admin:$DCC2$10240#admin#e2829c8af2232fa53797e2f0e35e4626: (2026-07-30 21:12:03+00:00)";
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(
+            hashes[0]["domain"], "fabrikam.local",
+            "cached logons carry the logging-on user's realm, not the dumped host's"
+        );
+    }
+
+    #[test]
+    fn parse_secretsdump_lsa_section_ends_at_next_banner() {
+        let output = "\
+[*] Dumping LSA Secrets
+[*] _SC_MSSQLSERVER
+CONTOSO\\svc_sql:P@ssw0rd!
+[*] Dumping the NTDS, this could take a while
+[*] Reading and decrypting hashes from /tmp/ntds.dit
+CONTOSO\\carol:1104:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::";
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, creds) = parse_secretsdump(output, &params);
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "svc_sql");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "carol");
+        assert_eq!(hashes[0]["hash_type"], "ntlm");
+    }
+
+    #[test]
+    fn parse_secretsdump_ignores_lsa_history_secrets() {
+        let output = "\
+[*] Dumping LSA Secrets
+[*] _SC_MSSQLSERVER_history
+CONTOSO\\svc_sql:OldP@ssw0rd!";
+        let params = json!({"target_domain": "contoso.local"});
+        let (_, creds) = parse_secretsdump(output, &params);
+        assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn parse_secretsdump_lsa_password_may_contain_colons() {
+        let output = "\
+[*] Dumping LSA Secrets
+[*] _SC_MSSQLSERVER
+CONTOSO\\svc_sql:P@ss:w0rd!";
+        let params = json!({"target_domain": "contoso.local"});
+        let (_, creds) = parse_secretsdump(output, &params);
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["password"], "P@ss:w0rd!");
+    }
+
+    #[test]
+    fn parse_local_auth_reuse_records_validated_local_hash() {
+        let output = "\
+SMB         192.168.58.31   445    WS01             [*] Windows 10 / Server 2019 Build 17763 x64
+SMB         192.168.58.31   445    WS01             [+] WS01\\admin:abcdef1234567890abcdef1234567890 (Pwn3d!)";
+        let params = json!({
+            "target": "192.168.58.31",
+            "username": "admin",
+            "hash": "abcdef1234567890abcdef1234567890",
+        });
+        let (hashes, hosts) = parse_local_auth_reuse(output, &params);
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "admin");
+        assert_eq!(
+            hashes[0]["domain"], "",
+            "local SAM reuse must never claim a realm"
+        );
+        assert_eq!(hashes[0]["hash_type"], "ntlm");
+        assert_eq!(hashes[0]["source"], "smb_local_auth");
+        assert_eq!(hashes[0]["source_host"], "192.168.58.31");
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["ip"], "192.168.58.31");
+        assert_eq!(hosts[0]["owned"], true);
+    }
+
+    #[test]
+    fn parse_local_auth_reuse_without_pwn3d_records_no_host_takeover() {
+        let output =
+            "SMB  192.168.58.31  445  WS01  [+] WS01\\admin:abcdef1234567890abcdef1234567890";
+        let params = json!({
+            "target": "192.168.58.31",
+            "username": "admin",
+            "hash": "abcdef1234567890abcdef1234567890",
+        });
+        let (hashes, hosts) = parse_local_auth_reuse(output, &params);
+        assert_eq!(hashes.len(), 1);
+        assert!(hosts.is_empty());
+    }
+
+    #[test]
+    fn parse_local_auth_reuse_rejects_failed_login() {
+        let output = "\
+SMB         192.168.58.31   445    WS01             [-] WS01\\admin:abcdef1234567890abcdef1234567890 STATUS_LOGON_FAILURE";
+        let params = json!({
+            "target": "192.168.58.31",
+            "username": "admin",
+            "hash": "abcdef1234567890abcdef1234567890",
+        });
+        let (hashes, hosts) = parse_local_auth_reuse(output, &params);
+        assert!(hashes.is_empty());
+        assert!(hosts.is_empty());
     }
 
     #[test]

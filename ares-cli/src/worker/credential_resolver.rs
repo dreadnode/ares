@@ -1226,7 +1226,16 @@ pub(crate) fn is_authenticating_hash_type(hash_type: &str) -> bool {
         .collect();
     !matches!(
         t.as_str(),
-        "kerberoast" | "asreproast" | "asrep" | "tgs" | "tgsrep" | "krb5tgs" | "krb5asrep"
+        "kerberoast"
+            | "asreproast"
+            | "asrep"
+            | "tgs"
+            | "tgsrep"
+            | "krb5tgs"
+            | "krb5asrep"
+            | "dcc2"
+            | "mscachev2"
+            | "dpapisystem"
     )
 }
 
@@ -2899,6 +2908,22 @@ mod tests {
                 "{ht} should not be authenticating"
             );
         }
+    }
+
+    #[test]
+    fn auth_hash_type_dcc2_is_never_authenticating() {
+        for ht in &["dcc2", "DCC2", "mscache-v2", "MSCacheV2", "dcc-2"] {
+            assert!(
+                !is_authenticating_hash_type(ht),
+                "{ht} should not be authenticating"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_hash_type_dpapi_system_is_never_authenticating() {
+        assert!(!is_authenticating_hash_type("dpapi_system"));
+        assert!(!is_authenticating_hash_type("DPAPI-SYSTEM"));
     }
 
     #[test]

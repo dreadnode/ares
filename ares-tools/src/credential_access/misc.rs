@@ -147,6 +147,34 @@ pub async fn smb_login_check(args: &Value) -> Result<ToolOutput> {
         .await
 }
 
+pub async fn smb_local_auth_check(args: &Value) -> Result<ToolOutput> {
+    let target = required_str(args, "target")?;
+    let username = required_str(args, "username")?;
+    let password = optional_str(args, "password");
+    let hash = optional_str(args, "hash");
+    if password.is_none() && hash.is_none() {
+        return Ok(ToolOutput {
+            stdout: format!(
+                "smb_local_auth_check: no local credential supplied for {username} on {target}; skipping login attempt.\n"
+            ),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+    }
+
+    let cred_args = credentials::netexec_creds(Some(username), password, hash, None);
+
+    CommandBuilder::new("netexec")
+        .arg("smb")
+        .arg(target)
+        .args(cred_args)
+        .arg("--local-auth")
+        .timeout_secs(60)
+        .execute()
+        .await
+}
+
 /// Check for admin access on targets via `netexec smb`.
 ///
 /// netexec automatically reports `(Pwn3d!)` in its output when the
@@ -1382,6 +1410,36 @@ mod tests {
             "domain": "contoso.local", "method": "comsvcs"
         });
         assert!(super::lsassy(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smb_local_auth_check_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "192.168.58.31", "username": "admin",
+            "hash": "abcdef1234567890abcdef1234567890"
+        });
+        assert!(super::smb_local_auth_check(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smb_local_auth_check_without_credential_is_a_soft_skip() {
+        let args = json!({"target": "192.168.58.31", "username": "admin"});
+        let out = super::smb_local_auth_check(&args).await.unwrap();
+        assert!(out.success);
+        assert!(out.stdout.contains("skipping login attempt"));
+    }
+
+    #[test]
+    fn smb_local_auth_check_creds_omit_the_domain_flag() {
+        let cred_args = credentials::netexec_creds(
+            Some("admin"),
+            None,
+            Some("abcdef1234567890abcdef1234567890"),
+            None,
+        );
+        assert!(!cred_args.iter().any(|a| a == "-d"));
+        assert!(cred_args.iter().any(|a| a == "-H"));
     }
 
     #[tokio::test]

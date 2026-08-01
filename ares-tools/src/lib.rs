@@ -119,6 +119,7 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "secretsdump" => credential_access::secretsdump(arguments).await,
         "lsassy" => credential_access::lsassy(arguments).await,
         "smb_login_check" => credential_access::smb_login_check(arguments).await,
+        "smb_local_auth_check" => credential_access::smb_local_auth_check(arguments).await,
         "domain_admin_checker" => credential_access::domain_admin_checker(arguments).await,
         "gpp_password_finder" => credential_access::gpp_password_finder(arguments).await,
         "sysvol_script_search" => credential_access::sysvol_script_search(arguments).await,

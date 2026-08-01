@@ -29,6 +29,9 @@ static RE_CRACKED_ASREP: LazyLock<Regex> = LazyLock::new(|| {
 static RE_CRACKED_NTLM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-fA-F0-9]{32}:(.+)$").unwrap());
 
+static RE_CRACKED_DCC2: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^\$DCC2\$\d+#([^#]+)#[a-fA-F0-9]{32}:(.+)$").unwrap());
+
 /// John --show output: user:plaintext:RID:LM:NT:...
 static RE_JOHN_SHOW: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^([^:\s$][^:]*):([^:]+):\d*:(?:[a-fA-F0-9]*:){0,3}:*\s*$").unwrap()
@@ -100,6 +103,21 @@ pub fn parse_cracker_output(output: &str, params: &Value) -> Vec<Value> {
                     "username": user,
                     "password": password,
                     "domain": hash_domain,
+                    "source": "cracked:hashcat",
+                }));
+            }
+            continue;
+        }
+
+        if let Some(caps) = RE_CRACKED_DCC2.captures(stripped) {
+            let user = caps.get(1).unwrap().as_str();
+            let password = caps.get(2).unwrap().as_str();
+            let key = format!("{}@{}", user.to_lowercase(), domain.to_lowercase());
+            if seen.insert(key) && is_valid_password(password) {
+                credentials.push(json!({
+                    "username": user,
+                    "password": password,
+                    "domain": domain,
                     "source": "cracked:hashcat",
                 }));
             }
@@ -287,6 +305,18 @@ $krb5asrep$23$michelle@FABRIKAM.LOCAL:8a7a0b3264590ef6:P@ssw0rd!
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0]["username"], "Administrator");
         assert_eq!(creds[0]["password"], "Summer2024!");
+    }
+
+    #[test]
+    fn parse_hashcat_dcc2_cracked_uses_salt_username() {
+        let output = "--- hashcat --show ---\n$DCC2$10240#admin#e2829c8af2232fa53797e2f0e35e4626:P@ssw0rd!\n";
+        let params = json!({"domain": "contoso.local", "username": "admin"});
+        let creds = parse_cracker_output(output, &params);
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "admin");
+        assert_eq!(creds[0]["password"], "P@ssw0rd!");
+        assert_eq!(creds[0]["domain"], "contoso.local");
+        assert_eq!(creds[0]["source"], "cracked:hashcat");
     }
 
     #[test]

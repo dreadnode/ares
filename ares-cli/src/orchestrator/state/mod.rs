@@ -73,6 +73,7 @@ pub const DEDUP_CERTIPY_AUTH: &str = "certipy_auth";
 pub const DEDUP_SID_ENUMERATION: &str = "sid_enumeration";
 pub const DEDUP_DNS_ENUM: &str = "dns_enum";
 pub const DEDUP_DOMAIN_USER_ENUM: &str = "domain_user_enum";
+pub const DEDUP_LOCAL_AUTH_SWEEP: &str = "local_auth_sweep";
 pub const DEDUP_PTH_SPRAY: &str = "pth_spray";
 pub const DEDUP_CERTIFRIED: &str = "certifried";
 pub const DEDUP_DACL_ABUSE: &str = "dacl_abuse";
@@ -182,6 +183,7 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_DNS_ENUM,
     DEDUP_DOMAIN_USER_ENUM,
     DEDUP_PTH_SPRAY,
+    DEDUP_LOCAL_AUTH_SWEEP,
     DEDUP_CERTIFRIED,
     DEDUP_DACL_ABUSE,
     DEDUP_SMBCLIENT_ENUM,

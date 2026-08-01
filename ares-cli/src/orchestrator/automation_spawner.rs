@@ -89,6 +89,7 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_dns_enum);
     spawn_auto!(auto_domain_user_enum);
     spawn_auto!(auto_pth_spray);
+    spawn_auto!(auto_local_auth_sweep);
     spawn_auto!(auto_dacl_abuse);
     spawn_auto!(auto_smbclient_enum);
     spawn_auto!(auto_acl_discovery);

@@ -105,6 +105,7 @@ pub(crate) const PARSER_CREDENTIAL_SOURCES: &[&str] = &[
     "autologon_registry",
     "sysvol_script",
     "user_description_leak",
+    "lsa_secrets",
 ];
 
 /// Label for a credential whose `source` no parser is known to produce.

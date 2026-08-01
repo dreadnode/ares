@@ -41,8 +41,9 @@ pub use mssql::{parse_mssql_impersonation, parse_mssql_linked_servers};
 pub use nmap::{flush_nmap_host, parse_nmap_output};
 pub use ntsd::parse_acl_enumeration;
 pub use secrets::{
-    extract_mssql_hosts_from_kerberoast, parse_asrep_roast, parse_kerberoast, parse_netntlmv2,
-    parse_secretsdump,
+    extract_mssql_hosts_from_kerberoast, is_dcc2_hash_value, parse_asrep_roast, parse_kerberoast,
+    parse_local_auth_reuse, parse_netntlmv2, parse_secretsdump, DCC2_HASH_TYPE,
+    DPAPI_SYSTEM_HASH_TYPE,
 };
 pub use smb::{parse_netexec_smb, parse_smb_signing};
 pub use spider::parse_spider_credentials;
@@ -480,6 +481,11 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             "credentials",
             parse_spray_success(output, params),
         ),
+        "smb_local_auth_check" => {
+            let (hashes, hosts) = secrets::parse_local_auth_reuse(output, params);
+            set_if_nonempty(&mut discoveries, "hashes", hashes);
+            set_if_nonempty(&mut discoveries, "hosts", hosts);
+        }
         "username_as_password" => {
             let creds = parse_spray_success(output, params);
             // Only keep creds where password == username.
@@ -1503,10 +1509,53 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
              FABRIKAM.LOCAL/svc_far:$DCC2$10240#svc_far#0123456789abcdef0123456789abcdef";
         let params = json!({"target_domain": "fabrikam.local", "domain": "contoso.local"});
         let disc = parse_tool_output("mssql_far_host_secretsdump", output, &params);
+        let hashes = disc["hashes"].as_array().unwrap();
         assert!(
-            !disc["hashes"].as_array().unwrap().is_empty(),
+            !hashes.is_empty(),
             "far-host secretsdump output must yield hashes"
         );
+        let cached = hashes
+            .iter()
+            .find(|h| h["username"] == "svc_far")
+            .expect("cached domain logon must reach state");
+        assert_eq!(cached["hash_type"], "dcc2");
+        assert_eq!(cached["domain"], "fabrikam.local");
+    }
+
+    #[test]
+    fn parse_tool_output_secretsdump_surfaces_lsa_plaintext_credentials() {
+        let output = "\
+[*] Dumping LSA Secrets
+[*] _SC_MSSQLSERVER
+CONTOSO\\svc_sql:P@ssw0rd!
+[*] Cleaning up...";
+        let params = json!({"target_domain": "contoso.local"});
+        let disc = parse_tool_output("secretsdump", output, &params);
+        let creds = disc["credentials"].as_array().unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "svc_sql");
+        assert_eq!(creds[0]["password"], "P@ssw0rd!");
+        assert_eq!(creds[0]["domain"], "contoso.local");
+        assert_eq!(creds[0]["source"], "lsa_secrets");
+    }
+
+    #[test]
+    fn parse_tool_output_smb_local_auth_check_marks_host_owned_on_pwn3d() {
+        let output =
+            "SMB  192.168.58.31  445  WS01  [+] WS01\\admin:abcdef1234567890abcdef1234567890 (Pwn3d!)";
+        let params = json!({
+            "target": "192.168.58.31",
+            "username": "admin",
+            "hash": "abcdef1234567890abcdef1234567890",
+        });
+        let disc = parse_tool_output("smb_local_auth_check", output, &params);
+        let hashes = disc["hashes"].as_array().unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["domain"], "");
+        assert_eq!(hashes[0]["source"], "smb_local_auth");
+        let hosts = disc["hosts"].as_array().unwrap();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0]["owned"], true);
     }
 
     #[test]

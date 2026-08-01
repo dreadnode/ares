@@ -38,7 +38,8 @@ fn crack_priority(hash_type: &str) -> u8 {
         .collect();
     match t.as_str() {
         "kerberoast" | "asrep" | "asreproast" => 0,
-        _ => 1,
+        "dcc2" | "mscachev2" => 1,
+        _ => 2,
     }
 }
 
@@ -65,7 +66,12 @@ fn crack_priority(hash_type: &str) -> u8 {
 /// inter-realm forge) still sees every one of these hashes.
 fn is_uncrackable(hash: &ares_core::models::Hash) -> bool {
     let username = hash.username.trim_end();
-    hash.is_trust_key || username.ends_with('$') || is_krbtgt(username)
+    hash.is_trust_key
+        || username.ends_with('$')
+        || is_krbtgt(username)
+        || hash
+            .hash_type
+            .eq_ignore_ascii_case(ares_tools::parsers::DPAPI_SYSTEM_HASH_TYPE)
 }
 
 /// Whether `username` names a krbtgt account: the domain krbtgt or an RODC
@@ -133,8 +139,8 @@ fn max_active_crack_tasks() -> usize {
 /// that domain's krbtgt before the op ended.
 fn crack_mode_cost(hash_value: &str) -> u8 {
     match ares_tools::cracker::hashcat_mode_for(hash_value) {
-        19600 | 19700 => 1, // AES kerberoast — can burn the whole slot budget
-        _ => 0,             // RC4 AS-REP / RC4 kerberoast / NTLM — crack fast
+        19600 | 19700 | 2100 => 1, // AES kerberoast / DCC2 — hashcat "Slow.Hash: Yes"
+        _ => 0,                    // RC4 AS-REP / RC4 kerberoast / NTLM — crack fast
     }
 }
 
@@ -511,8 +517,9 @@ async fn record_crack_attempt(
 #[cfg(test)]
 mod tests {
     use super::{
-        batch_same_mode_roastable, crack_priority, is_krbtgt, is_owned_domain_ntlm, is_uncrackable,
-        select_next_crack, sort_crack_work, MAX_CRACK_ATTEMPTS, NTLM_TURN_AFTER_ROASTABLE_STREAK,
+        batch_same_mode_roastable, crack_mode_cost, crack_priority, is_krbtgt,
+        is_owned_domain_ntlm, is_uncrackable, select_next_crack, sort_crack_work,
+        MAX_CRACK_ATTEMPTS, NTLM_TURN_AFTER_ROASTABLE_STREAK,
     };
     use crate::orchestrator::state::{StateInner, DEDUP_CRACK_REQUESTS};
     use ares_core::models::Hash;
@@ -641,8 +648,38 @@ mod tests {
         assert_eq!(crack_priority("AS-REP"), 0);
         assert_eq!(crack_priority("as-rep"), 0);
         assert_eq!(crack_priority("Kerberoast"), 0);
-        assert_eq!(crack_priority("NTLM"), 1);
-        assert_eq!(crack_priority("ntlm"), 1);
+        assert!(crack_priority("NTLM") > crack_priority("dcc2"));
+        assert!(crack_priority("dcc2") > crack_priority("AS-REP"));
+        assert_eq!(crack_priority("NTLM"), crack_priority("ntlm"));
+    }
+
+    #[test]
+    fn dcc2_outranks_ntlm_but_never_roastables() {
+        assert!(crack_priority("dcc2") > crack_priority("Kerberoast"));
+        assert!(crack_priority("dcc2") < crack_priority("NTLM"));
+        assert!(
+            crack_priority("dcc2") > 0,
+            "dcc2 is never batched as roastable"
+        );
+    }
+
+    #[test]
+    fn dcc2_is_crackable_but_dpapi_system_is_not() {
+        assert!(!is_uncrackable(&mk_hash("alice", "dcc2", false)));
+        assert!(is_uncrackable(&mk_hash(
+            "DPAPI_SYSTEM",
+            "dpapi_system",
+            false
+        )));
+    }
+
+    #[test]
+    fn dcc2_mode_is_charged_as_a_slow_hash() {
+        assert_eq!(
+            crack_mode_cost("$DCC2$10240#alice#e2829c8af2232fa53797e2f0e35e4626"),
+            1
+        );
+        assert_eq!(crack_mode_cost("aad3b435b51404eeaad3b435b51404ee"), 0);
     }
 
     #[test]

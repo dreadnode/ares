@@ -1385,6 +1385,7 @@ mod tests {
             DEDUP_DNS_ENUM,
             DEDUP_DOMAIN_USER_ENUM,
             DEDUP_PTH_SPRAY,
+            DEDUP_LOCAL_AUTH_SWEEP,
             DEDUP_CERTIFRIED,
             DEDUP_DACL_ABUSE,
             DEDUP_SMBCLIENT_ENUM,

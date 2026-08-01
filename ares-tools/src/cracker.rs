@@ -169,6 +169,8 @@ fn detect_hashcat_mode(hash_value: &str) -> i64 {
         }
     } else if hash_value.starts_with("$krb5asrep$") {
         18200
+    } else if crate::parsers::is_dcc2_hash_value(hash_value.trim()) {
+        2100
     } else if is_netntlmv2_format(hash_value) {
         5600
     } else {
@@ -276,6 +278,8 @@ fn hash_kind(hash_value: &str) -> &'static str {
         "krb5tgs"
     } else if hash_value.starts_with("$krb5asrep$") {
         "krb5asrep"
+    } else if hash_value.starts_with("$DCC2$") {
+        "dcc2"
     } else {
         "ntlm-or-other"
     }
@@ -1251,6 +1255,35 @@ mod tests {
         assert_eq!(
             detect_hashcat_mode("aad3b435b51404eeaad3b435b51404ee"),
             1000,
+        );
+    }
+
+    #[test]
+    fn detect_hashcat_mode_dcc2() {
+        assert_eq!(
+            detect_hashcat_mode("$DCC2$10240#6848#e2829c8af2232fa53797e2f0e35e4626"),
+            2100
+        );
+        assert_eq!(
+            detect_hashcat_mode("$DCC2$10240#alice#e2829c8af2232fa53797e2f0e35e4626"),
+            2100
+        );
+    }
+
+    #[test]
+    fn detect_hashcat_mode_never_sends_ntlm_to_dcc2() {
+        assert_eq!(
+            detect_hashcat_mode("aad3b435b51404eeaad3b435b51404ee"),
+            1000
+        );
+        assert_ne!(detect_hashcat_mode("$DCC2$10240#alice#short"), 2100);
+    }
+
+    #[test]
+    fn hash_kind_labels_dcc2() {
+        assert_eq!(
+            hash_kind("$DCC2$10240#alice#e2829c8af2232fa53797e2f0e35e4626"),
+            "dcc2"
         );
     }
 

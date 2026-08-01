@@ -81,6 +81,7 @@ const RECON_ROUTED_TOOLS: &[&str] = &[
     "check_credman_entries",
     "check_autologon_registry",
     "smb_login_check",
+    "smb_local_auth_check",
     "domain_admin_checker",
     "gmsa_dump_passwords",
     "netexec_auth_check",
@@ -101,6 +102,7 @@ const AUTH_BEARING_TOOLS: &[&str] = &[
     "check_credman_entries",
     "check_autologon_registry",
     "smb_login_check",
+    "smb_local_auth_check",
     "domain_admin_checker",
     "gmsa_dump_passwords",
     // impacket tools
