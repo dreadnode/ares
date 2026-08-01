@@ -568,7 +568,9 @@ pub(crate) fn collect_dacl_work_census(
             .then_with(|| a.vuln_id.cmp(&b.vuln_id))
     });
     census.over_tick_cap = items.len().saturating_sub(MAX_ACL_DISPATCH_PER_TICK);
-    items.truncate(MAX_ACL_DISPATCH_PER_TICK);
+    let items = acl_graph::take_diverse_by(items, MAX_ACL_DISPATCH_PER_TICK, |w: &DaclWork| {
+        (w.source_user.to_lowercase(), w.domain.to_lowercase())
+    });
     census.eligible = items.len();
     items
 }
@@ -2151,6 +2153,89 @@ mod tests {
         let state = shared.read().await;
         let work = collect_dacl_work(&state);
         assert_eq!(work.len(), MAX_ACL_DISPATCH_PER_TICK);
+    }
+
+    #[tokio::test]
+    async fn the_tick_budget_is_spread_across_distinct_source_principals() {
+        let shared = SharedState::new("test".into());
+        let owners = 40usize;
+        {
+            let mut state = shared.write().await;
+            for p in 0..owners {
+                state
+                    .credentials
+                    .push(make_credential(&format!("svc_{p:03}"), "contoso.local"));
+            }
+            for p in 0..owners {
+                for e in 0..60 {
+                    let details = acl_details(
+                        &format!("svc_{p:03}"),
+                        &format!("host{p:03}_{e:03}"),
+                        "contoso.local",
+                    );
+                    let vuln = make_vuln(
+                        &format!("acl_writedacl_{p:03}_{e:03}"),
+                        "WriteDacl",
+                        details,
+                    );
+                    state
+                        .discovered_vulnerabilities
+                        .insert(vuln.vuln_id.clone(), vuln);
+                }
+            }
+        }
+
+        let state = shared.read().await;
+        let work = collect_dacl_work(&state);
+        assert_eq!(work.len(), MAX_ACL_DISPATCH_PER_TICK);
+
+        let sources: std::collections::HashSet<String> =
+            work.iter().map(|w| w.source_user.to_lowercase()).collect();
+        assert_eq!(
+            sources.len(),
+            MAX_ACL_DISPATCH_PER_TICK,
+            "2400 edges over {owners} owned principals produced {} distinct sources; the tick \
+             budget was spent re-walking one principal instead of covering the graph",
+            sources.len()
+        );
+
+        let targets: std::collections::HashSet<String> =
+            work.iter().map(|w| w.target_user.to_lowercase()).collect();
+        assert_eq!(targets.len(), MAX_ACL_DISPATCH_PER_TICK);
+    }
+
+    #[tokio::test]
+    async fn diverse_selection_still_leads_with_the_best_ranked_edge() {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("alice", "contoso.local"));
+            state
+                .credentials
+                .push(make_credential("bob", "contoso.local"));
+            for e in 0..40 {
+                let details = acl_details("alice", &format!("host{e:03}"), "contoso.local");
+                let vuln = make_vuln(&format!("acl_aaa_{e:03}"), "WriteDacl", details);
+                state
+                    .discovered_vulnerabilities
+                    .insert(vuln.vuln_id.clone(), vuln);
+            }
+            let mut details = acl_details("bob", "Domain Admins", "contoso.local");
+            details.insert("target_type".to_string(), serde_json::json!("Group"));
+            let vuln = make_vuln("acl_zzz_bob_da", "GenericAll", details);
+            state
+                .discovered_vulnerabilities
+                .insert(vuln.vuln_id.clone(), vuln);
+        }
+
+        let state = shared.read().await;
+        let work = collect_dacl_work(&state);
+        assert_eq!(
+            work[0].vuln_id, "acl_zzz_bob_da",
+            "diversity must not displace the edge that actually reaches Domain Admins"
+        );
     }
 
     #[tokio::test]

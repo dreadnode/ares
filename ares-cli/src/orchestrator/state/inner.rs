@@ -324,6 +324,7 @@ pub struct StateInner {
 
     pub acl_publish_cap: u32,
     pub acl_published_count: u32,
+    pub acl_low_value_published_count: u32,
     pub acl_cap_reached_logged: bool,
 
     pub emit_path_records: bool,
@@ -394,6 +395,7 @@ impl StateInner {
             self_ips: HashSet::new(),
             acl_publish_cap: default_acl_publish_cap(),
             acl_published_count: 0,
+            acl_low_value_published_count: 0,
             acl_cap_reached_logged: false,
             emit_path_records: false,
             novelty_enabled: false,

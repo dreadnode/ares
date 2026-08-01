@@ -224,13 +224,21 @@ impl SharedState {
             return Ok(false);
         }
 
-        if is_acl_mutation_vuln(&vuln.vuln_id) {
-            if let Some((cap, published, first)) = self.acl_publish_cap_reached().await {
+        let acl_edge = is_acl_mutation_vuln(&vuln.vuln_id);
+        let low_value_acl = acl_edge && acl_edge_source_is_low_value(&vuln);
+        if acl_edge {
+            if let Some((cap, published, first)) = self.acl_publish_cap_reached(low_value_acl).await
+            {
                 if first {
                     tracing::warn!(
                         cap = cap,
                         published = published,
                         "ACL publish cap reached; further ACL/GPO vulnerabilities dropped this op"
+                    );
+                } else if low_value_acl {
+                    tracing::debug!(
+                        vuln_id = %vuln.vuln_id,
+                        "ACL edge declined: low-value trustee quota spent, budget reserved for actionable edges"
                     );
                 }
                 return Ok(false);
@@ -274,24 +282,39 @@ impl SharedState {
                 .unwrap_or(());
             let _: () = conn.expire(&vuln_queue_key, 86400).await.unwrap_or(());
 
-            let is_acl = is_acl_mutation_vuln(&vuln.vuln_id);
             let mut state = self.inner.write().await;
             state
                 .discovered_vulnerabilities
                 .insert(vuln.vuln_id.clone(), vuln);
-            if is_acl {
+            if acl_edge {
                 state.acl_published_count = state.acl_published_count.saturating_add(1);
+                if low_value_acl {
+                    state.acl_low_value_published_count =
+                        state.acl_low_value_published_count.saturating_add(1);
+                }
             }
         }
         Ok(added)
     }
 
-    async fn acl_publish_cap_reached(&self) -> Option<(u32, u32, bool)> {
+    async fn acl_publish_cap_reached(&self, low_value: bool) -> Option<(u32, u32, bool)> {
         let read = self.inner.read().await;
-        let (cap, published) = (read.acl_publish_cap, read.acl_published_count);
+        let (cap, published, low_published) = (
+            read.acl_publish_cap,
+            read.acl_published_count,
+            read.acl_low_value_published_count,
+        );
         drop(read);
 
-        if cap == 0 || published < cap {
+        if cap == 0 {
+            return None;
+        }
+
+        if low_value && published < cap && low_published >= low_value_quota(cap) {
+            return Some((cap, published, false));
+        }
+
+        if published < cap {
             return None;
         }
 
@@ -538,6 +561,18 @@ fn are_in_same_forest(a: &str, b: &str) -> bool {
         return true;
     }
     a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
+}
+
+fn low_value_quota(cap: u32) -> u32 {
+    (cap / 5).max(1)
+}
+
+fn acl_edge_source_is_low_value(vuln: &VulnerabilityInfo) -> bool {
+    let source = ["source", "source_user", "from"]
+        .iter()
+        .find_map(|k| vuln.details.get(*k).and_then(|v| v.as_str()))
+        .unwrap_or_default();
+    !source.is_empty() && crate::orchestrator::acl_graph::is_low_value_acl_source(source)
 }
 
 fn should_drop_ghost_acl_vulnerability(vuln: &VulnerabilityInfo) -> bool {
@@ -893,6 +928,70 @@ mod tests {
         assert!(!s
             .discovered_vulnerabilities
             .contains_key("acl_genericall_over"));
+    }
+
+    fn acl_edge_from(vuln_id: &str, source: &str) -> VulnerabilityInfo {
+        let mut details = HashMap::new();
+        details.insert("source".to_string(), serde_json::json!(source));
+        details.insert("target".to_string(), serde_json::json!("web01"));
+        details.insert("target_type".to_string(), serde_json::json!("Computer"));
+        details.insert("domain".to_string(), serde_json::json!("contoso.local"));
+        make_vuln_with_details(vuln_id, "genericwrite", "192.168.58.10", details)
+    }
+
+    #[tokio::test]
+    async fn low_value_trustees_cannot_spend_the_whole_acl_budget() {
+        let state = SharedState::new("op-acl-budget".to_string());
+        let q = mock_queue();
+        let cap = 200u32;
+        state.set_acl_publish_cap(cap).await;
+
+        let da_sid = "S-1-5-21-1111111111-2222222222-3333333333-512";
+        for i in 0..cap {
+            let v = acl_edge_from(&format!("acl_genericwrite_da_{i:04}"), da_sid);
+            state.publish_vulnerability(&q, v).await.unwrap();
+        }
+
+        let mut actionable = 0usize;
+        for i in 0..cap {
+            let v = acl_edge_from(
+                &format!("acl_genericwrite_svc_{i:04}"),
+                &format!("svc_{i:04}"),
+            );
+            if state.publish_vulnerability(&q, v).await.unwrap() {
+                actionable += 1;
+            }
+        }
+
+        let s = state.inner.read().await;
+        assert!(
+            s.acl_low_value_published_count <= low_value_quota(cap),
+            "privileged-trustee edges took {} of a {} slot budget",
+            s.acl_low_value_published_count,
+            cap
+        );
+        assert!(
+            actionable >= (cap - low_value_quota(cap)) as usize,
+            "only {actionable} actionable edges were admitted; the budget was spent on trustees \
+             both ACL drivers permanently refuse"
+        );
+        assert!(
+            s.acl_published_count <= cap,
+            "the cap itself must still hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_low_value_trustee_still_gets_its_reserved_share() {
+        let state = SharedState::new("op-acl-share".to_string());
+        let q = mock_queue();
+        state.set_acl_publish_cap(200).await;
+
+        let everyone = acl_edge_from("acl_genericwrite_everyone_web01", "S-1-1-0");
+        assert!(
+            state.publish_vulnerability(&q, everyone).await.unwrap(),
+            "the quota reserves budget, it does not blacklist a trustee class"
+        );
     }
 
     #[tokio::test]

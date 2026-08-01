@@ -362,7 +362,12 @@ pub(crate) fn collect_acl_chain_work_census(
     }
 
     census.over_tick_cap = items.len().saturating_sub(MAX_ACL_DISPATCH_PER_TICK);
-    items.truncate(MAX_ACL_DISPATCH_PER_TICK);
+    let items = acl_graph::take_diverse_by(items, MAX_ACL_DISPATCH_PER_TICK, |w: &AclStepWork| {
+        (
+            w.credential.username.to_lowercase(),
+            w.credential.domain.to_lowercase(),
+        )
+    });
     census.eligible = items.len();
     items
 }

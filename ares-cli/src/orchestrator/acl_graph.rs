@@ -49,6 +49,92 @@ const HIGH_VALUE_GROUPS: &[&str] = &[
     "krbtgt",
 ];
 
+const PRIVILEGED_DOMAIN_RIDS: &[&str] = &["512", "516", "518", "519", "520", "521", "526", "527"];
+
+const PRIVILEGED_SOURCE_GROUPS: &[&str] = &[
+    "domain admins",
+    "enterprise admins",
+    "schema admins",
+    "domain controllers",
+    "enterprise domain controllers",
+    "read-only domain controllers",
+    "key admins",
+    "enterprise key admins",
+    "group policy creator owners",
+    "krbtgt",
+];
+
+pub(crate) fn is_non_principal_source(source: &str) -> bool {
+    let lower = source.trim().to_lowercase();
+    if !lower.starts_with("s-1-") {
+        return false;
+    }
+    if lower.starts_with("s-1-5-21-") {
+        return false;
+    }
+    if let Some(rid) = lower.strip_prefix("s-1-5-32-") {
+        return !BUILTIN_ALIASES.iter().any(|(alias, _)| *alias == rid);
+    }
+    true
+}
+
+pub(crate) fn is_already_privileged_source(source: &str) -> bool {
+    let lower = source.trim().to_lowercase();
+    if lower.starts_with("s-1-5-32-") {
+        return false;
+    }
+    if lower.starts_with("s-1-5-21-") {
+        return lower
+            .rsplit('-')
+            .next()
+            .is_some_and(|rid| PRIVILEGED_DOMAIN_RIDS.contains(&rid));
+    }
+    PRIVILEGED_SOURCE_GROUPS.contains(&normalize_group_name(&lower).as_str())
+}
+
+pub(crate) fn is_low_value_acl_source(source: &str) -> bool {
+    is_non_principal_source(source) || is_already_privileged_source(source)
+}
+
+pub(crate) fn take_diverse_by<T, K, F>(items: Vec<T>, limit: usize, key: F) -> Vec<T>
+where
+    F: Fn(&T) -> K,
+    K: Eq + std::hash::Hash,
+{
+    if items.len() <= limit {
+        return items;
+    }
+    let mut buckets: Vec<VecDeque<T>> = Vec::new();
+    let mut index: HashMap<K, usize> = HashMap::new();
+    for item in items {
+        let k = key(&item);
+        match index.get(&k) {
+            Some(&i) => buckets[i].push_back(item),
+            None => {
+                index.insert(k, buckets.len());
+                buckets.push(VecDeque::from([item]));
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(limit);
+    loop {
+        let mut progressed = false;
+        for bucket in &mut buckets {
+            if out.len() >= limit {
+                return out;
+            }
+            if let Some(item) = bucket.pop_front() {
+                out.push(item);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            return out;
+        }
+    }
+}
+
 /// True when `vuln_type` names an ACL right the ACL drivers can act on.
 pub(crate) fn is_acl_vuln_type(vuln_type: &str) -> bool {
     let vtype = vuln_type.to_lowercase();
@@ -1532,6 +1618,86 @@ mod tests {
             resolve_group_source(&s, "dave", "contoso.local"),
             Err(UnresolvedSource::NoMaterial)
         );
+    }
+
+    #[test]
+    fn privileged_trustees_are_classed_low_value() {
+        for source in [
+            "S-1-5-21-1111111111-2222222222-3333333333-512",
+            "S-1-5-21-1111111111-2222222222-3333333333-519",
+            "S-1-5-21-1111111111-2222222222-3333333333-518",
+            "Domain Admins",
+            "CONTOSO\\Enterprise Admins",
+            "krbtgt",
+        ] {
+            assert!(
+                is_low_value_acl_source(source),
+                "{source} is the objective, not a route to it"
+            );
+        }
+    }
+
+    #[test]
+    fn non_principal_trustees_are_classed_low_value() {
+        for source in [
+            "S-1-1-0",
+            "S-1-5-11",
+            "S-1-5-10",
+            "S-1-3-0",
+            "S-1-5-32-9999",
+        ] {
+            assert!(
+                is_low_value_acl_source(source),
+                "{source} names nothing ares can authenticate as"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_trustees_are_not_low_value() {
+        for source in [
+            "alice",
+            "svc_backup",
+            "Cert Publishers",
+            "S-1-5-32-551",
+            "S-1-5-32-544",
+            "Backup Operators",
+            "S-1-5-21-1111111111-2222222222-3333333333-1104",
+            "CONTOSO\\Helpdesk",
+        ] {
+            assert!(
+                !is_low_value_acl_source(source),
+                "{source} is a principal ares may come to own"
+            );
+        }
+    }
+
+    #[test]
+    fn take_diverse_by_spreads_across_buckets() {
+        let items: Vec<(u8, u8)> = (0..5)
+            .flat_map(|src| (0..10).map(move |n| (src, n)))
+            .collect();
+        let picked = take_diverse_by(items, 5, |(src, _)| *src);
+        let sources: HashSet<u8> = picked.iter().map(|(s, _)| *s).collect();
+        assert_eq!(sources.len(), 5);
+        assert_eq!(
+            picked[0],
+            (0, 0),
+            "the head of the ranked input must survive"
+        );
+    }
+
+    #[test]
+    fn take_diverse_by_falls_back_to_a_single_bucket() {
+        let items: Vec<(u8, u8)> = (0..10).map(|n| (0, n)).collect();
+        let picked = take_diverse_by(items, 4, |(src, _)| *src);
+        assert_eq!(picked, vec![(0, 0), (0, 1), (0, 2), (0, 3)]);
+    }
+
+    #[test]
+    fn take_diverse_by_is_a_noop_under_the_limit() {
+        let items = vec![(1u8, 1u8), (1, 2)];
+        assert_eq!(take_diverse_by(items.clone(), 8, |(s, _)| *s), items);
     }
 
     #[test]
