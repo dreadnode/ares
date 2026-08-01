@@ -1612,23 +1612,31 @@ pub(crate) fn reconcile_low_trust_credential_domain(
     Some(corrected)
 }
 
-/// `kerberoast_{username}` or `asrep_roast_{domain}` token when the
+/// `kerberoast_{domain}_{username}` or `asrep_roast_{domain}` token when the
 /// captured hash carries the canonical impacket / hashcat prefix
 /// (`$krb5tgs$`, `$krb5asrep$`). Returns `None` for other hash types so
 /// the caller emits exactly one token per captured roast hash. Token
 /// values match dreadgoad's `transport_ares.aresExploitedToTechniqueIDs`
 /// prefix matchers — anything starting with `kerberoast_` / `asrep_roast_`
 /// credits the corresponding scoreboard primitive.
+///
+/// The kerberoast key carries the realm because the same SPN account name
+/// exists in more than one domain — a shared-password service account roasted
+/// in a child domain and again in a second forest is two primitives on two
+/// DCs, and a bare `kerberoast_{username}` scored them as one. The domain is
+/// dropped only when the capture carries no realm at all, which keeps the
+/// realm-less fallback identical to the previous key.
 fn roast_exploit_token(hash_value: &str, username: &str, domain: &str) -> Option<String> {
     let user_lc = username.trim().to_lowercase();
     let dom_lc = domain.trim().to_lowercase();
     if hash_value.starts_with("$krb5tgs$") {
-        // Kerberoast: token-per-account so multiple SPN hashes don't
-        // collapse on a single entry.
         if user_lc.is_empty() {
             return None;
         }
-        Some(format!("kerberoast_{user_lc}"))
+        if dom_lc.is_empty() {
+            return Some(format!("kerberoast_{user_lc}"));
+        }
+        Some(format!("kerberoast_{dom_lc}_{user_lc}"))
     } else if hash_value.starts_with("$krb5asrep$") {
         // AS-REP roast: dreadgoad's objective is per-domain (any
         // preauth-disabled account demonstrates the primitive); token-
@@ -1644,9 +1652,84 @@ fn roast_exploit_token(hash_value: &str, username: &str, domain: &str) -> Option
     }
 }
 
+/// The realm a roast token is keyed on: lowercased, and resolved flat→FQDN
+/// when state knows the mapping.
+///
+/// `publish_hash` runs exactly this normalization on the `Hash` it stores, but
+/// it takes the hash by value and every caller captured `domain` beforehand —
+/// so the string reaching this module is the raw one the parser emitted. Now
+/// that the realm is part of the Kerberoast key, a `CHILD` capture and a
+/// `child.contoso.local` capture of the same account would otherwise mint two
+/// tokens for one primitive, replacing the undercount this fixes with an
+/// overcount. An unknown flat name keeps its own spelling rather than being
+/// guessed into a phantom realm.
+async fn roast_token_realm(state: &SharedState, domain: &str) -> String {
+    let lowered = domain.trim().to_lowercase();
+    if lowered.is_empty() {
+        return lowered;
+    }
+    let inner = state.read().await;
+    crate::orchestrator::state::canonicalize_domain_label(&lowered, &inner).unwrap_or(lowered)
+}
+
+/// Priority of the witness record minted by [`roast_credit_record`]. Above
+/// `ops loot`'s exploitable/finding threshold so the row lands in the
+/// informational table, and high enough that the exploitation ZSET — which
+/// pops lowest-score-first — never reaches it before `mark_exploited` runs.
+const ROAST_CREDIT_PRIORITY: i32 = 5;
+
+/// The vulnerability record that stands behind a roast exploit credit.
+///
+/// `mark_exploited` adds an id to `ares:op:{id}:exploited` whether or not a
+/// record exists for it, so a roast token used to be a scoreboard member with
+/// nothing behind it: it raised the headline exploited count, rendered in no
+/// table, and named no evidence. Publishing this record first is what makes the
+/// credit auditable — every phantom found in this system so far was found
+/// because it rendered somewhere and the evidence under it could be checked.
+///
+/// The record is a witness, not a work item. It describes a primitive that has
+/// already succeeded, which is why the caller marks it exploited immediately
+/// and why `exploitation::is_automation_owned_vuln` refuses to dispatch its
+/// `vuln_type`.
+fn roast_credit_record(
+    token: &str,
+    username: &str,
+    domain: &str,
+    hash_type: &str,
+    source: &str,
+) -> ares_core::models::VulnerabilityInfo {
+    let is_asrep = token.starts_with("asrep_roast");
+    let target = if is_asrep && !domain.trim().is_empty() {
+        domain.trim()
+    } else {
+        username.trim()
+    };
+    let mut details = std::collections::HashMap::new();
+    details.insert("account".to_string(), Value::from(username));
+    details.insert("domain".to_string(), Value::from(domain));
+    details.insert("hash_type".to_string(), Value::from(hash_type));
+    details.insert("captured_by".to_string(), Value::from(source));
+    ares_core::models::VulnerabilityInfo {
+        vuln_id: token.to_string(),
+        vuln_type: if is_asrep {
+            "asrep_roast"
+        } else {
+            "kerberoast"
+        }
+        .to_string(),
+        target: target.to_string(),
+        discovered_by: "roast_hash_capture".to_string(),
+        discovered_at: chrono::Utc::now(),
+        details,
+        recommended_agent: String::new(),
+        priority: ROAST_CREDIT_PRIORITY,
+    }
+}
+
 /// Everything a newly-published hash earns: its timeline event, the gMSA
 /// exploit token when the read was genuine, and AS-REP / Kerberoast primitive
-/// credit.
+/// credit — the token, plus the [`roast_credit_record`] that makes it show up
+/// in a report rather than only in a Redis set.
 ///
 /// Call this from **every** path that gets `Ok(true)` out of `publish_hash`.
 /// There are two — the parser path and the realtime discovery channel — and
@@ -1671,9 +1754,25 @@ pub(crate) async fn credit_published_hash(
 
     emit_gmsa_exploit_token_if_gmsa(&dispatcher.state, &dispatcher.queue, username, source).await;
 
-    let Some(token) = roast_exploit_token(hash_value, username, domain) else {
+    let realm = roast_token_realm(&dispatcher.state, domain).await;
+
+    let Some(token) = roast_exploit_token(hash_value, username, &realm) else {
         return;
     };
+    if let Err(e) = dispatcher
+        .state
+        .publish_vulnerability(
+            &dispatcher.queue,
+            roast_credit_record(&token, username, &realm, hash_type, source),
+        )
+        .await
+    {
+        warn!(
+            err = %e,
+            vuln_id = %token,
+            "Failed to publish roast vulnerability record — credit will be an orphan"
+        );
+    }
     if let Err(e) = dispatcher
         .state
         .mark_exploited(&dispatcher.queue, &token)
@@ -1688,7 +1787,7 @@ pub(crate) async fn credit_published_hash(
         info!(
             vuln_id = %token,
             account = %username,
-            domain = %domain,
+            domain = %realm,
             "Kerberos roast hash captured — emitted exploit token"
         );
     }

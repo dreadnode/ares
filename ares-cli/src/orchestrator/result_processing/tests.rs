@@ -2214,7 +2214,50 @@ fn roast_token_recognises_kerberoast_hash() {
             "sql_svc",
             "contoso.local",
         ),
-        Some("kerberoast_sql_svc".to_string())
+        Some("kerberoast_contoso.local_sql_svc".to_string())
+    );
+}
+
+#[test]
+fn kerberoast_token_separates_the_same_account_in_two_forests() {
+    use super::roast_exploit_token;
+    let child = roast_exploit_token(
+        "$krb5tgs$23$*svc_sql$CHILD.CONTOSO.LOCAL$cifs/dc02...",
+        "svc_sql",
+        "child.contoso.local",
+    );
+    let forest_b = roast_exploit_token(
+        "$krb5tgs$23$*svc_sql$FABRIKAM.LOCAL$cifs/dc01...",
+        "svc_sql",
+        "fabrikam.local",
+    );
+    assert_eq!(
+        child,
+        Some("kerberoast_child.contoso.local_svc_sql".to_string())
+    );
+    assert_eq!(
+        forest_b,
+        Some("kerberoast_fabrikam.local_svc_sql".to_string())
+    );
+    assert_ne!(child, forest_b);
+}
+
+#[test]
+fn kerberoast_token_falls_back_to_the_bare_account_without_a_realm() {
+    use super::roast_exploit_token;
+    assert_eq!(
+        roast_exploit_token("$krb5tgs$23$*svc_sql$", "svc_sql", "   "),
+        Some("kerberoast_svc_sql".to_string())
+    );
+}
+
+#[test]
+fn kerberoast_token_keeps_the_scoreboard_prefix() {
+    use super::roast_exploit_token;
+    let token = roast_exploit_token("$krb5tgs$23$*", "svc_sql", "contoso.local").unwrap();
+    assert!(
+        token.starts_with("kerberoast_"),
+        "dreadgoad credits on the `kerberoast_` prefix — {token} would score as `other`"
     );
 }
 
@@ -2263,12 +2306,119 @@ fn roast_token_returns_none_when_both_user_and_domain_empty() {
     assert_eq!(roast_exploit_token("$krb5tgs$23$...", "", "dom"), None);
 }
 
+#[tokio::test]
+async fn roast_token_realm_folds_a_flat_name_onto_the_fqdn() {
+    use super::{roast_exploit_token, roast_token_realm};
+    use crate::orchestrator::state::SharedState;
+
+    let state = SharedState::new("op-1".to_string());
+    state
+        .write()
+        .await
+        .domains
+        .push("child.contoso.local".to_string());
+
+    let from_fqdn = roast_token_realm(&state, "CHILD.CONTOSO.LOCAL").await;
+    let from_flat = roast_token_realm(&state, "CHILD").await;
+    assert_eq!(from_fqdn, "child.contoso.local");
+    assert_eq!(
+        from_flat, from_fqdn,
+        "a NetBIOS capture and an FQDN capture of the same realm must key one token"
+    );
+    assert_eq!(
+        roast_exploit_token("$krb5tgs$23$*", "svc_sql", &from_flat),
+        roast_exploit_token("$krb5tgs$23$*", "svc_sql", &from_fqdn)
+    );
+}
+
+#[tokio::test]
+async fn roast_token_realm_keeps_an_unknown_label_rather_than_guessing() {
+    use super::roast_token_realm;
+    use crate::orchestrator::state::SharedState;
+
+    let state = SharedState::new("op-1".to_string());
+    assert_eq!(roast_token_realm(&state, " FABRIKAM ").await, "fabrikam");
+    assert_eq!(roast_token_realm(&state, "  ").await, "");
+}
+
+#[test]
+fn roast_credit_record_is_keyed_by_the_token_it_witnesses() {
+    use super::{roast_credit_record, roast_exploit_token};
+    let token = roast_exploit_token("$krb5tgs$23$*", "svc_sql", "contoso.local").unwrap();
+    let record = roast_credit_record(&token, "svc_sql", "contoso.local", "kerberoast", "netexec");
+    assert_eq!(
+        record.vuln_id, token,
+        "the record only closes the orphan credit if its id is the credited id"
+    );
+}
+
+#[test]
+fn roast_credit_record_carries_the_capture_evidence() {
+    use super::roast_credit_record;
+    let record = roast_credit_record(
+        "kerberoast_contoso.local_svc_sql",
+        "svc_sql",
+        "contoso.local",
+        "kerberoast",
+        "impacket_getuserspns",
+    );
+    assert_eq!(record.vuln_type, "kerberoast");
+    assert_eq!(record.target, "svc_sql");
+    assert_eq!(record.details["account"], "svc_sql");
+    assert_eq!(record.details["domain"], "contoso.local");
+    assert_eq!(record.details["hash_type"], "kerberoast");
+    assert_eq!(record.details["captured_by"], "impacket_getuserspns");
+}
+
+#[test]
+fn asrep_credit_record_targets_the_domain_the_token_names() {
+    use super::{roast_credit_record, roast_exploit_token};
+    let token = roast_exploit_token("$krb5asrep$23$alice@", "alice", "contoso.local").unwrap();
+    let record = roast_credit_record(&token, "alice", "contoso.local", "asrep_roast", "netexec");
+    assert_eq!(token, "asrep_roast_contoso.local");
+    assert_eq!(record.vuln_type, "asrep_roast");
+    assert_eq!(record.target, "contoso.local");
+    assert_eq!(record.details["account"], "alice");
+}
+
+#[test]
+fn asrep_credit_record_targets_the_account_without_a_realm() {
+    use super::roast_credit_record;
+    let record = roast_credit_record("asrep_roast_alice", "alice", "", "asrep_roast", "netexec");
+    assert_eq!(record.target, "alice");
+}
+
+#[test]
+fn roast_credit_record_is_a_witness_not_a_work_item() {
+    use super::roast_credit_record;
+    let record = roast_credit_record(
+        "kerberoast_contoso.local_svc_sql",
+        "svc_sql",
+        "contoso.local",
+        "kerberoast",
+        "netexec",
+    );
+    assert!(
+        record.priority > 3,
+        "priority must stay above ops loot's EXPLOITABLE_PRIORITY_MAX so an \
+         already-proven primitive is not tabled as outstanding work, and above \
+         the head of the exploitation ZSET so nothing pops it before the \
+         caller marks it exploited"
+    );
+    assert!(
+        crate::orchestrator::exploitation::is_automation_owned_vuln(&record.vuln_type),
+        "{} would be dispatched by the generic exploitation workflow, \
+         re-attacking a primitive that already succeeded",
+        record.vuln_type
+    );
+}
+
 #[test]
 fn roast_token_lowercases_account_and_domain() {
     use super::roast_exploit_token;
     assert_eq!(
         roast_exploit_token("$krb5tgs$23$*", "SQL_SVC", "CONTOSO.LOCAL"),
-        Some("kerberoast_sql_svc".to_string())
+        Some("kerberoast_contoso.local_sql_svc".to_string())
     );
     assert_eq!(
         roast_exploit_token("$krb5asrep$23$", "Alice", "Contoso.Local"),
@@ -3455,6 +3605,7 @@ fn realtime_hash_publish_does_not_hand_roll_part_of_the_credit() {
         "create_hash_timeline_event(",
         "emit_gmsa_exploit_token_if_gmsa(",
         "roast_exploit_token(",
+        "roast_credit_record(",
     ] {
         assert!(
             !DISCOVERY_POLLING_SRC.contains(partial),
@@ -3476,6 +3627,7 @@ fn every_hash_credit_step_lives_in_the_shared_helper() {
         "create_hash_timeline_event(",
         "emit_gmsa_exploit_token_if_gmsa(",
         "roast_exploit_token(",
+        "roast_credit_record(",
     ] {
         let calls = RESULT_PROCESSING_SRC.matches(step).count();
         assert!(
@@ -3483,6 +3635,21 @@ fn every_hash_credit_step_lives_in_the_shared_helper() {
             "{step} vanished from the credit path entirely — hash credit is now incomplete"
         );
     }
+}
+
+#[test]
+fn roast_credit_publishes_its_record_before_it_claims_the_credit() {
+    let publish = RESULT_PROCESSING_SRC
+        .find("roast_credit_record(&token")
+        .expect("credit_published_hash no longer publishes a roast vulnerability record");
+    let mark = RESULT_PROCESSING_SRC
+        .find("mark_exploited(&dispatcher.queue, &token)")
+        .expect("credit_published_hash no longer marks the roast token exploited");
+    assert!(
+        publish < mark,
+        "the record must be published before mark_exploited so the credit is \
+         never an orphan, not even transiently"
+    );
 }
 
 // ── Credential publish credit parity ────────────────────────────────────────
