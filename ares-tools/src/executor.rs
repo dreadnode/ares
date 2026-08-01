@@ -405,10 +405,19 @@ impl CommandBuilder {
         if let Some(data) = &self.stdin_data {
             use tokio::io::AsyncWriteExt;
             if let Some(mut stdin) = child.stdin.take() {
-                if let Err(e) = stdin.write_all(data.as_bytes()).await {
-                    return ExecOutcome::failed(
-                        anyhow::Error::new(e).context("failed to write stdin"),
-                    );
+                match stdin.write_all(data.as_bytes()).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                        tracing::debug!(
+                            program = %self.program,
+                            "child closed stdin before the canned answers were written; keeping its output"
+                        );
+                    }
+                    Err(e) => {
+                        return ExecOutcome::failed(
+                            anyhow::Error::new(e).context("failed to write stdin"),
+                        );
+                    }
                 }
                 drop(stdin);
             }
@@ -832,6 +841,22 @@ mod tests {
             .expect("supplied stdin data must still be piped to the child");
 
         assert_eq!(out.stdout, "hello from stdin\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_child_that_never_reads_the_canned_answers_still_reports_its_output() {
+        let out = CommandBuilder::new("sh")
+            .arg("-c")
+            .arg("echo issued a certificate")
+            .stdin("y\n".repeat(512 * 1024))
+            .timeout(Duration::from_secs(10))
+            .execute()
+            .await
+            .expect("a child that ignores its stdin must not be reported as a failed run");
+
+        assert!(out.success, "{out:?}");
+        assert_eq!(out.stdout, "issued a certificate\n");
     }
 
     #[test]

