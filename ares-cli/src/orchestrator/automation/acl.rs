@@ -114,11 +114,15 @@ fn acl_step_key(chain: &serde_json::Value, chain_idx: usize, step_idx: usize) ->
 /// `(username, domain)` immediately before the tool runs. So a hash-only
 /// foothold dispatches exactly like a password one, where before it produced
 /// no dispatch at all.
+///
+/// A step whose source is a group falls back to
+/// [`acl_graph::resolve_group_source`], which answers with a member — a group
+/// name matches no credential and previously ended the chain.
 fn resolve_step_principal(
     state: &StateInner,
     source_user: &str,
     source_domain: &str,
-) -> Option<ares_core::models::Credential> {
+) -> Result<ares_core::models::Credential, acl_graph::UnresolvedSource> {
     let user_l = source_user.to_lowercase();
     let domain_l = source_domain.to_lowercase();
     let domain_matches = |d: &str| domain_l.is_empty() || d.to_lowercase() == domain_l;
@@ -128,28 +132,70 @@ fn resolve_step_principal(
         .iter()
         .find(|c| c.username.to_lowercase() == user_l && domain_matches(&c.domain))
     {
-        return Some(cred.clone());
+        return Ok(cred.clone());
     }
 
-    state
-        .hashes
-        .iter()
-        .find(|h| {
-            h.username.to_lowercase() == user_l
-                && domain_matches(&h.domain)
-                && acl_graph::is_usable_hash(h)
-        })
-        .map(|h| ares_core::models::Credential {
-            id: format!("acl-step-{}", h.id),
-            username: h.username.clone(),
-            password: String::new(),
-            domain: h.domain.clone(),
-            source: h.source.clone(),
-            discovered_at: None,
-            is_admin: false,
-            parent_id: None,
-            attack_step: h.attack_step,
-        })
+    if let Some(hash) = state.hashes.iter().find(|h| {
+        h.username.to_lowercase() == user_l
+            && domain_matches(&h.domain)
+            && acl_graph::is_usable_hash(h)
+    }) {
+        return Ok(credential_for_hash(hash));
+    }
+
+    match acl_graph::resolve_group_source(state, source_user, source_domain)? {
+        acl_graph::SourceMaterial::Credential(cred) => Ok(cred),
+        acl_graph::SourceMaterial::Hash(hash) => Ok(credential_for_hash(&hash)),
+    }
+}
+
+fn credential_for_hash(hash: &ares_core::models::Hash) -> ares_core::models::Credential {
+    ares_core::models::Credential {
+        id: format!("acl-step-{}", hash.id),
+        username: hash.username.clone(),
+        password: String::new(),
+        domain: hash.domain.clone(),
+        source: hash.source.clone(),
+        discovered_at: None,
+        is_admin: false,
+        parent_id: None,
+        attack_step: hash.attack_step,
+    }
+}
+
+/// Build the dispatch payload for one resolved chain step.
+///
+/// `source_user` is the principal the worker will authenticate as, not the
+/// trustee the ACE names: the task template renders it as "we authenticate as
+/// this", and a group-sourced edge whose trustee reached that line had the
+/// agent trying to log in as a group. The trustee is preserved as `via_group`
+/// so the record of *why* this principal was chosen survives.
+fn step_payload(
+    vuln_id: &str,
+    step: &serde_json::Value,
+    cred: &ares_core::models::Credential,
+) -> serde_json::Value {
+    let trustee = extract_source_user(step);
+    let via_group = (!cred.username.eq_ignore_ascii_case(trustee)).then(|| trustee.to_string());
+
+    let mut payload = json!({
+        "technique": "acl_chain_step",
+        "vuln_id": vuln_id,
+        "acl_type": step.get("acl_type").and_then(|v| v.as_str()).unwrap_or(""),
+        "source_user": cred.username,
+        "target_user": step.get("target").and_then(|v| v.as_str()).unwrap_or(""),
+        "target_ip": step.get("target_ip").and_then(|v| v.as_str()).unwrap_or(""),
+        "step": step,
+        "credential": {
+            "username": cred.username,
+            "password": cred.password,
+            "domain": cred.domain,
+        },
+    });
+    if let Some(group) = via_group {
+        payload["via_group"] = json!(group);
+    }
+    payload
 }
 
 /// One ACL chain step ready to dispatch.
@@ -170,6 +216,9 @@ pub(crate) struct AclChainTickCensus {
     pub already_exploited: usize,
     pub no_source_principal: usize,
     pub unresolvable_principal: usize,
+    pub group_no_owned_member: usize,
+    pub group_unmapped: usize,
+    pub non_principal_source: usize,
     pub domain_dominated: usize,
     pub target_material_held: usize,
     pub over_tick_cap: usize,
@@ -184,6 +233,16 @@ impl AclChainTickCensus {
         }
     }
 
+    /// Book an unresolved source against the reason it failed.
+    pub(crate) fn record_unresolved(&mut self, reason: acl_graph::UnresolvedSource) {
+        match reason {
+            acl_graph::UnresolvedSource::GroupNoOwnedMember => self.group_no_owned_member += 1,
+            acl_graph::UnresolvedSource::GroupUnmapped => self.group_unmapped += 1,
+            acl_graph::UnresolvedSource::NonPrincipal => self.non_principal_source += 1,
+            acl_graph::UnresolvedSource::NoMaterial => self.unresolvable_principal += 1,
+        }
+    }
+
     pub(crate) fn emit(&self) {
         info!(
             post_domination_stop = self.post_domination_stop,
@@ -194,6 +253,9 @@ impl AclChainTickCensus {
             already_exploited = self.already_exploited,
             no_source_principal = self.no_source_principal,
             unresolvable_principal = self.unresolvable_principal,
+            group_no_owned_member = self.group_no_owned_member,
+            group_unmapped = self.group_unmapped,
+            non_principal_source = self.non_principal_source,
             domain_dominated = self.domain_dominated,
             target_material_held = self.target_material_held,
             over_tick_cap = self.over_tick_cap,
@@ -262,9 +324,12 @@ pub(crate) fn collect_acl_chain_work_census(
                 continue;
             }
 
-            let Some(credential) = resolve_step_principal(state, source_user, source_domain) else {
-                census.unresolvable_principal += 1;
-                break;
+            let credential = match resolve_step_principal(state, source_user, source_domain) {
+                Ok(credential) => credential,
+                Err(reason) => {
+                    census.record_unresolved(reason);
+                    break;
+                }
             };
 
             let edge_domain = extract_edge_domain(step, &credential.domain).to_lowercase();
@@ -375,20 +440,7 @@ pub async fn auto_acl_chain_follow(
             credential: cred,
         } in work
         {
-            let payload = json!({
-                "technique": "acl_chain_step",
-                "vuln_id": vuln_id,
-                "acl_type": step.get("acl_type").and_then(|v| v.as_str()).unwrap_or(""),
-                "source_user": extract_source_user(&step),
-                "target_user": step.get("target").and_then(|v| v.as_str()).unwrap_or(""),
-                "target_ip": step.get("target_ip").and_then(|v| v.as_str()).unwrap_or(""),
-                "step": step,
-                "credential": {
-                    "username": cred.username,
-                    "password": cred.password,
-                    "domain": cred.domain,
-                },
-            });
+            let payload = step_payload(&vuln_id, &step, &cred);
 
             let priority = dispatcher.effective_priority("acl_abuse");
             // Mark dedup on Submitted OR Deferred — Deferred means the task is
@@ -777,6 +829,111 @@ mod tests {
         assert_eq!(census.eligible, 0);
         assert!(!census.no_chains);
         assert_ne!(census, AclChainTickCensus::default());
+    }
+
+    fn group_sourced_chain() -> serde_json::Value {
+        json!({
+            "chain_id": "cafebabe",
+            "steps": [{
+                "vuln_id": "acl_genericwrite_certpublishers_web01",
+                "acl_type": "genericwrite",
+                "source": "Cert Publishers",
+                "source_domain": "contoso.local",
+                "target": "web01",
+                "target_ip": "192.168.58.10",
+                "domain": "contoso.local",
+            }],
+        })
+    }
+
+    fn user_in(username: &str, groups: &[&str]) -> ares_core::models::User {
+        ares_core::models::User {
+            username: username.into(),
+            domain: "contoso.local".into(),
+            description: String::new(),
+            is_admin: false,
+            source: "ldap_enumeration".into(),
+            member_of: groups.iter().map(|g| (*g).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn collect_dispatches_a_group_sourced_step_as_a_member() {
+        let mut state = StateInner::new("op".into());
+        state.acl_chains = vec![group_sourced_chain()];
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local"));
+        state.users.push(user_in("alice", &["Cert Publishers"]));
+
+        let work = collect_acl_chain_work(&state);
+        assert_eq!(work.len(), 1, "a group source is no longer a dead end");
+        assert_eq!(work[0].credential.username, "alice");
+    }
+
+    #[test]
+    fn census_separates_a_group_with_no_owned_member_from_an_unmapped_one() {
+        let mut state = StateInner::new("op".into());
+        state.acl_chains = vec![group_sourced_chain()];
+        state
+            .credentials
+            .push(cred("carol", "P@ssw0rd!", "contoso.local"));
+        state.users.push(user_in("carol", &["Domain Users"]));
+
+        let mut unmapped = AclChainTickCensus::default();
+        assert!(collect_acl_chain_work_census(&state, &mut unmapped).is_empty());
+        assert_eq!(unmapped.group_unmapped, 1);
+        assert_eq!(unmapped.group_no_owned_member, 0);
+        assert_eq!(unmapped.unresolvable_principal, 0);
+
+        state.users.push(user_in("alice", &["Cert Publishers"]));
+        let mut no_member = AclChainTickCensus::default();
+        assert!(collect_acl_chain_work_census(&state, &mut no_member).is_empty());
+        assert_eq!(no_member.group_no_owned_member, 1);
+        assert_eq!(no_member.group_unmapped, 0);
+    }
+
+    #[test]
+    fn payload_authenticates_as_the_member_not_the_group() {
+        let step = group_sourced_chain()["steps"][0].clone();
+        let payload = step_payload(
+            "acl_genericwrite_certpublishers_web01",
+            &step,
+            &cred("alice", "P@ssw0rd!", "contoso.local"),
+        );
+
+        assert_eq!(payload["source_user"], "alice");
+        assert_eq!(payload["via_group"], "Cert Publishers");
+        assert_eq!(payload["step"]["source"], "Cert Publishers");
+    }
+
+    #[test]
+    fn payload_omits_via_group_for_a_directly_sourced_step() {
+        let step = two_step_chain()["steps"][0].clone();
+        let payload = step_payload(
+            "acl_genericall_alice_bob",
+            &step,
+            &cred("alice", "P@ssw0rd!", "contoso.local"),
+        );
+
+        assert_eq!(payload["source_user"], "alice");
+        assert!(payload.get("via_group").is_none());
+    }
+
+    #[test]
+    fn census_attributes_a_non_principal_source() {
+        let mut state = StateInner::new("op".into());
+        let mut chain = group_sourced_chain();
+        chain["steps"][0]["source"] = json!("S-1-3-0");
+        state.acl_chains = vec![chain];
+        state
+            .credentials
+            .push(cred("alice", "P@ssw0rd!", "contoso.local"));
+
+        let mut census = AclChainTickCensus::default();
+        assert!(collect_acl_chain_work_census(&state, &mut census).is_empty());
+        assert_eq!(census.non_principal_source, 1);
+        assert_eq!(census.unresolvable_principal, 0);
     }
 
     #[test]

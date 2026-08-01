@@ -119,6 +119,10 @@ pub(crate) struct DaclTickCensus {
     pub ghost_target: usize,
     pub no_source_principal: usize,
     pub unresolvable_principal: usize,
+    pub privileged_group_no_member: usize,
+    pub group_no_owned_member: usize,
+    pub group_unmapped: usize,
+    pub non_principal_source: usize,
     pub domain_dominated: usize,
     pub capture_in_flight: usize,
     pub target_material_held: usize,
@@ -135,6 +139,28 @@ impl DaclTickCensus {
         }
     }
 
+    /// Book an unresolved edge source against the reason it failed.
+    ///
+    /// One `unresolvable_principal` count cannot be acted on: a group ares
+    /// never enumerated, a privileged group it owns no member of, and an ACE
+    /// trustee that is not a principal at all want three different responses,
+    /// and the first census to report this loss put 197 of 200 edges in the
+    /// single bucket.
+    pub(crate) fn record_unresolved(&mut self, reason: acl_graph::UnresolvedSource, source: &str) {
+        match reason {
+            acl_graph::UnresolvedSource::GroupNoOwnedMember => self.group_no_owned_member += 1,
+            acl_graph::UnresolvedSource::GroupUnmapped => self.group_unmapped += 1,
+            acl_graph::UnresolvedSource::NonPrincipal => self.non_principal_source += 1,
+            acl_graph::UnresolvedSource::NoMaterial => {
+                if names_well_known_privileged_group(source) {
+                    self.privileged_group_no_member += 1;
+                } else {
+                    self.unresolvable_principal += 1;
+                }
+            }
+        }
+    }
+
     pub(crate) fn emit(&self) {
         info!(
             technique_gated = self.technique_gated,
@@ -145,6 +171,10 @@ impl DaclTickCensus {
             ghost_target = self.ghost_target,
             no_source_principal = self.no_source_principal,
             unresolvable_principal = self.unresolvable_principal,
+            privileged_group_no_member = self.privileged_group_no_member,
+            group_no_owned_member = self.group_no_owned_member,
+            group_unmapped = self.group_unmapped,
+            non_principal_source = self.non_principal_source,
             domain_dominated = self.domain_dominated,
             capture_in_flight = self.capture_in_flight,
             target_material_held = self.target_material_held,
@@ -274,6 +304,9 @@ pub(crate) fn build_dacl_payload(item: &DaclWork) -> serde_json::Value {
     if !item.target_type.is_empty() {
         payload["target_type"] = json!(item.target_type);
     }
+    if let Some(ref group) = item.via_group {
+        payload["via_group"] = json!(group);
+    }
     if let Some(ref cred) = item.credential {
         payload["username"] = json!(cred.username);
         payload["password"] = json!(cred.password);
@@ -398,6 +431,25 @@ pub(crate) fn collect_dacl_work_census(
             None
         };
 
+        let (cred, hash) = if cred.is_none() && hash.is_none() {
+            match acl_graph::resolve_group_source(state, source_user, source_domain) {
+                Ok(acl_graph::SourceMaterial::Credential(c)) => (Some(c), None),
+                Ok(acl_graph::SourceMaterial::Hash(h)) => (None, Some(h)),
+                Err(reason) => {
+                    census.record_unresolved(reason, source_user);
+                    debug!(
+                        vuln_id = %vuln.vuln_id,
+                        source = %source_user,
+                        reason = ?reason,
+                        "DACL abuse skipped: no owned principal for the edge source"
+                    );
+                    continue;
+                }
+            }
+        } else {
+            (cred, hash)
+        };
+
         let Some((auth_username, auth_domain)) = cred
             .as_ref()
             .map(|c| (c.username.clone(), c.domain.clone()))
@@ -460,7 +512,8 @@ pub(crate) fn collect_dacl_work_census(
         // SAM account name as `source_user` — not the SID. Tool schemas
         // require a username for credential injection by `(user, domain)`,
         // and the LLM otherwise echoes the SID as the auth principal.
-        let dispatched_source_user = if source_user.starts_with("S-1-5-21-") {
+        let resolved_from_trustee = !auth_username.eq_ignore_ascii_case(source_user);
+        let dispatched_source_user = if resolved_from_trustee {
             auth_username
         } else {
             source_user.to_string()
@@ -496,6 +549,7 @@ pub(crate) fn collect_dacl_work_census(
             vuln_id: vuln.vuln_id.clone(),
             vuln_type: vtype,
             source_user: dispatched_source_user,
+            via_group: resolved_from_trustee.then(|| source_user.to_string()),
             target_user,
             target_type,
             target_dn,
@@ -524,6 +578,8 @@ pub(crate) struct DaclWork {
     pub vuln_id: String,
     pub vuln_type: String,
     pub source_user: String,
+    /// The ACE trustee, when `source_user` is a member ares resolved it to.
+    pub via_group: Option<String>,
     pub target_user: String,
     pub target_type: String,
     pub target_dn: String,
@@ -537,6 +593,22 @@ pub(crate) struct DaclWork {
 /// ACL source may be resolved through. Resolving such a source to a credential
 /// is only correct when that credential belongs to *a* member of the group —
 /// the RID names which group membership has to be established against.
+/// True when `source` is a domain SID whose RID names one of those groups.
+///
+/// Separates "we own no member of Enterprise Admins" from "we hold no material
+/// for this principal" in the tick census — the first is a forest-root
+/// membership problem, the second is a looting one.
+fn names_well_known_privileged_group(source: &str) -> bool {
+    if !source.starts_with("S-1-5-21-") {
+        return false;
+    }
+    source
+        .rsplit_once('-')
+        .and_then(|(_, rid)| rid.parse::<u32>().ok())
+        .and_then(well_known_privileged_group)
+        .is_some()
+}
+
 fn well_known_privileged_group(rid: u32) -> Option<&'static str> {
     match rid {
         512 => Some("Domain Admins"),
@@ -1163,6 +1235,185 @@ mod tests {
         assert_eq!(census.acl_vulns, 1);
         assert_eq!(census.unresolvable_principal, 1);
         assert_eq!(census.domain_dominated, 0);
+    }
+
+    fn ldap_user(username: &str, domain: &str, groups: &[&str]) -> ares_core::models::User {
+        ares_core::models::User {
+            username: username.into(),
+            domain: domain.into(),
+            description: String::new(),
+            is_admin: false,
+            source: "ldap_enumeration".into(),
+            member_of: groups.iter().map(|g| (*g).to_string()).collect(),
+        }
+    }
+
+    async fn group_sourced_state(source: &str) -> SharedState {
+        let shared = SharedState::new("test".into());
+        {
+            let mut state = shared.write().await;
+            let details = acl_details(source, "web01", "contoso.local");
+            let vuln = make_vuln("vuln-gw-group-001", "GenericWrite", details);
+            state
+                .discovered_vulnerabilities
+                .insert(vuln.vuln_id.clone(), vuln);
+        }
+        shared
+    }
+
+    #[tokio::test]
+    async fn group_sourced_edge_dispatches_as_an_owned_member() {
+        let shared = group_sourced_state("Cert Publishers").await;
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("alice", "contoso.local"));
+            state
+                .users
+                .push(ldap_user("alice", "contoso.local", &["Cert Publishers"]));
+        }
+
+        let state = shared.read().await;
+        let mut census = DaclTickCensus::default();
+        let work = collect_dacl_work_census(&state, &mut census);
+
+        assert_eq!(work.len(), 1, "a group trustee is no longer discarded");
+        assert_eq!(work[0].source_user, "alice");
+        assert_eq!(work[0].via_group.as_deref(), Some("Cert Publishers"));
+        assert_eq!(census.group_no_owned_member, 0);
+        assert_eq!(census.unresolvable_principal, 0);
+
+        let payload = build_dacl_payload(&work[0]);
+        assert_eq!(payload["source_user"], "alice");
+        assert_eq!(payload["via_group"], "Cert Publishers");
+    }
+
+    #[tokio::test]
+    async fn group_sourced_edge_is_refused_when_no_member_is_owned() {
+        let shared = group_sourced_state("Cert Publishers").await;
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("carol", "contoso.local"));
+            state
+                .users
+                .push(ldap_user("alice", "contoso.local", &["Cert Publishers"]));
+            state
+                .users
+                .push(ldap_user("carol", "contoso.local", &["Domain Users"]));
+        }
+
+        let state = shared.read().await;
+        let mut census = DaclTickCensus::default();
+        let work = collect_dacl_work_census(&state, &mut census);
+
+        assert!(
+            work.is_empty(),
+            "a non-member must not be handed the group's right"
+        );
+        assert_eq!(census.group_no_owned_member, 1);
+        assert_eq!(census.unresolvable_principal, 0);
+        assert_eq!(census.group_unmapped, 0);
+    }
+
+    #[tokio::test]
+    async fn census_separates_an_unmapped_group_from_an_unowned_one() {
+        let shared = group_sourced_state("Terminal Server License Servers").await;
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("carol", "contoso.local"));
+            state
+                .users
+                .push(ldap_user("carol", "contoso.local", &["Domain Users"]));
+        }
+
+        let state = shared.read().await;
+        let mut census = DaclTickCensus::default();
+        assert!(collect_dacl_work_census(&state, &mut census).is_empty());
+        assert_eq!(census.group_unmapped, 1);
+        assert_eq!(census.group_no_owned_member, 0);
+        assert_eq!(census.unresolvable_principal, 0);
+    }
+
+    #[tokio::test]
+    async fn census_separates_a_privileged_rid_with_no_owned_member() {
+        let shared = group_sourced_state(&format!("{CONTOSO_SID}-519")).await;
+        {
+            let mut state = shared.write().await;
+            state
+                .domain_sids
+                .insert("contoso.local".into(), CONTOSO_SID.into());
+            state
+                .credentials
+                .push(make_credential("carol", "contoso.local"));
+            state
+                .users
+                .push(ldap_user("carol", "contoso.local", &["Domain Users"]));
+        }
+
+        let state = shared.read().await;
+        let mut census = DaclTickCensus::default();
+        assert!(collect_dacl_work_census(&state, &mut census).is_empty());
+        assert_eq!(census.privileged_group_no_member, 1);
+        assert_eq!(census.unresolvable_principal, 0);
+        assert_eq!(census.group_unmapped, 0);
+    }
+
+    #[tokio::test]
+    async fn census_counts_a_non_principal_trustee() {
+        let shared = group_sourced_state("S-1-3-0").await;
+        {
+            let mut state = shared.write().await;
+            state
+                .credentials
+                .push(make_credential("carol", "contoso.local"));
+        }
+
+        let state = shared.read().await;
+        let mut census = DaclTickCensus::default();
+        assert!(collect_dacl_work_census(&state, &mut census).is_empty());
+        assert_eq!(census.non_principal_source, 1);
+        assert_eq!(census.unresolvable_principal, 0);
+    }
+
+    #[tokio::test]
+    async fn group_sourced_edge_dispatches_a_hash_only_member() {
+        let shared = group_sourced_state("Cert Publishers").await;
+        {
+            let mut state = shared.write().await;
+            state
+                .users
+                .push(ldap_user("bob", "contoso.local", &["Cert Publishers"]));
+            state.hashes.push(ares_core::models::Hash {
+                id: "h-bob".into(),
+                username: "bob".into(),
+                hash_value: "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"
+                    .into(),
+                hash_type: "ntlm".into(),
+                domain: "contoso.local".into(),
+                cracked_password: None,
+                source: "secretsdump".into(),
+                discovered_at: None,
+                parent_id: None,
+                attack_step: 0,
+                aes_key: None,
+                is_previous: false,
+                source_host: None,
+                is_trust_key: false,
+                trust_pair_label: None,
+            });
+        }
+
+        let state = shared.read().await;
+        let work = collect_dacl_work(&state);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].source_user, "bob");
+        assert!(work[0].credential.is_none());
+        assert!(work[0].hash.is_some());
     }
 
     #[tokio::test]
@@ -2200,6 +2451,7 @@ mod tests {
             vuln_id: "v1".into(),
             vuln_type: "genericall".into(),
             source_user: "alice".into(),
+            via_group: None,
             target_user: "victim".into(),
             target_type: String::new(),
             target_dn: String::new(),

@@ -124,30 +124,207 @@ fn detail_str(vuln: &ares_core::models::VulnerabilityInfo, keys: &[&str]) -> Str
 /// Matches the `memberOf` value either whole or on its leading `CN=` RDN, since
 /// LDAP returns full distinguished names while ACL edges carry bare names.
 pub(crate) fn members_from_ldap(state: &StateInner, group_name: &str) -> Vec<String> {
-    let wanted = group_name.trim().to_lowercase();
+    members_in_domain(state, group_name, "")
+}
+
+/// [`members_from_ldap`], restricted to principals of `domain` when non-empty.
+///
+/// A group name is not unique across a forest, so an unscoped member list can
+/// name `fabrikam.local\bob` for a `contoso.local` edge. Every caller that has
+/// the edge's domain should pass it. A principal whose own domain was never
+/// recorded still matches — several enumerators omit it, and dropping those
+/// would discard the membership this exists to find.
+fn members_in_domain(state: &StateInner, group_name: &str, domain: &str) -> Vec<String> {
+    let wanted = normalize_group_name(group_name);
     if wanted.is_empty() {
         return Vec::new();
     }
+    let domain = domain.trim().to_lowercase();
 
     let mut members: Vec<String> = state
         .users
         .iter()
-        .filter(|u| {
-            u.member_of.iter().any(|g| {
-                let g = g.trim().to_lowercase();
-                g == wanted
-                    || g.split(',')
-                        .next()
-                        .and_then(|rdn| rdn.strip_prefix("cn="))
-                        .is_some_and(|cn| cn == wanted)
-            })
-        })
+        .filter(|u| domain.is_empty() || u.domain.is_empty() || u.domain.to_lowercase() == domain)
+        .filter(|u| u.member_of.iter().any(|g| group_entry_matches(g, &wanted)))
         .map(|u| u.username.to_lowercase())
         .collect();
 
     members.sort();
     members.dedup();
     members
+}
+
+fn normalize_group_name(group_name: &str) -> String {
+    let trimmed = group_name.trim();
+    let bare = trimmed.rsplit('\\').next().unwrap_or(trimmed);
+    bare.trim().to_lowercase()
+}
+
+fn group_entry_matches(entry: &str, wanted: &str) -> bool {
+    let entry = entry.trim().to_lowercase();
+    entry == wanted
+        || entry
+            .split(',')
+            .next()
+            .and_then(|rdn| rdn.strip_prefix("cn="))
+            .is_some_and(|cn| cn == wanted)
+}
+
+/// BUILTIN alias SIDs (`S-1-5-32-*`) that name a group whose membership LDAP
+/// `memberOf` reports, keyed by RID.
+const BUILTIN_ALIASES: &[(&str, &str)] = &[
+    ("544", "Administrators"),
+    ("548", "Account Operators"),
+    ("549", "Server Operators"),
+    ("550", "Print Operators"),
+    ("551", "Backup Operators"),
+    ("554", "Pre-Windows 2000 Compatible Access"),
+    ("555", "Remote Desktop Users"),
+    ("556", "Network Configuration Operators"),
+    ("557", "Incoming Forest Trust Builders"),
+    ("560", "Windows Authorization Access Group"),
+    ("561", "Terminal Server License Servers"),
+    ("562", "Distributed COM Users"),
+    ("573", "Event Log Readers"),
+    ("574", "Certificate Service DCOM Access"),
+    ("578", "Hyper-V Administrators"),
+    ("580", "Remote Management Users"),
+];
+
+/// Auth material an ACL edge's source principal resolved to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SourceMaterial {
+    Credential(ares_core::models::Credential),
+    Hash(ares_core::models::Hash),
+}
+
+/// Why an ACL edge's source yielded no principal ares holds material for.
+///
+/// The distinction is the point: an operator reading a tick census cannot act
+/// on a single "unresolvable" count, because "we never enumerated that group"
+/// and "we enumerated it and own none of its members" want opposite responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnresolvedSource {
+    /// The source names a group whose membership is enumerated and none of
+    /// whose members ares holds material for.
+    GroupNoOwnedMember,
+    /// The source names a group no enumerated `memberOf` value maps to.
+    GroupUnmapped,
+    /// The source names no authenticatable principal — `CREATOR OWNER`,
+    /// `Everyone`, `SELF` and friends.
+    NonPrincipal,
+    /// The source names an ordinary principal ares holds no material for.
+    NoMaterial,
+}
+
+/// Resolve a group-typed ACL edge source to a member ares can authenticate as.
+///
+/// The source of an ACE is a trustee, not necessarily an account: the LDAP ACL
+/// enumerator emits whatever the object's SID resolves to, which is a group
+/// display name (`Cert Publishers`) as often as a user. A group has no
+/// credential, so a driver that only matches `source` against `state.users`'
+/// names discards the edge entirely.
+///
+/// Returns material for a member and nothing else. Membership evidence is LDAP
+/// `memberOf` on a principal whose material state already holds, so a resolved
+/// principal is one ares controls *and* one the group actually contains —
+/// resolving to a non-member would put back the defect §1.2b removed.
+pub(crate) fn resolve_group_source(
+    state: &StateInner,
+    source: &str,
+    source_domain: &str,
+) -> Result<SourceMaterial, UnresolvedSource> {
+    let Some((group, from_alias_sid)) = group_name_for_source(source) else {
+        return Err(unresolved_kind_for_non_group(source));
+    };
+
+    let members = members_in_domain(state, &group, source_domain);
+    if members.is_empty() {
+        if !members_from_ldap(state, &group).is_empty() {
+            return Err(UnresolvedSource::GroupNoOwnedMember);
+        }
+        if from_alias_sid {
+            return Err(UnresolvedSource::GroupUnmapped);
+        }
+        if state.users.is_empty() || names_known_user(state, &group, source_domain) {
+            return Err(UnresolvedSource::NoMaterial);
+        }
+        return Err(UnresolvedSource::GroupUnmapped);
+    }
+
+    member_material(state, &members, source_domain).ok_or(UnresolvedSource::GroupNoOwnedMember)
+}
+
+/// The group name an edge source may be resolved through, and whether a
+/// BUILTIN alias SID named it.
+///
+/// `S-1-5-21-*` is deliberately excluded: a domain SID is a specific object,
+/// and mapping its RID to a group is `auto_dacl_abuse`'s well-known-RID table.
+/// An alias SID is known to name a group; a bare string is only a candidate,
+/// which is what the caller needs the flag for.
+fn group_name_for_source(source: &str) -> Option<(String, bool)> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_lowercase();
+    if let Some(rid) = lower.strip_prefix("s-1-5-32-") {
+        return BUILTIN_ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == rid)
+            .map(|(_, name)| ((*name).to_string(), true));
+    }
+    if lower.starts_with("s-1-") {
+        return None;
+    }
+    Some((normalize_group_name(trimmed), false))
+}
+
+fn unresolved_kind_for_non_group(source: &str) -> UnresolvedSource {
+    let lower = source.trim().to_lowercase();
+    if lower.starts_with("s-1-5-32-") {
+        UnresolvedSource::GroupUnmapped
+    } else if lower.starts_with("s-1-5-21-") {
+        UnresolvedSource::NoMaterial
+    } else if lower.starts_with("s-1-") {
+        UnresolvedSource::NonPrincipal
+    } else {
+        UnresolvedSource::NoMaterial
+    }
+}
+
+fn names_known_user(state: &StateInner, name: &str, domain: &str) -> bool {
+    let domain = domain.trim().to_lowercase();
+    state.users.iter().any(|u| {
+        u.username.eq_ignore_ascii_case(name)
+            && (domain.is_empty() || u.domain.to_lowercase() == domain)
+    })
+}
+
+fn member_material(state: &StateInner, members: &[String], domain: &str) -> Option<SourceMaterial> {
+    let domain = domain.trim().to_lowercase();
+    let domain_matches = |d: &str| domain.is_empty() || d.to_lowercase() == domain;
+
+    if let Some(cred) = members.iter().find_map(|member| {
+        state.credentials.iter().find(|c| {
+            !c.password.is_empty()
+                && c.username.to_lowercase() == *member
+                && domain_matches(&c.domain)
+        })
+    }) {
+        return Some(SourceMaterial::Credential(cred.clone()));
+    }
+
+    members
+        .iter()
+        .find_map(|member| {
+            state.hashes.iter().find(|h| {
+                h.username.to_lowercase() == *member
+                    && domain_matches(&h.domain)
+                    && is_usable_hash(h)
+            })
+        })
+        .map(|h| SourceMaterial::Hash(h.clone()))
 }
 
 pub(crate) fn build_edges(state: &StateInner) -> Vec<AclEdge> {
@@ -176,7 +353,7 @@ pub(crate) fn build_edges(state: &StateInner) -> Vec<AclEdge> {
                 })
                 .unwrap_or_default();
             let source_members = if source_members.is_empty() {
-                members_from_ldap(state, &source)
+                members_in_domain(state, &source, &source_domain)
             } else {
                 source_members
             };
@@ -1191,5 +1368,177 @@ mod tests {
         for t in ["smb_signing_disabled", "esc1", "kerberoast", "zerologon"] {
             assert!(!is_acl_vuln_type(t), "{t} should not be an ACL right");
         }
+    }
+
+    fn user_in_domain(username: &str, domain: &str, groups: &[&str]) -> ares_core::models::User {
+        let mut user = user_in(username, groups);
+        user.domain = domain.into();
+        user
+    }
+
+    fn resolved_username(material: SourceMaterial) -> String {
+        match material {
+            SourceMaterial::Credential(c) => c.username,
+            SourceMaterial::Hash(h) => h.username,
+        }
+    }
+
+    #[test]
+    fn group_name_source_resolves_to_an_owned_member() {
+        let mut s = state_with(vec![], vec![cred("alice", "contoso.local", false)]);
+        s.users.push(user_in("alice", &["Cert Publishers"]));
+
+        let resolved = resolve_group_source(&s, "Cert Publishers", "contoso.local")
+            .expect("a member with a credential resolves the group");
+        assert_eq!(resolved_username(resolved), "alice");
+    }
+
+    #[test]
+    fn group_name_source_resolves_through_a_usable_hash() {
+        let mut s = state_with(vec![], vec![]);
+        s.users.push(user_in("bob", &["Cert Publishers"]));
+        s.hashes.push(hash_for("bob", "contoso.local", "ntlm"));
+
+        let resolved = resolve_group_source(&s, "Cert Publishers", "contoso.local")
+            .expect("a hash-only member is still owned");
+        assert_eq!(resolved_username(resolved), "bob");
+    }
+
+    #[test]
+    fn group_source_never_resolves_to_a_non_member() {
+        let mut s = state_with(vec![], vec![cred("carol", "contoso.local", false)]);
+        s.users.push(user_in("alice", &["Cert Publishers"]));
+        s.users.push(user_in("carol", &["Domain Users"]));
+
+        assert_eq!(
+            resolve_group_source(&s, "Cert Publishers", "contoso.local"),
+            Err(UnresolvedSource::GroupNoOwnedMember),
+            "holding a credential for a non-member must not dispatch the edge"
+        );
+    }
+
+    #[test]
+    fn group_membership_does_not_cross_domains() {
+        let mut s = state_with(vec![], vec![cred("bob", "fabrikam.local", false)]);
+        s.users.push(user_in_domain(
+            "bob",
+            "fabrikam.local",
+            &["Cert Publishers"],
+        ));
+
+        assert_eq!(
+            resolve_group_source(&s, "Cert Publishers", "contoso.local"),
+            Err(UnresolvedSource::GroupNoOwnedMember),
+            "a fabrikam.local member cannot exercise a contoso.local edge"
+        );
+    }
+
+    #[test]
+    fn roast_material_does_not_make_a_member_owned() {
+        let mut s = state_with(vec![], vec![]);
+        s.users.push(user_in("bob", &["Cert Publishers"]));
+        s.hashes
+            .push(hash_for("bob", "contoso.local", "kerberoast"));
+
+        assert_eq!(
+            resolve_group_source(&s, "Cert Publishers", "contoso.local"),
+            Err(UnresolvedSource::GroupNoOwnedMember),
+            "roast ciphertext is crack material, not a login"
+        );
+    }
+
+    #[test]
+    fn group_with_no_enumerated_membership_is_counted_apart() {
+        let mut s = state_with(vec![], vec![cred("alice", "contoso.local", false)]);
+        s.users.push(user_in("alice", &["Domain Users"]));
+
+        assert_eq!(
+            resolve_group_source(&s, "Terminal Server License Servers", "contoso.local"),
+            Err(UnresolvedSource::GroupUnmapped),
+            "no memberOf evidence is a different operator action to owning no member"
+        );
+    }
+
+    #[test]
+    fn distinguished_name_membership_matches_the_group_name() {
+        let mut s = state_with(vec![], vec![cred("alice", "contoso.local", false)]);
+        s.users.push(user_in(
+            "alice",
+            &["CN=Cert Publishers,CN=Users,DC=contoso,DC=local"],
+        ));
+
+        assert!(resolve_group_source(&s, "Cert Publishers", "contoso.local").is_ok());
+    }
+
+    #[test]
+    fn creator_owner_is_refused_as_a_non_principal() {
+        let mut s = state_with(vec![], vec![cred("alice", "contoso.local", false)]);
+        s.users.push(user_in("alice", &["Domain Users"]));
+
+        for sid in ["S-1-3-0", "S-1-1-0", "S-1-5-11", "S-1-5-10"] {
+            assert_eq!(
+                resolve_group_source(&s, sid, "contoso.local"),
+                Err(UnresolvedSource::NonPrincipal),
+                "{sid} names no principal ares can authenticate as"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_alias_sid_resolves_through_the_group_it_names() {
+        let mut s = state_with(vec![], vec![cred("svc_backup", "contoso.local", false)]);
+        s.users.push(user_in(
+            "svc_backup",
+            &["CN=Backup Operators,CN=Builtin,DC=contoso,DC=local"],
+        ));
+
+        let resolved = resolve_group_source(&s, "S-1-5-32-551", "contoso.local")
+            .expect("a BUILTIN alias names a group whose membership LDAP reports");
+        assert_eq!(resolved_username(resolved), "svc_backup");
+    }
+
+    #[test]
+    fn unmapped_builtin_alias_is_reported_as_a_group() {
+        let s = state_with(vec![], vec![]);
+
+        assert_eq!(
+            resolve_group_source(&s, "S-1-5-32-9999", "contoso.local"),
+            Err(UnresolvedSource::GroupUnmapped)
+        );
+    }
+
+    #[test]
+    fn domain_sid_source_is_left_to_the_well_known_rid_table() {
+        let mut s = state_with(vec![], vec![cred("alice", "contoso.local", false)]);
+        s.users.push(user_in("alice", &["Enterprise Admins"]));
+
+        assert_eq!(
+            resolve_group_source(
+                &s,
+                "S-1-5-21-1111111111-2222222222-3333333333-519",
+                "contoso.local"
+            ),
+            Err(UnresolvedSource::NoMaterial),
+            "a domain SID is auto_dacl_abuse's RID table, not a group name"
+        );
+    }
+
+    #[test]
+    fn a_known_user_without_material_is_not_reported_as_a_group() {
+        let mut s = state_with(vec![], vec![]);
+        s.users.push(user_in("dave", &["Domain Users"]));
+
+        assert_eq!(
+            resolve_group_source(&s, "dave", "contoso.local"),
+            Err(UnresolvedSource::NoMaterial)
+        );
+    }
+
+    #[test]
+    fn domain_qualified_group_names_are_matched_bare() {
+        let mut s = state_with(vec![], vec![cred("alice", "contoso.local", false)]);
+        s.users.push(user_in("alice", &["Cert Publishers"]));
+
+        assert!(resolve_group_source(&s, "CONTOSO\\Cert Publishers", "contoso.local").is_ok());
     }
 }
