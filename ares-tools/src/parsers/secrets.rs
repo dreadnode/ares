@@ -87,6 +87,44 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
         }
     }
 
+    let mut prefix_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    let mut scan_section = DumpSection::Unknown;
+    for raw_line in output.lines() {
+        let line = strip_nxc_framing(raw_line).trim();
+        if line.starts_with('[') {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("dumping local sam") || lower.contains("dumping sam") {
+                scan_section = DumpSection::LocalSam;
+            } else if lower.contains("dumping domain credentials")
+                || lower.contains("dumping cached domain")
+                || lower.contains("ntds")
+                || lower.contains("searching for peklist")
+                || lower.contains("reading and decrypting hashes from")
+            {
+                scan_section = DumpSection::Domain;
+            }
+            continue;
+        }
+        if scan_section == DumpSection::LocalSam || line.starts_with('#') || !line.contains(":::") {
+            continue;
+        }
+        let raw_user = line.split(':').next().unwrap_or("");
+        let Some(idx) = raw_user.find(['\\', '/']) else {
+            continue;
+        };
+        let prefix = &raw_user[..idx];
+        if prefix.is_empty() {
+            continue;
+        }
+        *prefix_counts
+            .entry(resolve_netbios_to_fqdn(prefix, domain))
+            .or_insert(0) += 1;
+    }
+    let mut ranked: Vec<(String, u32)> = prefix_counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let unprefixed_domain = ranked.first().map_or(domain, |(d, _)| d.as_str());
+
     for raw_line in output.lines() {
         let line = strip_nxc_framing(raw_line).trim();
 
@@ -157,7 +195,7 @@ pub fn parse_secretsdump(output: &str, params: &Value) -> (Vec<Value>, Vec<Value
                     // leave domain empty so it doesn't masquerade as AD.
                     (String::new(), raw_user.to_string())
                 } else {
-                    (domain.to_string(), raw_user.to_string())
+                    (unprefixed_domain.to_string(), raw_user.to_string())
                 };
 
                 if nt_hash.len() == 32 && nt_hash != "31d6cfe0d16ae931b73c59d7e0c089c0" {
@@ -840,6 +878,41 @@ krbtgt:502:aad3b435b51404eeaad3b435b51404ee:8c6d94541dbc90f085e86828428d2cbf:::"
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0]["username"], "krbtgt");
         assert_eq!(hashes[0]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn parse_secretsdump_unprefixed_rows_follow_dump_evidence_over_task_domain() {
+        let output = "\
+[*] Dumping the NTDS, this could take a while
+[*] Reading and decrypting hashes from /tmp/ntds.dit
+CHILD\\alice:1103:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::
+CHILD\\bob:1104:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef1234567890abcdef:::
+krbtgt:502:aad3b435b51404eeaad3b435b51404ee:8c6d94541dbc90f085e86828428d2cbf:::";
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        assert_eq!(hashes.len(), 3);
+        let krbtgt = hashes
+            .iter()
+            .find(|h| h["username"] == "krbtgt")
+            .expect("krbtgt row present");
+        assert_eq!(krbtgt["domain"], "CHILD");
+        assert_ne!(krbtgt["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn parse_secretsdump_local_sam_prefix_does_not_retarget_ntds_rows() {
+        let output = "\
+[*] Dumping local SAM hashes
+WS01\\admin:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
+[*] Dumping the NTDS, this could take a while
+krbtgt:502:aad3b435b51404eeaad3b435b51404ee:8c6d94541dbc90f085e86828428d2cbf:::";
+        let params = json!({"target_domain": "contoso.local"});
+        let (hashes, _) = parse_secretsdump(output, &params);
+        let krbtgt = hashes
+            .iter()
+            .find(|h| h["username"] == "krbtgt")
+            .expect("krbtgt row present");
+        assert_eq!(krbtgt["domain"], "contoso.local");
     }
 
     #[test]

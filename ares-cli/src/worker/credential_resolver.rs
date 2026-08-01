@@ -363,6 +363,18 @@ pub async fn resolve_credentials(
     // Domain SIDs — direct lookup against the domain_sids HASH.
     resolve_domain_sids(args_obj, &domain_sids);
 
+    if dump_attribution_applies(tool_name, args_obj) {
+        let dc_map = reader.get_dc_map(conn).await.unwrap_or_default();
+        if let Some(dumped) = realm_from_target_args(args_obj, &dc_map) {
+            debug!(
+                tool = %tool_name,
+                target_domain = %dumped,
+                "credential_resolver: stamped target_domain from DC map for dump attribution"
+            );
+            args_obj.insert("target_domain".to_string(), Value::String(dumped));
+        }
+    }
+
     Ok(redirected_tool)
 }
 
@@ -708,6 +720,21 @@ async fn infer_domain_from_target(
     conn: &mut ConnectionManager,
     reader: &RedisStateReader,
 ) -> Option<String> {
+    let dc_map = reader.get_dc_map(conn).await.unwrap_or_default();
+    realm_from_target_args(args, &dc_map)
+}
+
+fn dump_attribution_applies(tool_name: &str, args: &Map<String, Value>) -> bool {
+    matches!(
+        tool_name,
+        "secretsdump" | "secretsdump_kerberos" | "mssql_far_host_secretsdump"
+    ) && string_field(args, "target_domain").is_none()
+}
+
+fn realm_from_target_args(
+    args: &Map<String, Value>,
+    dc_map: &std::collections::HashMap<String, String>,
+) -> Option<String> {
     const TARGET_KEYS: &[&str] = &[
         "target",
         "target_ip",
@@ -717,8 +744,6 @@ async fn infer_domain_from_target(
         "hostname",
         "host",
     ];
-
-    let dc_map = reader.get_dc_map(conn).await.unwrap_or_default();
 
     for key in TARGET_KEYS {
         let Some(value) = string_field(args, key) else {
@@ -735,7 +760,7 @@ async fn infer_domain_from_target(
             continue;
         }
         // IP literal: look up against the DC map.
-        for (domain, ip) in &dc_map {
+        for (domain, ip) in dc_map {
             if ip.trim() == value {
                 let d = domain.trim().to_lowercase();
                 if !d.is_empty() {
@@ -2719,6 +2744,60 @@ mod tests {
         assert!(is_authenticating_hash_type("aes128"));
         assert!(is_authenticating_hash_type("lm"));
         assert!(is_authenticating_hash_type(""));
+    }
+
+    fn dump_args(pairs: &[(&str, &str)]) -> Map<String, Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
+            .collect()
+    }
+
+    fn child_parent_dc_map() -> std::collections::HashMap<String, String> {
+        let mut m = std::collections::HashMap::new();
+        m.insert("contoso.local".to_string(), "192.168.58.10".to_string());
+        m.insert(
+            "child.contoso.local".to_string(),
+            "192.168.58.20".to_string(),
+        );
+        m
+    }
+
+    #[test]
+    fn dump_attribution_targets_dumped_dc_not_auth_realm() {
+        let args = dump_args(&[("target_ip", "192.168.58.20"), ("domain", "contoso.local")]);
+        assert!(dump_attribution_applies("secretsdump", &args));
+        assert_eq!(
+            realm_from_target_args(&args, &child_parent_dc_map()).as_deref(),
+            Some("child.contoso.local")
+        );
+    }
+
+    #[test]
+    fn dump_attribution_skips_when_target_domain_already_set() {
+        let args = dump_args(&[
+            ("target_ip", "192.168.58.20"),
+            ("domain", "contoso.local"),
+            ("target_domain", "contoso.local"),
+        ]);
+        assert!(!dump_attribution_applies("secretsdump", &args));
+    }
+
+    #[test]
+    fn dump_attribution_skips_non_dump_tools() {
+        let args = dump_args(&[("target_ip", "192.168.58.20")]);
+        assert!(!dump_attribution_applies("ldap_search", &args));
+        assert!(!dump_attribution_applies(
+            "forge_inter_realm_and_dump",
+            &args
+        ));
+    }
+
+    #[test]
+    fn dump_attribution_yields_nothing_for_unknown_target() {
+        let args = dump_args(&[("target_ip", "192.168.58.99")]);
+        assert!(dump_attribution_applies("secretsdump", &args));
+        assert_eq!(realm_from_target_args(&args, &child_parent_dc_map()), None);
     }
 
     /// Bug B end-to-end contract: when the resolver writes `ticket_path` into
