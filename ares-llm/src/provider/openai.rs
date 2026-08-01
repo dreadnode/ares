@@ -4,7 +4,7 @@
 //! See: <https://platform.openai.com/docs/api-reference/chat>
 
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{
     ChatMessage, ContentPart, LlmError, LlmProvider, LlmRequest, LlmResponse, Role, StopReason,
@@ -12,6 +12,8 @@ use super::{
 };
 
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
+
+const DEFAULT_REASONING_HEADROOM_TOKENS: u32 = 25_000;
 
 pub struct OpenAiProvider {
     api_key: String,
@@ -132,12 +134,20 @@ struct ApiUsage {
     completion_tokens: u32,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Deserialize, Default)]
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: u32,
+}
+
+#[derive(Deserialize, Default)]
+struct CompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -260,6 +270,17 @@ fn uses_max_completion_tokens(model: &str) -> bool {
     model.starts_with("gpt-5")
 }
 
+fn reasoning_headroom_tokens() -> u32 {
+    std::env::var("ARES_OPENAI_REASONING_HEADROOM_TOKENS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(DEFAULT_REASONING_HEADROOM_TOKENS)
+}
+
+fn completion_token_budget(max_tokens: u32, headroom: u32) -> u32 {
+    max_tokens.saturating_add(headroom)
+}
+
 #[async_trait::async_trait]
 impl LlmProvider for OpenAiProvider {
     async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
@@ -283,11 +304,13 @@ impl LlmProvider for OpenAiProvider {
         }
 
         let use_max_completion_tokens = uses_max_completion_tokens(&request.model);
+        let completion_budget =
+            completion_token_budget(request.max_tokens, reasoning_headroom_tokens());
         let api_request = ApiRequest {
             model: request.model.clone(),
             messages,
             max_tokens: (!use_max_completion_tokens).then_some(request.max_tokens),
-            max_completion_tokens: use_max_completion_tokens.then_some(request.max_tokens),
+            max_completion_tokens: use_max_completion_tokens.then_some(completion_budget),
             tools: convert_tools(&request.tools),
             temperature: request.temperature,
             seed: request.seed,
@@ -297,6 +320,7 @@ impl LlmProvider for OpenAiProvider {
             model = %request.model,
             msg_count = request.messages.len(),
             tool_count = request.tools.len(),
+            max_completion_tokens = ?api_request.max_completion_tokens,
             "OpenAI API request"
         );
 
@@ -367,8 +391,16 @@ impl LlmProvider for OpenAiProvider {
                 calls
                     .iter()
                     .map(|tc| {
-                        let args: serde_json::Value =
-                            serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                        let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or_else(|e| {
+                                warn!(
+                                    tool = %tc.function.name,
+                                    err = %e,
+                                    arg_len = tc.function.arguments.len(),
+                                    "OpenAI tool call arguments failed to parse"
+                                );
+                                serde_json::Value::default()
+                            });
                         ToolCall {
                             id: tc.id.clone(),
                             name: tc.function.name.clone(),
@@ -378,6 +410,13 @@ impl LlmProvider for OpenAiProvider {
                     .collect()
             })
             .unwrap_or_default();
+
+        let reasoning_tokens = api_response
+            .usage
+            .as_ref()
+            .and_then(|u| u.completion_tokens_details.as_ref())
+            .map(|d| d.reasoning_tokens)
+            .unwrap_or(0);
 
         let usage = api_response.usage.map_or_else(TokenUsage::default, |u| {
             let cached = u
@@ -404,10 +443,23 @@ impl LlmProvider for OpenAiProvider {
             input_tokens = usage.input_tokens,
             cache_read_input_tokens = usage.cache_read_input_tokens,
             output_tokens = usage.output_tokens,
+            reasoning_tokens = reasoning_tokens,
             tool_calls = tool_calls.len(),
             stop = ?stop_reason,
             "OpenAI API response"
         );
+
+        if stop_reason == StopReason::MaxTokens {
+            warn!(
+                model = %request.model,
+                max_completion_tokens = ?api_request.max_completion_tokens,
+                output_tokens = usage.output_tokens,
+                reasoning_tokens = reasoning_tokens,
+                content_len = content.len(),
+                tool_calls = tool_calls.len(),
+                "OpenAI truncated completion at the token ceiling"
+            );
+        }
 
         Ok(LlmResponse {
             content,
@@ -515,5 +567,67 @@ mod tests {
         assert!(uses_max_completion_tokens("gpt-5.2"));
         assert!(uses_max_completion_tokens("openai/gpt-5.2"));
         assert!(!uses_max_completion_tokens("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn completion_budget_adds_reasoning_headroom() {
+        assert_eq!(
+            completion_token_budget(4096, DEFAULT_REASONING_HEADROOM_TOKENS),
+            4096 + DEFAULT_REASONING_HEADROOM_TOKENS
+        );
+        assert_eq!(completion_token_budget(4096, 0), 4096);
+    }
+
+    #[test]
+    fn completion_budget_saturates_instead_of_overflowing() {
+        assert_eq!(completion_token_budget(u32::MAX, 25_000), u32::MAX);
+    }
+
+    #[test]
+    fn parse_usage_with_reasoning_tokens() {
+        let json = r#"{
+            "prompt_tokens": 12000,
+            "completion_tokens": 4096,
+            "completion_tokens_details": {"reasoning_tokens": 4096}
+        }"#;
+        let usage: ApiUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .unwrap()
+                .reasoning_tokens,
+            4096
+        );
+    }
+
+    #[test]
+    fn parse_usage_without_reasoning_tokens() {
+        let json = r#"{"prompt_tokens": 100, "completion_tokens": 50}"#;
+        let usage: ApiUsage = serde_json::from_str(json).unwrap();
+        assert!(usage.completion_tokens_details.is_none());
+    }
+
+    #[test]
+    fn truncated_reasoning_response_deserializes_as_max_tokens() {
+        let json = r#"{
+            "choices": [{
+                "message": {"content": null, "tool_calls": null},
+                "finish_reason": "length"
+            }],
+            "usage": {
+                "prompt_tokens": 18000,
+                "completion_tokens": 4096,
+                "completion_tokens_details": {"reasoning_tokens": 4096}
+            }
+        }"#;
+        let resp: ApiResponse = serde_json::from_str(json).unwrap();
+        let choice = &resp.choices[0];
+        assert_eq!(
+            parse_stop_reason(choice.finish_reason.as_deref()),
+            StopReason::MaxTokens
+        );
+        assert!(choice.message.content.is_none());
+        assert!(choice.message.tool_calls.is_none());
     }
 }

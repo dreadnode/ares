@@ -102,6 +102,8 @@ pub struct AgentConfig {
     #[serde(default = "default_max_steps")]
     pub max_steps: u32,
     #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
     pub tools: Vec<String>,
 }
 

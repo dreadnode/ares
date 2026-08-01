@@ -31,6 +31,9 @@ pub struct AgentLoopConfig {
     /// Whether to attach Anthropic prompt-cache breakpoints to the stable
     /// prefix (system + tool definitions). No-op for non-Anthropic providers.
     pub enable_prompt_cache: bool,
+    /// Retries allowed for a truncated completion (`MaxTokens` with no tool
+    /// call) before the loop ends. Zero terminates on first truncation.
+    pub max_token_retries: u32,
 }
 
 impl Default for AgentLoopConfig {
@@ -47,6 +50,7 @@ impl Default for AgentLoopConfig {
             session_log: SessionLogConfig::default(),
             max_tool_calls_per_name: 10,
             enable_prompt_cache: true,
+            max_token_retries: 2,
         }
     }
 }
@@ -59,6 +63,7 @@ impl AgentLoopConfig {
     /// - `ARES_AGENT_MAX_STEPS`
     /// - `ARES_AGENT_MAX_TOKENS`
     /// - `ARES_AGENT_MAX_TOOL_CALLS_PER_NAME`
+    /// - `ARES_AGENT_MAX_TOKEN_RETRIES`
     /// - `ARES_AGENT_ENABLE_PROMPT_CACHE` (`true`/`false`/`1`/`0`)
     /// - `ARES_LLM_SEED` — sampling seed passed to providers that honour it
     ///   (OpenAI). Undefined → no seed (provider default).
@@ -80,6 +85,10 @@ impl AgentLoopConfig {
                 "ARES_AGENT_ENABLE_PROMPT_CACHE",
                 defaults.enable_prompt_cache,
             ),
+            max_token_retries: parse_env_u32(
+                "ARES_AGENT_MAX_TOKEN_RETRIES",
+                defaults.max_token_retries,
+            ),
             retry: defaults.retry,
             context: ContextConfig::from_env(),
             budget: BudgetConfig::from_env(),
@@ -95,6 +104,18 @@ impl AgentLoopConfig {
         }
         if let Some(steps) = max_steps.filter(|s| *s > 0) {
             self.max_steps = steps;
+        }
+        self
+    }
+
+    /// Layer a per-role `max_tokens` from YAML under the env override:
+    /// `ARES_AGENT_MAX_TOKENS` > YAML > [`Self::default`]. `None`/zero is ignored.
+    pub fn with_config_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
+        if std::env::var("ARES_AGENT_MAX_TOKENS").is_ok() {
+            return self;
+        }
+        if let Some(tokens) = max_tokens.filter(|t| *t > 0) {
+            self.max_tokens = tokens;
         }
         self
     }
@@ -650,6 +671,49 @@ mod tests {
         let env_wins = AgentLoopConfig::from_env("m".into(), None).with_config_max_steps(Some(300));
         assert_eq!(env_wins.max_steps, 13);
         std::env::remove_var("ARES_AGENT_MAX_STEPS");
+    }
+
+    #[test]
+    fn with_config_max_tokens_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ARES_AGENT_MAX_TOKENS");
+
+        let base = AgentLoopConfig::from_env("m".into(), None);
+        assert_eq!(base.max_tokens, 4096);
+
+        let from_yaml =
+            AgentLoopConfig::from_env("m".into(), None).with_config_max_tokens(Some(16_384));
+        assert_eq!(from_yaml.max_tokens, 16_384);
+
+        let zero = AgentLoopConfig::from_env("m".into(), None).with_config_max_tokens(Some(0));
+        assert_eq!(zero.max_tokens, 4096);
+
+        let absent = AgentLoopConfig::from_env("m".into(), None).with_config_max_tokens(None);
+        assert_eq!(absent.max_tokens, 4096);
+
+        std::env::set_var("ARES_AGENT_MAX_TOKENS", "1234");
+        let env_wins =
+            AgentLoopConfig::from_env("m".into(), None).with_config_max_tokens(Some(16_384));
+        assert_eq!(env_wins.max_tokens, 1234);
+        std::env::remove_var("ARES_AGENT_MAX_TOKENS");
+    }
+
+    #[test]
+    fn max_token_retries_defaults_and_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ARES_AGENT_MAX_TOKEN_RETRIES");
+        assert_eq!(AgentLoopConfig::default().max_token_retries, 2);
+        assert_eq!(
+            AgentLoopConfig::from_env("m".into(), None).max_token_retries,
+            2
+        );
+
+        std::env::set_var("ARES_AGENT_MAX_TOKEN_RETRIES", "0");
+        assert_eq!(
+            AgentLoopConfig::from_env("m".into(), None).max_token_retries,
+            0
+        );
+        std::env::remove_var("ARES_AGENT_MAX_TOKEN_RETRIES");
     }
 
     #[test]

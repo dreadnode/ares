@@ -22,6 +22,12 @@ pub type HostnameMap = Arc<HashMap<String, String>>;
 /// the warning isn't premature.
 const WRAPUP_THRESHOLD_STEPS: u32 = 5;
 
+const TRUNCATED_COMPLETION_NUDGE: &str =
+    "YOUR LAST RESPONSE WAS CUT OFF at the output-token limit before you \
+     produced a tool call, so nothing was executed. Do not repeat or restate \
+     your reasoning. Reply with ONE tool call and no prose. If you are ready \
+     to finish, call `task_complete` with the evidence you already have.";
+
 use crate::provider::{
     ChatMessage, LlmProvider, LlmRequest, Role, StopReason, TokenUsage, ToolCall,
 };
@@ -270,6 +276,7 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
     // don't pollute the conversation if the agent keeps tool-calling after
     // the warning.
     let mut wrapup_nudge_injected = false;
+    let mut max_token_retries_used: u32 = 0;
 
     loop {
         if steps >= config.max_steps {
@@ -450,16 +457,46 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
                 });
             }
             StopReason::MaxTokens if response.tool_calls.is_empty() => {
-                return finish(FinishArgs {
-                    session_log: &session_log,
-                    steps,
-                    reason: LoopEndReason::MaxTokens,
-                    total_usage,
-                    tool_calls_dispatched,
-                    discoveries: all_discoveries,
-                    llm_findings: all_llm_findings,
-                    tool_outputs: all_tool_outputs,
-                });
+                if max_token_retries_used >= config.max_token_retries {
+                    warn!(
+                        task_id = task_id,
+                        steps = steps,
+                        retries = max_token_retries_used,
+                        "Agent loop exhausted max-token truncation retries"
+                    );
+                    return finish(FinishArgs {
+                        session_log: &session_log,
+                        steps,
+                        reason: LoopEndReason::MaxTokens,
+                        total_usage,
+                        tool_calls_dispatched,
+                        discoveries: all_discoveries,
+                        llm_findings: all_llm_findings,
+                        tool_outputs: all_tool_outputs,
+                    });
+                }
+                max_token_retries_used += 1;
+                warn!(
+                    task_id = task_id,
+                    steps = steps,
+                    retry = max_token_retries_used,
+                    max_token_retries = config.max_token_retries,
+                    content_len = response.content.len(),
+                    "Agent loop recovering from truncated completion"
+                );
+                if !response.content.is_empty() {
+                    let partial = ChatMessage::text(Role::Assistant, &response.content);
+                    if session_log.enabled() {
+                        session_log.record_message(steps, &partial);
+                    }
+                    messages.push(partial);
+                }
+                let nudge = ChatMessage::text(Role::User, TRUNCATED_COMPLETION_NUDGE);
+                if session_log.enabled() {
+                    session_log.record_message(steps, &nudge);
+                }
+                messages.push(nudge);
+                continue;
             }
             _ => {}
         }

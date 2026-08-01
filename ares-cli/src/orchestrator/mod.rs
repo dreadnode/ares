@@ -528,8 +528,20 @@ async fn run_inner() -> Result<()> {
                     .as_ref()
                     .and_then(|c| c.agents.get(*yaml_key))
                     .map(|a| a.max_steps),
+            )
+            .with_config_max_tokens(
+                ares_config
+                    .as_ref()
+                    .and_then(|c| c.agents.get(*yaml_key))
+                    .and_then(|a| a.max_tokens),
             );
-        info!(role = %yaml_key, model = %spec, max_steps = cfg.max_steps, "Per-role model");
+        info!(
+            role = %yaml_key,
+            model = %spec,
+            max_steps = cfg.max_steps,
+            max_tokens = cfg.max_tokens,
+            "Per-role model"
+        );
         providers.insert(
             *role,
             llm_runner::RoleProvider {

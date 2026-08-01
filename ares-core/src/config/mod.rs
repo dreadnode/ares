@@ -141,6 +141,7 @@ impl AresConfig {
                 AgentConfig {
                     model: model.to_string(),
                     max_steps: default_max_steps(),
+                    max_tokens: None,
                     tools: Vec::new(),
                 },
             );
