@@ -47,6 +47,21 @@ impl SharedState {
         self.inner.write().await.acl_publish_cap = cap;
     }
 
+    /// Record whether blue runs alongside red in this operation. Call once,
+    /// from the single `ARES_BLUE_ENABLED` resolution in the orchestrator, so
+    /// the containment classifier and the drop counter cannot disagree about
+    /// whether a blue team even exists.
+    pub async fn set_blue_enabled(&self, blue_enabled: bool) {
+        self.inner.write().await.blue_enabled = blue_enabled;
+    }
+
+    /// How far a containment observation in this operation may be attributed.
+    pub async fn containment_attribution(
+        &self,
+    ) -> ares_core::blue_invalidation::ContainmentAttribution {
+        self.inner.read().await.containment_attribution()
+    }
+
     pub async fn set_diversity_recording(
         &self,
         emit_path_records: bool,

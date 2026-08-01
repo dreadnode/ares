@@ -1,4 +1,4 @@
-//! Publish methods for blue-side containment observations.
+//! Publish methods for containment observations.
 //!
 //! Consumed by the red-side failure classifier (see
 //! `orchestrator/result_processing/containment_recovery.rs`) — when a tool
@@ -9,9 +9,15 @@
 //!
 //! Each method dedups on the identity key (principal / IP / domain / serial)
 //! so re-classification of the same failure signal does not double-emit.
+//!
+//! The classifier never sees blue; it reads red's own tool output. Every log
+//! line here therefore carries the operation's
+//! [`ContainmentAttribution`], so an observation raised with blue switched
+//! off is never written down as a blue action.
 
 use chrono::Utc;
 
+use ares_core::blue_invalidation::ContainmentAttribution;
 use ares_core::models::OpStateEventPayload;
 
 use crate::orchestrator::state::SharedState;
@@ -33,9 +39,19 @@ impl SharedState {
         source: &str,
     ) -> bool {
         let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
-        let added = {
+        let kdc_declared = source.contains(
+            crate::orchestrator::result_processing::containment_recovery::KDC_CLIENT_REVOKED_MARKER,
+        );
+        let (added, attribution) = {
             let mut state = self.inner.write().await;
-            state.revoked_principals.insert(key, Utc::now()).is_none()
+            let attribution = state.containment_attribution();
+            if kdc_declared {
+                state.kdc_declared_revocations.insert(key.clone());
+            }
+            (
+                state.revoked_principals.insert(key, Utc::now()).is_none(),
+                attribution,
+            )
         };
         if !added {
             return false;
@@ -51,24 +67,36 @@ impl SharedState {
             },
         )
         .await;
-        tracing::info!(
-            username = %username,
-            domain = %domain,
-            source = %source,
-            "Blue containment observed: credential revoked"
-        );
+        match attribution {
+            ContainmentAttribution::BlueActive => tracing::info!(
+                username = %username,
+                domain = %domain,
+                source = %source,
+                "Blue containment observed: credential revoked"
+            ),
+            ContainmentAttribution::RedInferred => tracing::info!(
+                username = %username,
+                domain = %domain,
+                source = %source,
+                "Credential rejected — inferred dead, NOT attributed to blue (blue not running)"
+            ),
+        }
         true
     }
 
     /// Record that blue firewalled a host we were pivoting through.
     /// Idempotent per-IP.
     pub async fn publish_host_isolated(&self, ip: &str, hostname: &str, source: &str) -> bool {
-        let added = {
+        let (added, attribution) = {
             let mut state = self.inner.write().await;
-            state
-                .isolated_hosts
-                .insert(ip.to_string(), Utc::now())
-                .is_none()
+            let attribution = state.containment_attribution();
+            (
+                state
+                    .isolated_hosts
+                    .insert(ip.to_string(), Utc::now())
+                    .is_none(),
+                attribution,
+            )
         };
         if !added {
             return false;
@@ -84,7 +112,14 @@ impl SharedState {
             },
         )
         .await;
-        tracing::info!(ip = %ip, hostname = %hostname, source = %source, "Blue containment observed: host isolated");
+        match attribution {
+            ContainmentAttribution::BlueActive => {
+                tracing::info!(ip = %ip, hostname = %hostname, source = %source, "Blue containment observed: host isolated")
+            }
+            ContainmentAttribution::RedInferred => {
+                tracing::info!(ip = %ip, hostname = %hostname, source = %source, "Host unreachable — inferred dead, NOT attributed to blue (blue not running)")
+            }
+        }
         true
     }
 
@@ -92,9 +127,13 @@ impl SharedState {
     /// realm; forest-wide `KRB_AP_ERR_MODIFIED` should collapse to one event.
     pub async fn publish_krbtgt_rotated(&self, domain: &str, source: &str) -> bool {
         let key = domain.to_lowercase();
-        let added = {
+        let (added, attribution) = {
             let mut state = self.inner.write().await;
-            state.krbtgt_rotated_at.insert(key, Utc::now()).is_none()
+            let attribution = state.containment_attribution();
+            (
+                state.krbtgt_rotated_at.insert(key, Utc::now()).is_none(),
+                attribution,
+            )
         };
         if !added {
             return false;
@@ -109,11 +148,18 @@ impl SharedState {
             },
         )
         .await;
-        tracing::warn!(
-            domain = %domain,
-            source = %source,
-            "Blue containment observed: krbtgt rotated (all TGTs and forged tickets in this realm are now dead)"
-        );
+        match attribution {
+            ContainmentAttribution::BlueActive => tracing::warn!(
+                domain = %domain,
+                source = %source,
+                "Blue containment observed: krbtgt rotated (all TGTs and forged tickets in this realm are now dead)"
+            ),
+            ContainmentAttribution::RedInferred => tracing::warn!(
+                domain = %domain,
+                source = %source,
+                "Kerberos key mismatch — tickets in this realm are dead, NOT attributed to blue (blue not running)"
+            ),
+        }
         true
     }
 
@@ -121,9 +167,13 @@ impl SharedState {
     /// serial (case-insensitive on the hex).
     pub async fn publish_certificate_revoked(&self, serial: &str, ca: &str, source: &str) -> bool {
         let key = serial.to_lowercase();
-        let added = {
+        let (added, attribution) = {
             let mut state = self.inner.write().await;
-            state.revoked_certificates.insert(key, Utc::now()).is_none()
+            let attribution = state.containment_attribution();
+            (
+                state.revoked_certificates.insert(key, Utc::now()).is_none(),
+                attribution,
+            )
         };
         if !added {
             return false;
@@ -139,12 +189,20 @@ impl SharedState {
             },
         )
         .await;
-        tracing::info!(
-            serial = %serial,
-            ca = %ca,
-            source = %source,
-            "Blue containment observed: certificate revoked"
-        );
+        match attribution {
+            ContainmentAttribution::BlueActive => tracing::info!(
+                serial = %serial,
+                ca = %ca,
+                source = %source,
+                "Blue containment observed: certificate revoked"
+            ),
+            ContainmentAttribution::RedInferred => tracing::info!(
+                serial = %serial,
+                ca = %ca,
+                source = %source,
+                "Certificate rejected — inferred dead, NOT attributed to blue (blue not running)"
+            ),
+        }
         true
     }
 }
@@ -251,6 +309,36 @@ mod tests {
         let s = state.inner.read().await;
         assert!(s.is_certificate_revoked("1a2b3c"));
         assert!(s.is_certificate_revoked("1A2B3C"));
+    }
+
+    #[tokio::test]
+    async fn attribution_defaults_to_red_inferred_until_blue_is_declared() {
+        let (state, _r) = capturing_state("op-1");
+        assert_eq!(
+            state.containment_attribution().await,
+            ContainmentAttribution::RedInferred
+        );
+        state.set_blue_enabled(true).await;
+        assert_eq!(
+            state.containment_attribution().await,
+            ContainmentAttribution::BlueActive
+        );
+    }
+
+    #[tokio::test]
+    async fn publishing_still_invalidates_the_principal_with_blue_off() {
+        let (state, recorder) = capturing_state("op-1");
+        assert!(
+            state
+                .publish_credential_revoked("svc_mssql", "contoso.local", "STATUS_LOGON_FAILURE")
+                .await
+        );
+        assert!(state
+            .inner
+            .read()
+            .await
+            .is_credential_revoked("svc_mssql", "contoso.local"));
+        assert_eq!(recorder.captured().await.len(), 1);
     }
 
     #[tokio::test]

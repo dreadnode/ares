@@ -257,7 +257,16 @@ pub struct StateInner {
     /// target, which is the one thing that can make the retry succeed.
     pub forge_wedged: HashMap<String, crate::orchestrator::automation::trust::WedgedForge>,
 
-    /// Blue-side containment observations — a credential we hold started
+    /// Whether a blue team is running alongside red in this operation,
+    /// resolved once at orchestrator startup from `ARES_BLUE_ENABLED`.
+    ///
+    /// The containment classifier reads red's own tool output and never sees
+    /// blue, so this flag is the only fact separating "blue may have contained
+    /// us" from "our credential simply failed". Defaults to `false` so any
+    /// state built outside the orchestrator attributes nothing to blue.
+    pub blue_enabled: bool,
+
+    /// Containment observations — a credential we hold started
     /// consistently returning `STATUS_LOGON_FAILURE` or LDAP
     /// `INVALID_CREDENTIALS`. Keyed by `user@domain` (lowercase). Read by
     /// the exploitation queue to drop attempts that depend on the principal
@@ -266,6 +275,17 @@ pub struct StateInner {
     /// carries the short 5-min lockout signal — a revocation persists for
     /// the remainder of the op unless an operator rolls it back.
     pub revoked_principals: HashMap<String, DateTime<Utc>>,
+
+    /// Subset of [`Self::revoked_principals`] whose revocation the KDC itself
+    /// declared, via `KDC_ERR_CLIENT_REVOKED`. Keyed the same way.
+    ///
+    /// Everything else in `revoked_principals` got there because a generic
+    /// auth-reject string recurred — a stale hash, a lockout, an expired
+    /// ticket or a wrong password guess all produce exactly that. Membership
+    /// here is what separates "the KDC says this account is disabled" from
+    /// "this credential was refused twice", and it decides whether a
+    /// revocation may delete queued work or only hide the credential.
+    pub kdc_declared_revocations: HashSet<String>,
 
     /// Hosts blue firewalled off. Keyed by IP string. Populated when SMB,
     /// WinRM and LDAP to a previously-reachable host all start returning
@@ -365,7 +385,9 @@ impl StateInner {
             completed: false,
             all_forests_dominated_at: None,
             coercion_phase_state: HashMap::new(),
+            blue_enabled: false,
             revoked_principals: HashMap::new(),
+            kdc_declared_revocations: HashSet::new(),
             isolated_hosts: HashMap::new(),
             krbtgt_rotated_at: HashMap::new(),
             revoked_certificates: HashMap::new(),
@@ -379,19 +401,45 @@ impl StateInner {
         }
     }
 
-    /// Whether blue has revoked a credential for the given principal.
+    /// How far a containment observation in this operation may be attributed.
+    pub fn containment_attribution(&self) -> ares_core::blue_invalidation::ContainmentAttribution {
+        ares_core::blue_invalidation::ContainmentAttribution::from_blue_enabled(self.blue_enabled)
+    }
+
+    /// Whether a credential for the given principal has been observed revoked.
     /// Comparison is case-insensitive on both fields.
     pub fn is_credential_revoked(&self, username: &str, domain: &str) -> bool {
         let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
         self.revoked_principals.contains_key(&key)
     }
 
-    /// Whether blue has firewalled off the given IP.
+    /// Whether the KDC itself declared this principal revoked, rather than the
+    /// revocation being inferred from repeated generic auth rejects.
+    pub fn is_kdc_declared_revocation(&self, username: &str, domain: &str) -> bool {
+        let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+        self.kdc_declared_revocations.contains(&key)
+    }
+
+    /// Whether a revocation on this principal is strong enough to delete
+    /// queued work that depends on it, as opposed to only hiding the
+    /// credential from the LLM.
+    ///
+    /// A KDC-declared revocation always is. An inferred one only counts while
+    /// blue is running: with blue off, two `STATUS_LOGON_FAILURE`s against one
+    /// principal are ordinary auth noise, and deleting every queued task bound
+    /// to that principal destroys red's own work on a guess.
+    pub fn credential_revocation_deletes_queued_work(&self, username: &str, domain: &str) -> bool {
+        self.is_credential_revoked(username, domain)
+            && (self.blue_enabled || self.is_kdc_declared_revocation(username, domain))
+    }
+
+    /// Whether the given IP has been observed cut off.
     pub fn is_host_isolated(&self, ip: &str) -> bool {
         self.isolated_hosts.contains_key(ip)
     }
 
-    /// Whether blue has rotated krbtgt in the given realm (case-insensitive).
+    /// Whether krbtgt has been observed rotated in the given realm
+    /// (case-insensitive).
     pub fn is_krbtgt_rotated(&self, domain: &str) -> bool {
         self.krbtgt_rotated_at.contains_key(&domain.to_lowercase())
     }

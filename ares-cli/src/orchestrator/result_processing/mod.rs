@@ -598,6 +598,11 @@ pub async fn process_completed_task(
                             user = %username,
                             domain = %domain,
                             source = %source,
+                            attribution = %dispatcher
+                                .state
+                                .containment_attribution()
+                                .await
+                                .as_str(),
                             "containment: weak credential-reject below revocation \
                              threshold — deferring (needs corroboration)"
                         );
