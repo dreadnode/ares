@@ -10,6 +10,147 @@ use super::{build_client, grafana_url, make_error, make_output};
 
 use ares_core::detection::rule_creation_enabled;
 
+const RULE_FOLDER_UID: &str = "ares-security";
+const RULE_GROUP: &str = "ares-detections";
+
+/// Parse a Grafana evaluation interval ("30s", "5m", "1h") into seconds.
+///
+/// Grafana requires group intervals to be a positive multiple of the base
+/// interval (10s by default); anything else is rejected rather than coerced.
+fn parse_interval_seconds(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim();
+    let (digits, multiplier) = if let Some(d) = trimmed.strip_suffix('s') {
+        (d, 1)
+    } else if let Some(d) = trimmed.strip_suffix('m') {
+        (d, 60)
+    } else if let Some(d) = trimmed.strip_suffix('h') {
+        (d, 3600)
+    } else {
+        (trimmed, 1)
+    };
+    let seconds = digits.trim().parse::<i64>().ok()?.checked_mul(multiplier)?;
+    (seconds >= 10 && seconds % 10 == 0).then_some(seconds)
+}
+
+/// Render a second count back into Grafana/LogQL duration notation.
+fn format_interval(seconds: i64) -> String {
+    if seconds % 3600 == 0 {
+        format!("{}h", seconds / 3600)
+    } else if seconds % 60 == 0 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// Build the provisioning payload for a detection rule.
+///
+/// The lookback window is pinned to the evaluation interval so consecutive
+/// evaluations tile the timeline with no blind gap.
+fn build_rule_body(
+    title: &str,
+    logql_query: &str,
+    description: &str,
+    mitre_technique: &str,
+    severity: &str,
+    pending_period: &str,
+    interval_seconds: i64,
+) -> Value {
+    let window = format_interval(interval_seconds);
+    let wrapped_query = format!("count_over_time({logql_query} [{window}]) > 0");
+    let mut labels = serde_json::json!({
+        "severity": severity,
+        "source": "ares",
+    });
+    if !mitre_technique.is_empty() {
+        labels["mitre_technique"] = serde_json::json!(mitre_technique);
+    }
+
+    serde_json::json!({
+        "folderUID": RULE_FOLDER_UID,
+        "ruleGroup": RULE_GROUP,
+        "title": title,
+        "condition": "C",
+        "noDataState": "OK",
+        "execErrState": "OK",
+        "for": pending_period,
+        "annotations": {
+            "summary": description,
+            "description": format!("Auto-created by ARES. LogQL: {logql_query}"),
+        },
+        "labels": labels,
+        "data": [
+            {
+                "refId": "A",
+                "relativeTimeRange": { "from": interval_seconds, "to": 0 },
+                "datasourceUid": "loki",
+                "model": {
+                    "expr": wrapped_query,
+                    "refId": "A",
+                },
+            },
+            {
+                "refId": "C",
+                "relativeTimeRange": { "from": 0, "to": 0 },
+                "datasourceUid": "__expr__",
+                "model": {
+                    "type": "threshold",
+                    "refId": "C",
+                    "expression": "A",
+                    "conditions": [{
+                        "evaluator": { "type": "gt", "params": [0.0] },
+                    }],
+                },
+            },
+        ],
+    })
+}
+
+/// Set the evaluation cadence on the rule group and read back what Grafana kept.
+///
+/// `POST /api/v1/provisioning/alert-rules` discards any per-rule
+/// `intervalSeconds` — Grafana overwrites it with the group's interval (or the
+/// 60s default for a group it has just created). Cadence therefore has to be
+/// written to the group, and the returned value is what actually applies.
+async fn sync_group_interval(
+    client: &reqwest::Client,
+    interval_seconds: i64,
+) -> Result<i64, String> {
+    let url = format!(
+        "{}/api/v1/provisioning/folder/{RULE_FOLDER_UID}/rule-groups/{RULE_GROUP}",
+        grafana_url()
+    );
+
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("GET rule group returned {status}: {body}"));
+    }
+    let mut group: Value =
+        serde_json::from_str(&body).map_err(|e| format!("unparsable rule group: {e}"))?;
+    group["interval"] = serde_json::json!(interval_seconds);
+
+    let put = client
+        .put(&url)
+        .json(&group)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let put_status = put.status();
+    let put_body = put.text().await.unwrap_or_default();
+    if !put_status.is_success() {
+        return Err(format!("PUT rule group returned {put_status}: {put_body}"));
+    }
+
+    let confirm = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let confirm_body = confirm.text().await.unwrap_or_default();
+    serde_json::from_str::<Value>(&confirm_body)
+        .ok()
+        .and_then(|g| g.get("interval").and_then(Value::as_i64))
+        .ok_or_else(|| "rule group reported no interval after update".to_string())
+}
+
 /// Create a detection alert rule in Grafana.
 ///
 /// Gated behind `ARES_BLUE_ALLOW_RULE_CREATION`; returns a tool error without
@@ -21,7 +162,9 @@ use ares_core::detection::rule_creation_enabled;
 /// - `description` (optional)
 /// - `mitre_technique` (optional): Associated MITRE technique
 /// - `severity` (optional): "critical", "high", "medium", "low" (default: "medium")
-/// - `evaluation_interval` (optional): e.g. "5m" (default: "5m")
+/// - `evaluation_interval` (optional): e.g. "5m" (default: "5m"). Grafana keeps
+///   cadence per group, so this resets the shared `ares-detections` group and
+///   changes every rule already in it.
 /// - `pending_period` (optional): e.g. "0s" (default: "0s")
 pub async fn create_detection_rule(args: &Value) -> Result<ToolOutput> {
     let title = required_str(args, "title")?;
@@ -44,6 +187,13 @@ pub async fn create_detection_rule(args: &Value) -> Result<ToolOutput> {
     let eval_interval = optional_str(args, "evaluation_interval").unwrap_or("5m");
     let pending_period = optional_str(args, "pending_period").unwrap_or("0s");
 
+    let Some(interval_seconds) = parse_interval_seconds(eval_interval) else {
+        return Ok(make_error(&format!(
+            "Invalid evaluation_interval '{eval_interval}'. Use a duration that is a \
+             multiple of 10s, e.g. \"30s\", \"1m\", \"5m\", \"1h\"."
+        )));
+    };
+
     // Validate: reject overly broad selectors
     let broad_selectors = [
         r#"{job=~".+"}"#,
@@ -62,12 +212,12 @@ pub async fn create_detection_rule(args: &Value) -> Result<ToolOutput> {
     let client = build_client()?;
 
     // Ensure the ares-security folder exists
-    let folder_url = format!("{}/api/folders/ares-security", grafana_url());
+    let folder_url = format!("{}/api/folders/{RULE_FOLDER_UID}", grafana_url());
     let folder_resp = client.get(&folder_url).send().await;
     if let Ok(resp) = folder_resp {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             let create_body = serde_json::json!({
-                "uid": "ares-security",
+                "uid": RULE_FOLDER_UID,
                 "title": "ARES Security Detections"
             });
             let _ = client
@@ -78,60 +228,15 @@ pub async fn create_detection_rule(args: &Value) -> Result<ToolOutput> {
         }
     }
 
-    let wrapped_query = format!("count_over_time({logql_query} [5m]) > 0");
-    let mut labels = serde_json::json!({
-        "severity": severity,
-        "source": "ares",
-    });
-    if !mitre_technique.is_empty() {
-        labels["mitre_technique"] = serde_json::json!(mitre_technique);
-    }
-
-    let rule_body = serde_json::json!({
-        "folderUID": "ares-security",
-        "ruleGroup": "ares-detections",
-        "title": title,
-        "condition": "C",
-        "noDataState": "OK",
-        "execErrState": "OK",
-        "for": pending_period,
-        "annotations": {
-            "summary": description,
-            "description": format!("Auto-created by ARES. LogQL: {logql_query}"),
-        },
-        "labels": labels,
-        "data": [
-            {
-                "refId": "A",
-                "relativeTimeRange": { "from": 300, "to": 0 },
-                "datasourceUid": "loki",
-                "model": {
-                    "expr": wrapped_query,
-                    "refId": "A",
-                },
-            },
-            {
-                "refId": "C",
-                "relativeTimeRange": { "from": 0, "to": 0 },
-                "datasourceUid": "__expr__",
-                "model": {
-                    "type": "threshold",
-                    "refId": "C",
-                    "expression": "A",
-                    "conditions": [{
-                        "evaluator": { "type": "gt", "params": [0.0] },
-                    }],
-                },
-            },
-        ],
-        "intervalSeconds": match eval_interval {
-            "1m" => 60,
-            "5m" => 300,
-            "10m" => 600,
-            "15m" => 900,
-            _ => 300,
-        },
-    });
+    let rule_body = build_rule_body(
+        title,
+        logql_query,
+        description,
+        mitre_technique,
+        severity,
+        pending_period,
+        interval_seconds,
+    );
 
     let url = format!("{}/api/v1/provisioning/alert-rules", grafana_url());
     let resp = client
@@ -156,9 +261,25 @@ pub async fn create_detection_rule(args: &Value) -> Result<ToolOutput> {
         )));
     }
 
-    Ok(make_output(&format!(
-        "[+] Detection rule created: {title} (severity={severity}, folder=ares-security, interval={eval_interval})"
-    )))
+    let created = format!(
+        "[+] Detection rule created: {title} (severity={severity}, folder={RULE_FOLDER_UID}, group={RULE_GROUP})"
+    );
+    let requested = format_interval(interval_seconds);
+
+    Ok(match sync_group_interval(&client, interval_seconds).await {
+        Ok(confirmed) if confirmed == interval_seconds => {
+            make_output(&format!("{created}\n[+] Group evaluates every {requested}"))
+        }
+        Ok(confirmed) => make_output(&format!(
+            "{created}\n[!] Requested interval {requested} was not applied — group \
+             {RULE_GROUP} still evaluates every {}",
+            format_interval(confirmed)
+        )),
+        Err(e) => make_output(&format!(
+            "{created}\n[!] Evaluation interval unverified — could not set group \
+             {RULE_GROUP} to {requested}: {e}"
+        )),
+    })
 }
 
 /// Get alert rule definitions from Grafana's provisioning API.
@@ -459,5 +580,99 @@ mod rule_gate_tests {
         assert!(!out.success);
         assert!(out.stderr.contains("disabled"));
         assert!(out.stdout.is_empty());
+    }
+
+    #[test]
+    fn create_detection_rule_rejects_unparsable_interval() {
+        let env = EnvGuard::acquire();
+        env.set("1");
+
+        let args = serde_json::json!({
+            "title": "Detect DCSync",
+            "logql_query": r#"{job="windows"} |= "4662""#,
+            "evaluation_interval": "5 minutes",
+        });
+        let out = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build runtime")
+            .block_on(create_detection_rule(&args))
+            .expect("tool call");
+
+        assert!(!out.success);
+        assert!(out.stderr.contains("Invalid evaluation_interval"));
+    }
+}
+
+#[cfg(test)]
+mod rule_body_tests {
+    use super::*;
+
+    #[test]
+    fn parse_interval_seconds_accepts_grafana_durations() {
+        assert_eq!(parse_interval_seconds("30s"), Some(30));
+        assert_eq!(parse_interval_seconds("1m"), Some(60));
+        assert_eq!(parse_interval_seconds(" 5m "), Some(300));
+        assert_eq!(parse_interval_seconds("1h"), Some(3600));
+        assert_eq!(parse_interval_seconds("600"), Some(600));
+    }
+
+    #[test]
+    fn parse_interval_seconds_rejects_rather_than_coercing() {
+        for bad in ["5 minutes", "", "0m", "-5m", "7s", "abc", "5d"] {
+            assert_eq!(
+                parse_interval_seconds(bad),
+                None,
+                "expected {bad:?} rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn format_interval_round_trips() {
+        for raw in ["30s", "1m", "5m", "15m", "1h"] {
+            let seconds = parse_interval_seconds(raw).expect("parses");
+            assert_eq!(format_interval(seconds), raw);
+        }
+    }
+
+    fn body(interval_seconds: i64) -> Value {
+        build_rule_body(
+            "Detect DCSync",
+            r#"{job="windows"} |= "4662""#,
+            "",
+            "T1003.006",
+            "high",
+            "0s",
+            interval_seconds,
+        )
+    }
+
+    #[test]
+    fn rule_body_omits_per_rule_interval() {
+        assert!(
+            body(300).get("intervalSeconds").is_none(),
+            "provisioning API overwrites per-rule intervalSeconds from the group; \
+             sending it invites a false confirmation"
+        );
+    }
+
+    #[test]
+    fn lookback_window_tiles_the_evaluation_interval() {
+        for raw in ["1m", "5m", "15m"] {
+            let seconds = parse_interval_seconds(raw).expect("parses");
+            let rule = body(seconds);
+            let query = rule.pointer("/data/0/model/expr").and_then(Value::as_str);
+            assert_eq!(
+                query,
+                Some(
+                    format!(r#"count_over_time({{job="windows"}} |= "4662" [{raw}]) > 0"#).as_str()
+                )
+            );
+            assert_eq!(
+                rule.pointer("/data/0/relativeTimeRange/from")
+                    .and_then(Value::as_i64),
+                Some(seconds)
+            );
+        }
     }
 }
