@@ -23,6 +23,12 @@
     vnc_setup_vncpwd_clone_path: /tmp/vncpwd
     vnc_setup_vncpwd_path: /usr/local/bin/vncpwd
 
+  pre_tasks:
+    - name: Gather EC2 instance metadata for Alloy stream labels
+      amazon.aws.ec2_metadata_facts:
+      failed_when: false
+      when: alloy_instance_id | length == 0
+
   roles:
     # Bulwark roles for Ansible system configuration and monitoring
     - role: l50.bulwark.aws_ssm_agent
