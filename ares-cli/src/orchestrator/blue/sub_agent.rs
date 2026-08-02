@@ -25,6 +25,31 @@ const BLUE_TOOL_TIMEOUT_SECS: u64 = 600;
 /// Non-blue tools fall through to the inner dispatcher.
 pub(super) struct BlueToolDispatcher {
     pub(super) inner: Arc<dyn ToolDispatcher>,
+    pub(super) investigation_id: String,
+}
+
+impl BlueToolDispatcher {
+    fn pin_investigation_id(&self, call: &ToolCall) -> Option<serde_json::Value> {
+        let obj = call.arguments.as_object()?;
+        let current = obj.get("investigation_id").and_then(|v| v.as_str());
+        if current == Some(self.investigation_id.as_str()) {
+            return None;
+        }
+        let mut patched = obj.clone();
+        let supplied = patched.insert(
+            "investigation_id".to_string(),
+            serde_json::Value::String(self.investigation_id.clone()),
+        );
+        if let Some(supplied) = supplied {
+            warn!(
+                tool = %call.name,
+                supplied = %supplied,
+                investigation_id = %self.investigation_id,
+                "Overriding sub-agent-supplied investigation_id"
+            );
+        }
+        Some(serde_json::Value::Object(patched))
+    }
 }
 
 #[async_trait::async_trait]
@@ -37,9 +62,11 @@ impl ToolDispatcher for BlueToolDispatcher {
     ) -> Result<ToolExecResult> {
         if ares_tools::blue::is_blue_tool(&call.name) {
             debug!(tool = %call.name, "Executing blue tool locally");
+            let patched = self.pin_investigation_id(call);
+            let arguments = patched.as_ref().unwrap_or(&call.arguments);
             match tokio::time::timeout(
                 std::time::Duration::from_secs(BLUE_TOOL_TIMEOUT_SECS),
-                ares_tools::blue::dispatch_blue(&call.name, &call.arguments),
+                ares_tools::blue::dispatch_blue(&call.name, arguments),
             )
             .await
             {
@@ -150,5 +177,62 @@ impl CallbackHandler for SubAgentCallbackHandler {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    struct NoopDispatcher;
+
+    #[async_trait::async_trait]
+    impl ToolDispatcher for NoopDispatcher {
+        async fn dispatch_tool(&self, _: &str, _: &str, _: &ToolCall) -> Result<ToolExecResult> {
+            unreachable!("blue tools never reach the inner dispatcher")
+        }
+    }
+
+    fn dispatcher() -> BlueToolDispatcher {
+        BlueToolDispatcher {
+            inner: Arc::new(NoopDispatcher),
+            investigation_id: "inv-real".into(),
+        }
+    }
+
+    fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "c1".into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn overrides_hallucinated_investigation_id() {
+        let call = call(
+            "add_technique",
+            json!({"investigation_id": "AUTO-CHAINED", "technique_id": "T1021.002"}),
+        );
+        let patched = dispatcher().pin_investigation_id(&call).unwrap();
+        assert_eq!(patched["investigation_id"], "inv-real");
+        assert_eq!(patched["technique_id"], "T1021.002");
+    }
+
+    #[test]
+    fn supplies_omitted_investigation_id() {
+        let call = call("add_technique", json!({"technique_id": "T1021.002"}));
+        let patched = dispatcher().pin_investigation_id(&call).unwrap();
+        assert_eq!(patched["investigation_id"], "inv-real");
+    }
+
+    #[test]
+    fn leaves_correct_investigation_id_untouched() {
+        let call = call(
+            "add_technique",
+            json!({"investigation_id": "inv-real", "technique_id": "T1021.002"}),
+        );
+        assert!(dispatcher().pin_investigation_id(&call).is_none());
     }
 }

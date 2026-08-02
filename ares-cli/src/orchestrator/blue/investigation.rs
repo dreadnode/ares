@@ -466,12 +466,14 @@ async fn run_inline_chained_hunts(
 ) {
     for chain in planned.iter().take(MAX_INLINE_CHAINS) {
         let prompt = format!(
-            "AUTO-CHAINED follow-up hunt, triggered by evidence type '{}'.\n\n\
+            "Auto-chained follow-up hunt in investigation {}, triggered by \
+             evidence type '{}'.\n\n\
              Focus: {}\n\n\
              Investigate using your detection templates (run_detection_query / \
              run_parallel_detections) and Loki queries. Record every finding with \
-             add_evidence and map it to MITRE techniques, then call hunt_complete.",
-            chain.evidence_type, chain.focus
+             add_evidence and map it to MITRE techniques, then call hunt_complete. \
+             Always pass investigation_id \"{}\" to the investigation state tools.",
+            investigation_id, chain.evidence_type, chain.focus, investigation_id
         );
         match handler.run_sub_agent(chain.role, &prompt).await {
             Ok(_) => info!(

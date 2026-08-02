@@ -17,7 +17,7 @@ const RULE_GROUP: &str = "ares-detections";
 ///
 /// Grafana requires group intervals to be a positive multiple of the base
 /// interval (10s by default); anything else is rejected rather than coerced.
-fn parse_interval_seconds(raw: &str) -> Option<i64> {
+fn parse_duration_seconds(raw: &str) -> Option<i64> {
     let trimmed = raw.trim();
     let (digits, multiplier) = if let Some(d) = trimmed.strip_suffix('s') {
         (d, 1)
@@ -29,6 +29,11 @@ fn parse_interval_seconds(raw: &str) -> Option<i64> {
         (trimmed, 1)
     };
     let seconds = digits.trim().parse::<i64>().ok()?.checked_mul(multiplier)?;
+    (seconds >= 0).then_some(seconds)
+}
+
+fn parse_interval_seconds(raw: &str) -> Option<i64> {
+    let seconds = parse_duration_seconds(raw)?;
     (seconds >= 10 && seconds % 10 == 0).then_some(seconds)
 }
 
@@ -45,8 +50,10 @@ fn format_interval(seconds: i64) -> String {
 
 /// Build the provisioning payload for a detection rule.
 ///
-/// The lookback window is pinned to the evaluation interval so consecutive
-/// evaluations tile the timeline with no blind gap.
+/// The lookback window is pinned to `pending_period + interval` so consecutive
+/// evaluations tile the timeline with no blind gap, and a match stays inside
+/// the window long enough for the pending period to elapse. A shorter lookback
+/// drops the match before `for` is satisfied and the rule can never fire.
 fn build_rule_body(
     title: &str,
     logql_query: &str,
@@ -56,7 +63,9 @@ fn build_rule_body(
     pending_period: &str,
     interval_seconds: i64,
 ) -> Value {
-    let window = format_interval(interval_seconds);
+    let lookback_seconds =
+        interval_seconds.saturating_add(parse_duration_seconds(pending_period).unwrap_or(0));
+    let window = format_interval(lookback_seconds);
     let wrapped_query = format!("count_over_time({logql_query} [{window}]) > 0");
     let mut labels = serde_json::json!({
         "severity": severity,
@@ -82,7 +91,7 @@ fn build_rule_body(
         "data": [
             {
                 "refId": "A",
-                "relativeTimeRange": { "from": interval_seconds, "to": 0 },
+                "relativeTimeRange": { "from": lookback_seconds, "to": 0 },
                 "datasourceUid": "loki",
                 "model": {
                     "expr": wrapped_query,
@@ -674,5 +683,27 @@ mod rule_body_tests {
                 Some(seconds)
             );
         }
+    }
+
+    #[test]
+    fn lookback_covers_pending_period_plus_interval() {
+        let rule = build_rule_body(
+            "Detect DCSync",
+            r#"{job="windows"} |= "4662""#,
+            "",
+            "T1003.006",
+            "high",
+            "30s",
+            300,
+        );
+        assert_eq!(
+            rule.pointer("/data/0/relativeTimeRange/from")
+                .and_then(Value::as_i64),
+            Some(330)
+        );
+        assert_eq!(
+            rule.pointer("/data/0/model/expr").and_then(Value::as_str),
+            Some(r#"count_over_time({job="windows"} |= "4662" [330s]) > 0"#)
+        );
     }
 }

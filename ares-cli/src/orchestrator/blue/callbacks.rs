@@ -160,6 +160,7 @@ impl BlueCallbackHandler {
         // the red-team dispatcher which doesn't know about them.
         let blue_dispatcher: Arc<dyn ToolDispatcher> = Arc::new(BlueToolDispatcher {
             inner: Arc::clone(&self.dispatcher),
+            investigation_id: self.investigation_id.clone(),
         });
 
         let sub_agent_cb: Arc<dyn CallbackHandler> = Arc::new(SubAgentCallbackHandler {
