@@ -697,7 +697,7 @@ pub(crate) fn build_common_spray_payload(
     excluded_users: &[String],
 ) -> Value {
     json!({
-        "techniques": ["password_spray", "username_as_password"],
+        "techniques": ["username_as_password", "password_spray"],
         "reason": "low_hanging_fruit",
         "target_ip": dc_ip,
         "domain": domain,
@@ -1968,8 +1968,8 @@ mod tests {
     fn build_common_spray_payload_fields() {
         let p =
             build_common_spray_payload("192.168.58.10", "contoso.local", &["locked.user".into()]);
-        assert_eq!(p["techniques"][0], "password_spray");
-        assert_eq!(p["techniques"][1], "username_as_password");
+        assert_eq!(p["techniques"][0], "username_as_password");
+        assert_eq!(p["techniques"][1], "password_spray");
         assert_eq!(p["reason"], "low_hanging_fruit");
         assert_eq!(p["use_common_passwords"], true);
         assert_eq!(p["acknowledge_no_policy"], true);

@@ -79,6 +79,16 @@ const SPRAY_LOCKOUT_BUFFER: i64 = 1;
 /// counting what has already been spent.
 const NO_POLICY_SPRAY_CAP: i64 = 2;
 
+const NO_POLICY_UAP_RESERVE: i64 = 1;
+
+fn no_policy_reserve(tool: &str) -> i64 {
+    if tool == "password_spray" {
+        NO_POLICY_UAP_RESERVE
+    } else {
+        0
+    }
+}
+
 /// Dump LSASS credentials remotely via `lsassy`.
 pub async fn lsassy(args: &Value) -> Result<ToolOutput> {
     let domain = optional_str(args, "domain");
@@ -649,11 +659,12 @@ fn check_spray_budget(
         // assumed one. Subtracting `attempts_used` here is what stops repeated
         // blind-start sprays from each starting over at a full allowance.
         None if acknowledge_no_policy => {
-            let budget = NO_POLICY_SPRAY_CAP - attempts_used;
+            let allowance = NO_POLICY_SPRAY_CAP - no_policy_reserve(tool);
+            let budget = allowance - attempts_used;
             if budget < 1 {
                 return SprayBudget::Refuse(Box::new(spray_refusal(format!(
                     "Refusing {tool}: no-policy spray allowance exhausted \
-                     (allowance={NO_POLICY_SPRAY_CAP} per observation window, \
+                     (allowance={allowance} per observation window, \
                      attempts_used_per_account={attempts_used}). Wait for the AD \
                      observation window to reset, or run password_policy and pass \
                      lockout_threshold to spray against the real budget."
@@ -1701,6 +1712,17 @@ mod tests {
         }
     }
 
+    fn uap_budget_cap(
+        threshold: Option<i64>,
+        used: i64,
+        ack: bool,
+    ) -> Result<Option<usize>, &'static str> {
+        match super::check_spray_budget(threshold, used, ack, "username_as_password") {
+            super::SprayBudget::Allow(cap) => Ok(cap),
+            super::SprayBudget::Refuse(_) => Err("refused"),
+        }
+    }
+
     #[test]
     fn check_spray_budget_blocks_without_policy() {
         assert!(budget_cap(None, 0, false).is_err());
@@ -1711,7 +1733,7 @@ mod tests {
         // The waiver used to mean "unbounded" — that is what let one call
         // spray the whole default list and lock the account.
         assert_eq!(
-            budget_cap(None, 0, true),
+            uap_budget_cap(None, 0, true),
             Ok(Some(super::NO_POLICY_SPRAY_CAP as usize))
         );
     }
@@ -1721,17 +1743,61 @@ mod tests {
         // op-20260727-230409: this branch ignored `attempts_used` entirely, so
         // every blind-start spray got a fresh allowance and 8 of them summed to
         // 16 bad logons per account against a threshold of 5.
-        assert_eq!(budget_cap(None, 0, true), Ok(Some(2)));
-        assert_eq!(budget_cap(None, 1, true), Ok(Some(1)));
+        assert_eq!(uap_budget_cap(None, 0, true), Ok(Some(2)));
+        assert_eq!(uap_budget_cap(None, 1, true), Ok(Some(1)));
     }
 
     #[test]
     fn check_spray_budget_no_policy_refuses_once_the_allowance_is_spent() {
         assert!(
-            budget_cap(None, 2, true).is_err(),
+            uap_budget_cap(None, 2, true).is_err(),
             "the allowance is per observation window, not per call"
         );
-        assert!(budget_cap(None, 99, true).is_err());
+        assert!(uap_budget_cap(None, 99, true).is_err());
+    }
+
+    #[test]
+    fn no_policy_password_spray_never_takes_the_last_attempt() {
+        assert_eq!(
+            budget_cap(None, 0, true),
+            Ok(Some(1)),
+            "op-20260801-134438: this was Allow(Some(2)), spent on Password1 \
+             and Welcome1 before username_as_password ever ran"
+        );
+        assert!(
+            budget_cap(None, 1, true).is_err(),
+            "the reserved attempt belongs to username_as_password"
+        );
+        assert_eq!(uap_budget_cap(None, 1, true), Ok(Some(1)));
+    }
+
+    #[test]
+    fn no_policy_reservation_does_not_widen_the_window_ceiling() {
+        let spent = super::spray_attempt_cost(
+            &serde_json::json!({ "use_common_passwords": true, "acknowledge_no_policy": true }),
+            0,
+        ) as i64;
+        assert_eq!(spent, 1);
+        assert!(super::spray_budget_allows(
+            &serde_json::json!({ "acknowledge_no_policy": true }),
+            spent
+        ));
+        assert!(
+            !super::spray_budget_allows(
+                &serde_json::json!({ "acknowledge_no_policy": true }),
+                spent + 1
+            ),
+            "total exposure stays at NO_POLICY_SPRAY_CAP failed logons per account"
+        );
+    }
+
+    #[test]
+    fn no_policy_reservation_does_not_touch_the_observed_policy_path() {
+        assert_eq!(
+            budget_cap(Some(5), 0, false),
+            uap_budget_cap(Some(5), 0, false)
+        );
+        assert_eq!(budget_cap(Some(0), 100, false), Ok(None));
     }
 
     #[test]
@@ -1832,15 +1898,15 @@ mod tests {
         });
         assert_eq!(
             super::spray_attempt_cost(&args, 0),
-            super::NO_POLICY_SPRAY_CAP as usize
+            (super::NO_POLICY_SPRAY_CAP - super::NO_POLICY_UAP_RESERVE) as usize
         );
         // ...and the allowance is consumed, not reissued per call.
-        assert_eq!(super::spray_attempt_cost(&args, 1), 1);
         assert_eq!(
-            super::spray_attempt_cost(&args, 2),
+            super::spray_attempt_cost(&args, 1),
             0,
             "a spent allowance must cost nothing further — the call is refused"
         );
+        assert_eq!(super::spray_attempt_cost(&args, 2), 0);
     }
 
     #[test]

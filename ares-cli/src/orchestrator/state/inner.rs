@@ -1728,9 +1728,29 @@ mod tests {
         }
 
         assert_eq!(
+            spent, 1,
+            "the no-policy allowance is a per-window total, and password_spray \
+             may take only its unreserved share of it (pre-fix this was 16)"
+        );
+
+        let uap = serde_json::json!({
+            "domain": "contoso.local",
+            "acknowledge_no_policy": true,
+        });
+        for _ in 0..8 {
+            let used = state.spray_attempts_used("contoso.local");
+            let cost = i64::from(ares_tools::credential_access::spray_budget_allows(
+                &uap, used,
+            ));
+            state.record_spray_attempts("contoso.local", cost, 300);
+            spent += cost;
+        }
+
+        assert_eq!(
             spent, 2,
-            "the no-policy allowance is a per-window total: the first spray \
-             spends it and the rest must refuse (pre-fix this was 16)"
+            "op-20260801-134438: password_spray took the whole window and every \
+             username_as_password behind it was refused; reserving must hand \
+             that attempt back without widening the per-account total"
         );
         assert!(
             spent < 5,
