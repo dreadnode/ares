@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
 
   prometheus:
-    image: prom/prometheus:v3.13.1
+    image: prom/prometheus:v3.13.2
     # Run as root: /prometheus is a root-owned bind mount; Prometheus's default
     # nobody:65534 otherwise can't create its query log / write TSDB blocks.
     user: "0:0"
