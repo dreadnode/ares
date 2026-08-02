@@ -639,11 +639,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "domain": {
                         "type": "string",
-                        "description": "Target domain (e.g. contoso.local)"
+                        "description": "Domain of the target CA (e.g. contoso.local). Scopes the impersonated UPN, NOT the login."
                     },
                     "username": {
                         "type": "string",
                         "description": "Username for authentication (must have ManageCA rights)"
+                    },
+                    "auth_domain": {
+                        "type": "string",
+                        "description": "Domain that issued `username`, if it differs from `domain` — pass `credential.domain` from the task payload. A credential from a child domain must bind as user@child; binding it as user@parent fails with invalidCredentials (data 52e). Defaults to `domain`."
                     },
                     "password": {
                         "type": "string",
