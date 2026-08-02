@@ -1112,6 +1112,8 @@ pub(crate) fn tool_consumes_ticket_path(tool_name: &str) -> bool {
             | "certipy_request"
             | "certipy_ca"
             | "certipy_shadow"
+            | "pywhisker"
+            | "targeted_kerberoast"
     )
 }
 

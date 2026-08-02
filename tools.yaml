@@ -68,7 +68,7 @@ roles:
         binaries: [bloodyAD, pywhisker]
         fn_names: [bloodyad_add_group_member, bloodyad_set_password, bloodyad_add_genericall, adminsd_holder_add_ace, gmsa_read_password_bloodyad, pywhisker]
       - category: Kerberoasting
-        binaries: [targetedKerberoast]
+        binaries: [targetedKerberoast, impacket-GetUserSPNs]
         fn_names: [targeted_kerberoast]
       - category: SMB
         binaries: [rpcclient]

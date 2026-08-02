@@ -63,7 +63,7 @@ When you have these permissions on a user/computer:
 
 2. **Targeted Kerberoast**
    ```
-   targeted_kerberoast(target="targetuser", domain="{{ target_domain }}")
+   targeted_kerberoast(target_user="targetuser", domain="{{ target_domain }}", username="user", dc_ip="{{ target_dc_ip }}")
    → Get TGS hash → Request crack from orchestrator
    ```
 

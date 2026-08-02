@@ -138,6 +138,36 @@ pub fn impacket_target(
     }
 }
 
+/// True when `etype_hint` names at least one AES etype and no RC4/DES etype —
+/// the only preference the roasting tools express, via impacket's `-no-rc4`.
+///
+/// Unknown etype names are skipped with a `tracing::warn!` rather than treated
+/// as AES-only, so a future name addition cannot silently suppress RC4 against
+/// an account that supports nothing else.
+pub fn etype_hint_is_aes_only(args: &Value) -> bool {
+    let Some(arr) = args.get("etype_hint").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let mut saw_aes = false;
+    for v in arr {
+        let Some(name) = v.as_str() else { continue };
+        match name.to_ascii_lowercase().as_str() {
+            "aes256-cts-hmac-sha1-96"
+            | "aes256"
+            | "aes256-cts"
+            | "aes128-cts-hmac-sha1-96"
+            | "aes128"
+            | "aes128-cts" => saw_aes = true,
+            "rc4-hmac" | "rc4_hmac" | "rc4" | "arcfour-hmac" | "des-cbc-md5" | "des_cbc_md5"
+            | "des-cbc-crc" | "des_cbc_crc" => return false,
+            other => {
+                tracing::warn!(etype = %other, "kerberoast: unknown etype_hint value, ignored");
+            }
+        }
+    }
+    saw_aes
+}
+
 /// Build `-hashes` args for impacket tools using pass-the-hash.
 ///
 /// Returns `["-hashes", ":NTHASH"]`.
@@ -368,6 +398,34 @@ mod tests {
     fn hash_args_plain_nthash() {
         let args = hash_args("aabbccdd");
         assert_eq!(args, vec!["-hashes", ":aabbccdd"]);
+    }
+
+    #[test]
+    fn etype_hint_aes_only_ignores_unknown_etypes() {
+        let args = serde_json::json!({
+            "etype_hint": ["unknown-cipher", "aes256-cts-hmac-sha1-96"],
+        });
+        assert!(etype_hint_is_aes_only(&args));
+    }
+
+    #[test]
+    fn etype_hint_aes_only_false_when_array_missing() {
+        assert!(!etype_hint_is_aes_only(&serde_json::json!({"foo": "bar"})));
+    }
+
+    #[test]
+    fn etype_hint_aes_only_false_when_all_unknown() {
+        let args = serde_json::json!({"etype_hint": ["completely-bogus"]});
+        assert!(!etype_hint_is_aes_only(&args));
+    }
+
+    #[test]
+    fn etype_hint_aes_only_false_when_rc4_permitted() {
+        let args = serde_json::json!({"etype_hint": ["aes256-cts-hmac-sha1-96", "rc4-hmac"]});
+        assert!(
+            !etype_hint_is_aes_only(&args),
+            "an RC4-permitting hint must not suppress RC4 for an RC4-only account"
+        );
     }
 
     #[test]

