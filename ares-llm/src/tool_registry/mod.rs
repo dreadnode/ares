@@ -155,12 +155,22 @@ const CALLBACK_NAMES_WITH_SECRETS: &[&str] = &[
     "get_hash_value",
 ];
 
+pub const KERBEROS_ONLY_TOOLS: &[&str] = &[
+    "secretsdump_kerberos",
+    "psexec_kerberos",
+    "wmiexec_kerberos",
+    "smbexec_kerberos",
+];
+
 /// Per-tool exposed-key exemptions. For tools where a "secret-shaped" argument
 /// is actually input *data* (e.g. `password_spray.password` is the candidate
 /// password to spray, not a credential to look up), the named keys remain in
 /// the LLM-visible schema. The credential resolver will not inject anything
 /// for these keys because the calls have no `(username, domain)` principal.
 fn exposed_secret_keys(tool_name: &str) -> &'static [&'static str] {
+    if KERBEROS_ONLY_TOOLS.contains(&tool_name) {
+        return &["ticket_path"];
+    }
     match tool_name {
         "password_spray" => &["password"],
         _ => &[],
@@ -669,6 +679,53 @@ mod tests {
             .filter_map(|v| v.as_str())
             .collect();
         assert_eq!(required, vec!["username", "domain", "spn"]);
+    }
+
+    #[test]
+    fn kerberos_only_tools_advertise_the_ccache_slot_in_every_role() {
+        for role in [AgentRole::Privesc, AgentRole::Lateral] {
+            for tool in tools_for_role(role)
+                .into_iter()
+                .filter(|t| KERBEROS_ONLY_TOOLS.contains(&t.name.as_str()))
+            {
+                let props = tool.input_schema["properties"]
+                    .as_object()
+                    .expect("properties");
+                assert!(
+                    props.contains_key("ticket_path"),
+                    "{} has no auth mode other than a Kerberos ccache, so stripping ticket_path \
+                     leaves the LLM unable to spend a ticket it just obtained: {:?}",
+                    tool.name,
+                    props.keys().collect::<Vec<_>>()
+                );
+                for secret in ["password", "hash", "nt_hash", "aes_key"] {
+                    assert!(
+                        !props.contains_key(secret),
+                        "{} must still hide {secret}",
+                        tool.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ticket_path_stays_stripped_from_tools_with_another_auth_mode() {
+        for role in [AgentRole::Acl, AgentRole::Privesc, AgentRole::Lateral] {
+            for tool in tools_for_role(role) {
+                if KERBEROS_ONLY_TOOLS.contains(&tool.name.as_str()) {
+                    continue;
+                }
+                let Some(props) = tool.input_schema["properties"].as_object() else {
+                    continue;
+                };
+                assert!(
+                    !props.contains_key("ticket_path"),
+                    "{} takes a password or hash too — the resolver owns its ticket_path",
+                    tool.name
+                );
+            }
+        }
     }
 
     #[test]
