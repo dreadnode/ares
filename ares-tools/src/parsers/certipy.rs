@@ -225,15 +225,39 @@ fn extract_esc_principal(output: &str, esc_type: &str) -> Option<String> {
     let esc_upper = esc_type.to_uppercase();
     for line in output.lines() {
         let trimmed = line.trim();
-        let Some(rest) = trimmed.strip_prefix(&esc_upper) else {
-            continue;
-        };
-        // Ensure it's the ESC header line ("ESC4 :" / "ESC4:"), not e.g. "ESC40".
-        if !(rest.starts_with(' ') || rest.starts_with(':')) {
+        if is_esc_header_line(trimmed, &esc_upper) {
+            if let Some(p) = extract_quoted_principal(trimmed) {
+                return Some(p);
+            }
+        }
+    }
+    acl_principal_for_esc(output, &esc_upper)
+}
+
+fn is_esc_header_line(trimmed: &str, esc_upper: &str) -> bool {
+    trimmed
+        .strip_prefix(esc_upper)
+        .is_some_and(|rest| rest.starts_with(' ') || rest.starts_with(':'))
+}
+
+fn acl_principal_for_esc(output: &str, esc_upper: &str) -> Option<String> {
+    let mut holder: Option<String> = None;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("CA Name") || trimmed.starts_with("Template Name") {
+            holder = None;
             continue;
         }
-        if let Some(p) = extract_quoted_principal(trimmed) {
-            return Some(p);
+        if let Some(rest) = trimmed.strip_prefix("[+] User ACL Principals") {
+            let value = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+            let name = value.rsplit('\\').next().unwrap_or(value).trim();
+            if !name.is_empty() {
+                holder = Some(name.to_lowercase());
+            }
+            continue;
+        }
+        if is_esc_header_line(trimmed, esc_upper) && holder.is_some() {
+            return holder;
         }
     }
     None
@@ -293,23 +317,23 @@ fn extract_ca_dns_name(output: &str) -> Option<String> {
 /// Extract template name associated with an ESC type.
 fn extract_template_for_esc(output: &str, esc_type: &str) -> Option<String> {
     let esc_upper = esc_type.to_uppercase();
-    let lines: Vec<&str> = output.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        if esc_word_boundary_match(line, &esc_upper) {
-            // Look backwards for "Template Name" line
-            for j in (0..i).rev() {
-                let prev = lines[j].trim();
-                if let Some(rest) = prev.strip_prefix("Template Name") {
-                    let name = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-                    if !name.is_empty() {
-                        return Some(name.to_string());
-                    }
-                }
-                // Don't look back more than 20 lines
-                if i - j > 20 {
-                    break;
-                }
-            }
+    let mut template: Option<String> = None;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed == "Certificate Authorities" || trimmed.starts_with("CA Name") {
+            template = None;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Template Name") {
+            let name = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+            template = (!name.is_empty()).then(|| name.to_string());
+            continue;
+        }
+        if template.is_some()
+            && (is_esc_header_line(trimmed, &esc_upper)
+                || esc_word_boundary_match(trimmed, &esc_upper))
+        {
+            return template;
         }
     }
     None
@@ -573,6 +597,117 @@ mod tests {
         // The GenericAll holder is captured so credential selection targets it.
         assert_eq!(vulns[0]["details"]["write_holder"], "carol");
         assert_eq!(vulns[0]["details"]["account_name"], "carol");
+    }
+
+    const CERTIPY_V5_FIND: &str = r#"Certipy v5.0.4
+
+[*] Enumeration output:
+Certificate Authorities
+  0
+    CA Name                             : CONTOSO-CA
+    DNS Name                            : ca01.contoso.local
+    Certificate Subject                 : CN=CONTOSO-CA, DC=contoso, DC=local
+    Web Enrollment
+      HTTP
+        Enabled                         : True
+    User Specified SAN                  : Enabled
+    Request Disposition                 : Issue
+    Permissions
+      Owner                             : CONTOSO.LOCAL\Administrators
+      Access Rights
+        Enroll                          : CONTOSO.LOCAL\Authenticated Users
+        ManageCa                        : CONTOSO.LOCAL\Administrators
+                                          CONTOSO.LOCAL\Domain Admins
+                                          CONTOSO.LOCAL\alice smith
+        ManageCertificates              : CONTOSO.LOCAL\Administrators
+                                          CONTOSO.LOCAL\alice smith
+    [+] User Enrollable Principals      : CONTOSO.LOCAL\Authenticated Users
+    [+] User ACL Principals             : CONTOSO.LOCAL\alice smith
+    [!] Vulnerabilities
+      ESC7                              : User has dangerous permissions.
+      ESC8                              : Web Enrollment is enabled over HTTP.
+Certificate Templates
+  0
+    Template Name                       : WebServer
+    Display Name                        : Web Server
+    Certificate Authorities             : CONTOSO-CA
+    Enabled                             : True
+    Client Authentication               : False
+    Enrollment Agent                    : False
+    Any Purpose                         : False
+    Enrollee Supplies Subject           : True
+    Certificate Name Flag               : EnrolleeSuppliesSubject
+    Extended Key Usage                  : Server Authentication
+    Requires Manager Approval           : False
+    Requires Key Archival               : False
+    Authorized Signatures Required      : 0
+    Schema Version                      : 1
+    Validity Period                     : 2 years
+    Renewal Period                      : 6 weeks
+    Minimum RSA Key Length              : 2048
+    Template Created                    : 2026-04-09T07:00:48+00:00
+    Template Last Modified              : 2026-04-25T18:44:55+00:00
+    Permissions
+      Enrollment Permissions
+        Enrollment Rights               : CONTOSO.LOCAL\Domain Users
+      Object Control Permissions
+        Owner                           : CONTOSO.LOCAL\Enterprise Admins
+        Full Control Principals         : CONTOSO.LOCAL\Domain Admins
+        Write Owner Principals          : CONTOSO.LOCAL\Domain Admins
+        Write Dacl Principals           : CONTOSO.LOCAL\Domain Admins
+    [+] User Enrollable Principals      : CONTOSO.LOCAL\Domain Users
+    [!] Vulnerabilities
+      ESC15                             : Enrollee supplies subject and schema version is 1.
+    [*] Remarks
+      ESC15                             : Only applicable if the environment has not been patched.
+"#;
+
+    #[test]
+    fn parse_certipy_v5_captures_esc7_holder_from_block_acl_line() {
+        let params = json!({"target": "192.168.58.23", "domain": "contoso.local"});
+        let vulns = parse_certipy_find(CERTIPY_V5_FIND, &params);
+        let esc7 = vulns
+            .iter()
+            .find(|v| v["vuln_type"] == "adcs_esc7")
+            .expect("esc7 discovered");
+        assert_eq!(esc7["details"]["write_holder"], "alice smith");
+        assert_eq!(esc7["details"]["account_name"], "alice smith");
+    }
+
+    #[test]
+    fn parse_certipy_v5_associates_esc_with_enclosing_template_block() {
+        let params = json!({"target": "192.168.58.23", "domain": "contoso.local"});
+        let vulns = parse_certipy_find(CERTIPY_V5_FIND, &params);
+        let esc15 = vulns
+            .iter()
+            .find(|v| v["vuln_type"] == "adcs_esc15")
+            .expect("esc15 discovered");
+        assert_eq!(esc15["details"]["template_name"], "WebServer");
+    }
+
+    #[test]
+    fn extract_template_for_esc_spans_a_full_v5_template_block() {
+        assert_eq!(
+            extract_template_for_esc(CERTIPY_V5_FIND, "esc15"),
+            Some("WebServer".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_template_for_esc_leaves_ca_scoped_esc_unattributed() {
+        assert_eq!(extract_template_for_esc(CERTIPY_V5_FIND, "esc7"), None);
+        assert_eq!(extract_template_for_esc(CERTIPY_V5_FIND, "esc8"), None);
+    }
+
+    #[test]
+    fn parse_certipy_v5_leaves_any_user_esc_unpinned() {
+        let params = json!({"target": "192.168.58.23", "domain": "contoso.local"});
+        let vulns = parse_certipy_find(CERTIPY_V5_FIND, &params);
+        let esc15 = vulns
+            .iter()
+            .find(|v| v["vuln_type"] == "adcs_esc15")
+            .expect("esc15 discovered");
+        assert!(esc15["details"].get("account_name").is_none());
     }
 
     #[test]
