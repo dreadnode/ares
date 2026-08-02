@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 pub use bloodhound::{
     parse_bloodhound_collection, parse_bloodhound_documents, BLOODHOUND_OUTPUT_DIR_MARKER,
 };
-pub use certipy::{parse_certipy_esc1_chain, parse_certipy_find, ESC_TYPES};
+pub use certipy::{parse_certipy_esc1_chain, parse_certipy_find, parse_certipy_shadow, ESC_TYPES};
 pub use cracker::parse_cracker_output;
 pub use credential_tools::{
     parse_adidnsdump, parse_gmsa, parse_laps, parse_ldap_descriptions, parse_lsassy,
@@ -450,6 +450,13 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
                 &mut discoveries,
                 "hashes",
                 parse_certipy_esc1_chain(output, params),
+            );
+        }
+        "certipy_shadow" => {
+            set_if_nonempty(
+                &mut discoveries,
+                "hashes",
+                parse_certipy_shadow(output, params),
             );
         }
         "add_computer" => {
@@ -1400,6 +1407,40 @@ SMB  192.168.58.121  445  DC01  bob         2026-03-25 23:21:09 0  Bob"#;
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0]["username"], "ARES-1A2B3C4D$");
         assert_eq!(creds[0]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn parse_tool_output_certipy_shadow_extracts_hash() {
+        let output = "\
+[*] Successfully added Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Authenticating as 'DC01$' with the certificate\n\
+[*] Got TGT\n\
+[*] Wrote credential cache to 'dc01.ccache'\n\
+[*] Successfully restored the old Key Credentials for 'DC01$'\n\
+[*] NT hash for 'DC01$': 0123456789abcdef0123456789abcdef";
+        let params = json!({"domain": "contoso.local", "target": "dc01$"});
+        let disc = parse_tool_output("certipy_shadow", output, &params);
+        let hashes = disc["hashes"].as_array().expect("hashes array");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "dc01$");
+        assert_eq!(hashes[0]["domain"], "contoso.local");
+        assert_eq!(hashes[0]["hash_type"], "NTLM");
+    }
+
+    #[test]
+    fn parse_tool_output_certipy_shadow_stage_one_only_yields_nothing() {
+        let output = "\
+[*] Successfully added Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Authenticating as 'DC01$' with the certificate\n\
+[-] Got error while trying to request TGT: KDC_ERR_CLIENT_NAME_MISMATCH\n\
+[*] Successfully restored the old Key Credentials for 'DC01$'\n\
+[*] NT hash for 'DC01$': None";
+        let params = json!({"domain": "contoso.local", "target": "dc01$"});
+        let disc = parse_tool_output("certipy_shadow", output, &params);
+        assert!(
+            disc.get("hashes").is_none(),
+            "stage-one-only shadow write must publish no hash, got {disc:?}"
+        );
     }
 
     #[test]

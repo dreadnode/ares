@@ -436,6 +436,76 @@ pub fn parse_certipy_esc1_chain(output: &str, params: &Value) -> Vec<Value> {
     hashes
 }
 
+const EMPTY_LM_HASH: &str = "aad3b435b51404eeaad3b435b51404ee";
+
+fn strip_status_marker(line: &str) -> &str {
+    let trimmed = line.trim();
+    for marker in ["[*] ", "[+] ", "[-] ", "[!] "] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            return rest.trim_start();
+        }
+    }
+    trimmed
+}
+
+fn is_ntlm_half(value: &str) -> bool {
+    value.len() == 32 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+pub fn parse_certipy_shadow(output: &str, params: &Value) -> Vec<Value> {
+    let param_domain = params
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let mut hashes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for raw in output.lines() {
+        let line = strip_status_marker(raw);
+        let Some(rest) = line
+            .strip_prefix("NT hash for ")
+            .or_else(|| line.strip_prefix("Got hash for "))
+        else {
+            continue;
+        };
+        let Some((principal, hash_part)) = rest.split_once(':') else {
+            continue;
+        };
+        let principal = principal.trim().trim_matches(['\'', '"']).trim();
+        if principal.is_empty() {
+            continue;
+        }
+        let hash_part = hash_part.trim();
+        let (lm, nt) = match hash_part.split_once(':') {
+            Some((lm, nt)) => (lm.trim(), nt.trim()),
+            None => (EMPTY_LM_HASH, hash_part),
+        };
+        if !is_ntlm_half(lm) || !is_ntlm_half(nt) {
+            continue;
+        }
+        let (username, domain) = match principal.split_once('@') {
+            Some((user, realm)) if !user.is_empty() && !realm.is_empty() => {
+                (user.to_lowercase(), realm.to_lowercase())
+            }
+            _ => (principal.to_lowercase(), param_domain.clone()),
+        };
+        if !seen.insert(format!("{username}@{domain}")) {
+            continue;
+        }
+        hashes.push(json!({
+            "username": username,
+            "domain": domain,
+            "hash_type": "NTLM",
+            "hash_value": format!("{lm}:{nt}"),
+            "source": "certipy_shadow",
+        }));
+    }
+
+    hashes
+}
+
 /// Normalise a certificate template name into a `vuln_id`-safe slug:
 /// lowercase, with non-alphanumeric characters collapsed to underscores.
 /// Preserves uniqueness across `WebServer`, `web-server`, `Web Server`
@@ -909,6 +979,98 @@ krbtgt:des-cbc-md5:ab7c3e43b5b07ca7\n\
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0]["username"], "administrator");
         assert_eq!(hashes[0]["domain"], "contoso.local");
+    }
+
+    fn shadow_auto_transcript(hash_line: &str) -> String {
+        format!(
+            "[*] Targeting user 'DC01$'\n\
+[*] Generating certificate\n\
+[*] Certificate generated\n\
+[*] Generating Key Credential\n\
+[*] Key Credential generated with DeviceID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345'\n\
+[*] Adding Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Successfully added Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Authenticating as 'DC01$' with the certificate\n\
+[*] Using principal: 'dc01$@contoso.local'\n\
+[*] Trying to get TGT...\n\
+{hash_line}"
+        )
+    }
+
+    fn shadow_auto_success() -> String {
+        shadow_auto_transcript(
+            "[*] Got TGT\n\
+[*] Saving credential cache to 'dc01.ccache'\n\
+[*] Wrote credential cache to 'dc01.ccache'\n\
+[*] Trying to retrieve NT hash for 'DC01$'\n\
+[*] Restoring the old Key Credentials for 'DC01$'\n\
+[*] Successfully restored the old Key Credentials for 'DC01$'\n\
+[*] NT hash for 'DC01$': 0123456789abcdef0123456789abcdef",
+        )
+    }
+
+    fn shadow_auto_stage_one_only() -> String {
+        shadow_auto_transcript(
+            "[-] Got error while trying to request TGT: Kerberos SessionError: \
+             KDC_ERR_CLIENT_NAME_MISMATCH(Requested certificate does not match the account)\n\
+[*] Restoring the old Key Credentials for 'DC01$'\n\
+[*] Successfully restored the old Key Credentials for 'DC01$'\n\
+[*] NT hash for 'DC01$': None",
+        )
+    }
+
+    #[test]
+    fn parse_certipy_shadow_extracts_the_recovered_machine_account_hash() {
+        let hashes = parse_certipy_shadow(
+            &shadow_auto_success(),
+            &json!({ "domain": "contoso.local", "target": "dc01$" }),
+        );
+        assert_eq!(hashes.len(), 1, "expected one NT hash, got {hashes:?}");
+        assert_eq!(hashes[0]["username"], "dc01$");
+        assert_eq!(hashes[0]["domain"], "contoso.local");
+        assert_eq!(hashes[0]["hash_type"], "NTLM");
+        assert_eq!(
+            hashes[0]["hash_value"],
+            "aad3b435b51404eeaad3b435b51404ee:0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(hashes[0]["source"], "certipy_shadow");
+    }
+
+    #[test]
+    fn parse_certipy_shadow_ignores_a_stage_one_only_run() {
+        let hashes = parse_certipy_shadow(
+            &shadow_auto_stage_one_only(),
+            &json!({ "domain": "contoso.local", "target": "dc01$" }),
+        );
+        assert!(
+            hashes.is_empty(),
+            "a Key Credential write that never recovered a hash must publish nothing, got {hashes:?}"
+        );
+    }
+
+    #[test]
+    fn parse_certipy_shadow_reads_the_qualified_auth_line() {
+        let output = "[*] Got hash for 'bob@FABRIKAM.LOCAL': \
+                      aad3b435b51404eeaad3b435b51404ee:0123456789abcdef0123456789abcdef";
+        let hashes = parse_certipy_shadow(output, &json!({ "domain": "contoso.local" }));
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "bob");
+        assert_eq!(hashes[0]["domain"], "fabrikam.local");
+    }
+
+    #[test]
+    fn parse_certipy_shadow_rejects_a_truncated_hash() {
+        let output = "[*] NT hash for 'DC01$': 0123456789abcdef";
+        let hashes = parse_certipy_shadow(output, &json!({ "domain": "contoso.local" }));
+        assert!(hashes.is_empty(), "got {hashes:?}");
+    }
+
+    #[test]
+    fn parse_certipy_shadow_dedups_repeated_hash_lines() {
+        let output = "[*] NT hash for 'DC01$': 0123456789abcdef0123456789abcdef\n\
+                      [*] NT hash for 'dc01$': 0123456789abcdef0123456789abcdef";
+        let hashes = parse_certipy_shadow(output, &json!({ "domain": "contoso.local" }));
+        assert_eq!(hashes.len(), 1, "got {hashes:?}");
     }
 
     #[test]

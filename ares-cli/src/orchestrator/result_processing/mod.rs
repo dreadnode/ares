@@ -353,6 +353,13 @@ pub async fn process_completed_task(
             }
 
             if actually_succeeded {
+                if result_has_shadow_cred_stage_one(&result.result) {
+                    info!(
+                        vuln_id = %vuln_id,
+                        task_id = %task_id,
+                        "Shadow credential chain converted end to end — the msDS-KeyCredentialLink write produced a parser-extracted credential, crediting this vulnerability"
+                    );
+                }
                 info!(vuln_id = %vuln_id, task_id = %task_id, "Marking vulnerability as exploited");
                 if let Err(e) = dispatcher
                     .state
@@ -1305,6 +1312,7 @@ const ACL_MUTATION_MARKERS: &[&str] = &[
 const SHADOW_CRED_STAGE_ONE_MARKERS: &[&str] = &[
     "successfully added msds-keycredentiallink",
     "updated the msds-keycredentiallink",
+    "successfully added key credential",
     "saved pfx",
 ];
 

@@ -1481,6 +1481,82 @@ fn shadow_cred_stage_one_lines_are_recognised_but_never_credit() {
     }
 }
 
+fn certipy_shadow_result(transcript: &str) -> serde_json::Value {
+    let params = json!({"domain": "contoso.local", "target": "dc01$", "dc_ip": "192.168.58.10"});
+    let discoveries =
+        ares_tools::parsers::merge_discoveries(&[ares_tools::parsers::parse_tool_output(
+            "certipy_shadow",
+            transcript,
+            &params,
+        )]);
+    json!({
+        "summary": "Successfully exploited shadow_credentials (GenericAll) as alice against dc01$",
+        "vuln_id": "acl_genericall_alice_dc01$",
+        "discoveries": discoveries,
+        "tool_outputs": [{"name": "certipy_shadow", "output": transcript}],
+    })
+}
+
+const CERTIPY_SHADOW_RECOVERED_HASH: &str = "\
+[*] Targeting user 'DC01$'\n\
+[*] Generating Key Credential\n\
+[*] Adding Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Successfully added Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Authenticating as 'DC01$' with the certificate\n\
+[*] Got TGT\n\
+[*] Wrote credential cache to 'dc01.ccache'\n\
+[*] Successfully restored the old Key Credentials for 'DC01$'\n\
+[*] NT hash for 'DC01$': 0123456789abcdef0123456789abcdef";
+
+const CERTIPY_SHADOW_STAGE_ONE_ONLY: &str = "\
+[*] Targeting user 'DC01$'\n\
+[*] Generating Key Credential\n\
+[*] Adding Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Successfully added Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Authenticating as 'DC01$' with the certificate\n\
+[-] Got error while trying to request TGT: KDC_ERR_CLIENT_NAME_MISMATCH\n\
+[*] Successfully restored the old Key Credentials for 'DC01$'\n\
+[*] NT hash for 'DC01$': None";
+
+#[test]
+fn completed_shadow_cred_chain_satisfies_the_exploit_evidence_gate() {
+    let payload = Some(certipy_shadow_result(CERTIPY_SHADOW_RECOVERED_HASH));
+    assert!(
+        result_has_parser_evidence(&payload),
+        "a recovered NT hash is parser-grounded evidence and must credit the vulnerability"
+    );
+    assert!(
+        result_has_credential_evidence(&payload),
+        "the recovered hash must also count as credential evidence for host ownership"
+    );
+    let parsed = parse_discoveries(payload.as_ref().unwrap().get("discoveries").unwrap());
+    assert_eq!(parsed.hashes.len(), 1, "{parsed:?}");
+    assert_eq!(parsed.hashes[0].username, "dc01$");
+    assert_eq!(parsed.hashes[0].domain, "contoso.local");
+    assert_eq!(
+        parsed.hashes[0].hash_value,
+        "aad3b435b51404eeaad3b435b51404ee:0123456789abcdef0123456789abcdef"
+    );
+}
+
+#[test]
+fn stage_one_only_shadow_cred_chain_is_still_not_credited() {
+    use super::{result_has_acl_mutation_evidence, result_has_shadow_cred_stage_one};
+    let payload = Some(certipy_shadow_result(CERTIPY_SHADOW_STAGE_ONE_ONLY));
+    assert!(
+        !result_has_parser_evidence(&payload),
+        "a Key Credential write with no recovered credential must not credit"
+    );
+    assert!(
+        !result_has_acl_mutation_evidence(&payload),
+        "certipy_shadow status lines must not stand in for a recovered credential"
+    );
+    assert!(
+        result_has_shadow_cred_stage_one(&payload),
+        "certipy's own wording must make the half-finished chain countable in the log"
+    );
+}
+
 #[test]
 fn acl_evidence_detects_bloodyad_grant_and_group_add() {
     use super::result_has_acl_mutation_evidence;
