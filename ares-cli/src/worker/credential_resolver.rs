@@ -1595,42 +1595,79 @@ async fn resolve_cross_forest_ticket(
         }
     }
 
+    if is_cross_forest_certipy_tool(tool_name) && string_field(args, "dc_host").is_none() {
+        if let Some(dc_ip) = string_field(args, "dc_ip") {
+            match fqdn_for_ip(&dc_ip, target_domain, reader, conn).await {
+                Some(fqdn) => {
+                    info!(
+                        tool = %tool_name,
+                        dc_ip = %dc_ip,
+                        dc_host = %fqdn,
+                        "credential_resolver: resolved DC FQDN for certipy Kerberos SPN"
+                    );
+                    args.insert("dc_host".to_string(), Value::String(fqdn));
+                }
+                None => {
+                    warn!(
+                        tool = %tool_name,
+                        dc_ip = %dc_ip,
+                        target_domain = %target_domain,
+                        "credential_resolver: no FQDN found for DC IP — certipy Kerberos will fail SPN lookup"
+                    );
+                }
+            }
+        }
+    }
+
     // GSSAPI bind needs an FQDN to derive the ldap/<host>@<REALM> SPN. If the
     // LLM passed an IP for `target`, look up the host's hostname from state
     // and rewrite. Without this, ldapsearch -Y GSSAPI errors with no Kerberos
     // service principal name found.
     if let Some(ip_str) = string_field(args, "target") {
         if ip_str.parse::<std::net::IpAddr>().is_ok() {
-            let hosts = reader.get_hosts(conn).await.unwrap_or_default();
-            let domain_l = target_domain.to_lowercase();
-            let host_match = hosts
-                .iter()
-                .find(|h| h.ip == ip_str && !h.hostname.is_empty());
-            if let Some(h) = host_match {
-                let hn = h.hostname.to_lowercase();
-                let fqdn = if hn.ends_with(&format!(".{domain_l}")) || hn == domain_l {
-                    hn
-                } else {
-                    format!("{hn}.{domain_l}")
-                };
-                info!(
-                    tool = %tool_name,
-                    old_target = %ip_str,
-                    new_target = %fqdn,
-                    "credential_resolver: rewrote target IP to FQDN for GSSAPI bind"
-                );
-                args.insert("target".to_string(), Value::String(fqdn));
-            } else {
-                warn!(
-                    tool = %tool_name,
-                    target_ip = %ip_str,
-                    target_domain = %target_domain,
-                    "credential_resolver: no FQDN found for target IP — GSSAPI bind may fail SPN lookup"
-                );
+            match fqdn_for_ip(&ip_str, target_domain, reader, conn).await {
+                Some(fqdn) => {
+                    info!(
+                        tool = %tool_name,
+                        old_target = %ip_str,
+                        new_target = %fqdn,
+                        "credential_resolver: rewrote target IP to FQDN for GSSAPI bind"
+                    );
+                    args.insert("target".to_string(), Value::String(fqdn));
+                }
+                None => {
+                    warn!(
+                        tool = %tool_name,
+                        target_ip = %ip_str,
+                        target_domain = %target_domain,
+                        "credential_resolver: no FQDN found for target IP — GSSAPI bind may fail SPN lookup"
+                    );
+                }
             }
         }
     }
     None
+}
+
+async fn fqdn_for_ip(
+    ip: &str,
+    domain: &str,
+    reader: &RedisStateReader,
+    conn: &mut ConnectionManager,
+) -> Option<String> {
+    let hosts = reader.get_hosts(conn).await.unwrap_or_default();
+    let domain_l = domain.to_lowercase();
+    let host = hosts
+        .iter()
+        .find(|h| h.ip == ip && !h.hostname.is_empty())?;
+    let hostname = host.hostname.to_lowercase();
+    Some(
+        if hostname.ends_with(&format!(".{domain_l}")) || hostname == domain_l {
+            hostname
+        } else {
+            format!("{hostname}.{domain_l}")
+        },
+    )
 }
 
 /// Debug-log which credential fields the Kerberos flip removed. Kept separate

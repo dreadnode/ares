@@ -104,10 +104,19 @@ async fn remove_ccache_files(dir: Option<&std::path::Path>) {
 /// `tool_consumes_ticket_path()` must list the tool or the injection is silently
 /// dropped.
 fn apply_certipy_kerberos(cmd: CommandBuilder, ccache: &str) -> CommandBuilder {
+    let ccache = certipy_consumable_ccache(ccache);
     cmd.arg("-k")
         .arg("-no-pass")
-        .env("KRB5CCNAME", ccache)
+        .env("KRB5CCNAME", &ccache)
         .env("KRB5_CONFIG", format!("{ccache}.krb5.conf:/etc/krb5.conf"))
+}
+
+fn certipy_consumable_ccache(ccache: &str) -> String {
+    let rehomed = super::trust::certipy_ccache_path_for(std::path::Path::new(ccache));
+    if rehomed.exists() {
+        return rehomed.to_string_lossy().into_owned();
+    }
+    ccache.to_string()
 }
 
 /// Enumerate ADCS certificate templates and CAs using Certipy.
@@ -152,6 +161,9 @@ pub fn build_certipy_find_command(args: &Value) -> Result<Option<CommandBuilder>
     let hashes = optional_str(args, "hashes").filter(|s| !s.is_empty());
     let password = optional_str(args, "password").filter(|s| !s.is_empty());
     let ticket_path = optional_str(args, "ticket_path").filter(|s| !s.is_empty());
+    let dc_host = optional_str(args, "dc_host")
+        .or_else(|| optional_str(args, "target"))
+        .filter(|s| !s.is_empty());
 
     if ticket_path.is_none() && password.is_none() && hashes.is_none() {
         return Ok(None);
@@ -168,6 +180,7 @@ pub fn build_certipy_find_command(args: &Value) -> Result<Option<CommandBuilder>
         .timeout_secs(120);
 
     if let Some(ccache) = ticket_path {
+        cmd = cmd.flag_opt("-target", dc_host);
         cmd = apply_certipy_kerberos(cmd, ccache);
     } else if let Some(h) = hashes {
         cmd = cmd.flag("-hashes", h);
@@ -318,6 +331,7 @@ pub fn build_certipy_shadow_command(args: &Value) -> Result<CommandBuilder> {
     // a password is available — without this guard the `-hashes ''` flag
     // is forwarded to certipy and certipy rejects the empty value.
     let hashes = optional_str(args, "hashes").filter(|s| !s.is_empty());
+    let dc_host = optional_str(args, "dc_host").filter(|s| !s.is_empty());
 
     let user_at_domain = format!("{username}@{domain}");
 
@@ -335,6 +349,7 @@ pub fn build_certipy_shadow_command(args: &Value) -> Result<CommandBuilder> {
         .timeout_secs(120);
 
     if let Some(ccache) = ticket_path {
+        cmd = cmd.flag_opt("-target", dc_host);
         cmd = apply_certipy_kerberos(cmd, ccache);
     } else if let Some(h) = hashes {
         cmd = cmd.flag("-hashes", h);
@@ -2248,6 +2263,119 @@ mod tests {
             envs.iter()
                 .any(|(k, v)| k == "KRB5CCNAME" && v == XFOREST_CCACHE),
             "KRB5CCNAME must export the ccache: {envs:?}"
+        );
+    }
+
+    #[test]
+    fn certipy_find_passes_dc_host_as_target_under_kerberos() {
+        let args = json!({
+            "username": "administrator", "domain": "fabrikam.local",
+            "dc_ip": "192.168.58.240", "dc_host": "dc01.fabrikam.local",
+            "ticket_path": XFOREST_CCACHE
+        });
+        let cmd = super::build_certipy_find_command(&args).unwrap().unwrap();
+        let a = cmd.args_for_test();
+        let target = a
+            .iter()
+            .position(|x| x == "-target")
+            .expect("expected -target: {a:?}");
+        assert_eq!(a[target + 1], "dc01.fabrikam.local");
+    }
+
+    #[test]
+    fn certipy_find_omits_target_without_dc_host() {
+        let args = json!({
+            "username": "administrator", "domain": "fabrikam.local",
+            "dc_ip": "192.168.58.240", "ticket_path": XFOREST_CCACHE
+        });
+        let cmd = super::build_certipy_find_command(&args).unwrap().unwrap();
+        assert!(cmd.args_for_test().iter().all(|x| x != "-target"));
+    }
+
+    #[test]
+    fn certipy_find_omits_target_on_password_path() {
+        let args = json!({
+            "username": "admin", "domain": "contoso.local",
+            "password": "P@ssw0rd!", "dc_ip": "192.168.58.240",
+            "dc_host": "dc01.contoso.local"
+        });
+        let cmd = super::build_certipy_find_command(&args).unwrap().unwrap();
+        assert!(cmd.args_for_test().iter().all(|x| x != "-target"));
+    }
+
+    #[test]
+    fn certipy_shadow_targets_dc_host_not_the_shadowed_account() {
+        let args = json!({
+            "username": "administrator", "domain": "fabrikam.local",
+            "target": "dc02$", "dc_ip": "192.168.58.240",
+            "dc_host": "dc01.fabrikam.local", "ticket_path": XFOREST_CCACHE
+        });
+        let cmd = super::build_certipy_shadow_command(&args).unwrap();
+        let a = cmd.args_for_test();
+        let target = a
+            .iter()
+            .position(|x| x == "-target")
+            .expect("expected -target");
+        assert_eq!(a[target + 1], "dc01.fabrikam.local");
+        let account = a
+            .iter()
+            .position(|x| x == "-account")
+            .expect("expected -account");
+        assert_eq!(a[account + 1], "dc02$");
+    }
+
+    #[test]
+    fn certipy_ccache_falls_back_when_no_rehomed_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let cc = dir
+            .path()
+            .join("contoso_local__fabrikam_local__Administrator.ccache");
+        std::fs::write(&cc, b"ccache").unwrap();
+        assert_eq!(
+            super::certipy_consumable_ccache(&cc.to_string_lossy()),
+            cc.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn certipy_ccache_prefers_rehomed_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let cc = dir
+            .path()
+            .join("contoso_local__fabrikam_local__Administrator.ccache");
+        std::fs::write(&cc, b"ccache").unwrap();
+        let rehomed = crate::privesc::trust::certipy_ccache_path_for(&cc);
+        std::fs::write(&rehomed, b"rehomed").unwrap();
+        assert_eq!(
+            super::certipy_consumable_ccache(&cc.to_string_lossy()),
+            rehomed.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn certipy_kerberos_env_points_at_rehomed_sibling_and_its_shim() {
+        let dir = tempfile::tempdir().unwrap();
+        let cc = dir
+            .path()
+            .join("contoso_local__fabrikam_local__Administrator.ccache");
+        std::fs::write(&cc, b"ccache").unwrap();
+        let rehomed = crate::privesc::trust::certipy_ccache_path_for(&cc);
+        std::fs::write(&rehomed, b"rehomed").unwrap();
+
+        let args = json!({
+            "username": "administrator", "domain": "fabrikam.local",
+            "dc_ip": "192.168.58.240", "ticket_path": cc.to_string_lossy()
+        });
+        let cmd = super::build_certipy_find_command(&args).unwrap().unwrap();
+        let envs = cmd.env_vars_for_test();
+        let ccname = envs.iter().find(|(k, _)| k == "KRB5CCNAME").unwrap();
+        let config = envs.iter().find(|(k, _)| k == "KRB5_CONFIG").unwrap();
+        assert_eq!(ccname.1, rehomed.to_string_lossy());
+        assert!(
+            config
+                .1
+                .starts_with(&format!("{}.krb5.conf:", rehomed.to_string_lossy())),
+            "KRB5_CONFIG must follow the sibling: {config:?}"
         );
     }
 

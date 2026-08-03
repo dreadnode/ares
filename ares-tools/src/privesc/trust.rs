@@ -224,6 +224,34 @@ pub async fn create_inter_realm_ticket(args: &Value) -> Result<ToolOutput> {
                         }
                     }
                 }
+
+                let certipy_ccache = certipy_ccache_path_for(&ccache_path);
+                let res = CommandBuilder::new("python3")
+                    .arg(helper_path.to_string_lossy().into_owned())
+                    .flag("--in-ccache", ccache_path.to_string_lossy().into_owned())
+                    .flag(
+                        "--out-ccache",
+                        certipy_ccache.to_string_lossy().into_owned(),
+                    )
+                    .flag("--target-realm", target_domain.to_uppercase())
+                    .arg("--rehome-realm")
+                    .current_dir(&ticket_dir)
+                    .timeout_secs(60)
+                    .execute()
+                    .await;
+                match res {
+                    Ok(rehome_out) => {
+                        output.stdout.push_str(&format!(
+                            "\n=== certipy ccache re-home ===\n{}\n{}\n",
+                            rehome_out.stdout, rehome_out.stderr
+                        ));
+                    }
+                    Err(e) => {
+                        output
+                            .stdout
+                            .push_str(&format!("\n[!] certipy ccache re-home errored: {e}\n"));
+                    }
+                }
             }
         }
     }
@@ -238,16 +266,24 @@ pub async fn create_inter_realm_ticket(args: &Value) -> Result<ToolOutput> {
     // /etc/krb5.conf`, so the shim only affects GSSAPI calls that carry
     // this ccache.
     if ccache_path.exists() {
-        let shim_path = krb5_shim_path_for(&ccache_path);
         let shim = build_krb5_shim(&[
             (source_domain.to_string(), source_domain.to_uppercase()),
             (target_domain.to_string(), target_domain.to_uppercase()),
         ]);
-        if let Err(e) = std::fs::write(&shim_path, shim) {
-            output.stdout.push_str(&format!(
-                "\n[!] failed to write krb5.conf shim at {}: {e}\n",
-                shim_path.display()
-            ));
+        let certipy_ccache = certipy_ccache_path_for(&ccache_path);
+        let shim_targets = [
+            Some(krb5_shim_path_for(&ccache_path)),
+            certipy_ccache
+                .exists()
+                .then(|| krb5_shim_path_for(&certipy_ccache)),
+        ];
+        for shim_path in shim_targets.into_iter().flatten() {
+            if let Err(e) = std::fs::write(&shim_path, &shim) {
+                output.stdout.push_str(&format!(
+                    "\n[!] failed to write krb5.conf shim at {}: {e}\n",
+                    shim_path.display()
+                ));
+            }
         }
     }
 
@@ -270,6 +306,12 @@ pub async fn create_inter_realm_ticket(args: &Value) -> Result<ToolOutput> {
 pub fn krb5_shim_path_for(ccache_path: &std::path::Path) -> std::path::PathBuf {
     let mut s = ccache_path.as_os_str().to_owned();
     s.push(".krb5.conf");
+    std::path::PathBuf::from(s)
+}
+
+pub fn certipy_ccache_path_for(ccache_path: &std::path::Path) -> std::path::PathBuf {
+    let mut s = ccache_path.as_os_str().to_owned();
+    s.push(".certipy");
     std::path::PathBuf::from(s)
 }
 
@@ -582,6 +624,31 @@ mod tests {
         assert_eq!(
             shim.to_string_lossy(),
             "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache.krb5.conf"
+        );
+    }
+
+    #[test]
+    fn certipy_ccache_path_appends_certipy_suffix() {
+        let cc = std::path::PathBuf::from(
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache",
+        );
+        let certipy = super::certipy_ccache_path_for(&cc);
+        assert_eq!(
+            certipy.to_string_lossy(),
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache.certipy"
+        );
+        assert_ne!(certipy.extension().and_then(|e| e.to_str()), Some("ccache"));
+    }
+
+    #[test]
+    fn certipy_ccache_gets_its_own_krb5_shim_path() {
+        let cc = std::path::PathBuf::from(
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache",
+        );
+        let shim = super::krb5_shim_path_for(&super::certipy_ccache_path_for(&cc));
+        assert_eq!(
+            shim.to_string_lossy(),
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache.certipy.krb5.conf"
         );
     }
 

@@ -41,6 +41,10 @@ pub fn certipy_shadow_definition() -> ToolDefinition {
                     "type": "string",
                     "description": "Target account to add shadow credentials to"
                 },
+                "dc_host": {
+                    "type": "string",
+                    "description": "DC fully-qualified name (e.g. dc01.contoso.local). Only consulted on the cross-forest Kerberos path, where certipy needs it to build the `ldap/<host>` SPN — an IP alone yields KDC_ERR_S_PRINCIPAL_UNKNOWN. Filled in automatically by the credential resolver when omitted."
+                },
                 "ticket_path": {
                     "type": "string",
                     "description": "Path to a forged inter-realm Kerberos ccache for a cross-forest shadow-credentials write. Injected automatically by the credential resolver when the target forest has no reusable credential; when present, certipy authenticates via `-k -no-pass` (KRB5CCNAME) and password/hash are ignored. Auth precedence: ticket_path > hashes > password."
@@ -77,6 +81,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "dc_ip": {
                         "type": "string",
                         "description": "Domain controller IP address"
+                    },
+                    "dc_host": {
+                        "type": "string",
+                        "description": "DC fully-qualified name (e.g. dc01.contoso.local). Only consulted on the cross-forest Kerberos path, where certipy needs it to build the `ldap/<host>` SPN — an IP alone yields KDC_ERR_S_PRINCIPAL_UNKNOWN. Filled in automatically by the credential resolver when omitted."
                     },
                     "hashes": {
                         "type": "string",

