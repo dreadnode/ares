@@ -292,13 +292,22 @@ pub(super) fn exploitation_techniques(vuln_id: &str) -> Vec<String> {
     if vuln_lower.contains("winrm") {
         techniques.push("T1021.006".to_string());
     }
-    if vuln_lower.contains("child_to_parent") || vuln_lower.contains("forest_trust") {
+    if vuln_lower.contains("child_to_parent")
+        || vuln_lower.contains("forest_trust")
+        || vuln_lower.contains("sid_history")
+    {
         techniques.push("T1134.005".to_string());
     }
-    if vuln_lower.contains("nopac") {
-        techniques.push("T1210".to_string());
+    if vuln_lower.contains("golden_ticket") {
+        techniques.push("T1558.001".to_string());
     }
-    if techniques.is_empty() {
+    if vuln_lower.contains("dc_secretsdump") {
+        techniques.push("T1003.006".to_string());
+    }
+    if vuln_lower.contains("ntlm_relay") {
+        techniques.push("T1557.001".to_string());
+    }
+    if vuln_lower.contains("nopac") {
         techniques.push("T1210".to_string());
     }
     techniques
@@ -464,7 +473,10 @@ mod tests {
     #[test]
     fn exploitation_techniques_base() {
         let t = exploitation_techniques("some_vuln");
-        assert!(t.contains(&"T1210".to_string()));
+        assert!(
+            t.is_empty(),
+            "an unclassified vuln must claim no technique at all: {t:?}"
+        );
     }
 
     #[test]
@@ -621,6 +633,10 @@ mod tests {
             "nopac_dc01",
             "child_to_parent_contoso_fabrikam",
             "forest_trust_contoso",
+            "sid_history_contoso",
+            "golden_ticket_contoso",
+            "dc_secretsdump_dc01",
+            "ntlm_relay_192.168.58.10",
             "some_unmapped_vuln",
         ] {
             for red in exploitation_techniques(vuln) {
@@ -657,9 +673,31 @@ mod tests {
     }
 
     #[test]
-    fn exploitation_techniques_unrecognized_vuln_falls_back_to_t1210() {
+    fn families_blue_actually_detects_keep_a_technique_after_the_fallback_dies() {
+        for (vuln, want) in [
+            ("golden_ticket_contoso", "T1558.001"),
+            ("dc_secretsdump_dc01", "T1003.006"),
+            ("ntlm_relay_192.168.58.10", "T1557.001"),
+            ("sid_history_contoso", "T1134.005"),
+        ] {
+            let t = exploitation_techniques(vuln);
+            assert!(
+                t.contains(&want.to_string()),
+                "{vuln} rode the T1210 fallback; blue has an exact rule for it, so dropping \
+                 the fallback must not leave it silent: want {want}, got {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognized_vuln_claims_no_technique_instead_of_t1210() {
         for vuln in ["zerologon_dc01", "printnightmare_web01", "some_vuln"] {
-            assert_eq!(exploitation_techniques(vuln), vec!["T1210".to_string()]);
+            let t = exploitation_techniques(vuln);
+            assert!(
+                t.is_empty(),
+                "{vuln} is unclassified, and emitting T1210 for it lets any blue rule \
+                 carrying T1210 claim coverage red never earned: {t:?}"
+            );
         }
     }
 }
