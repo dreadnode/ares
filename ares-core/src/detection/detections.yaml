@@ -581,6 +581,17 @@ templates:
 
   # ─── Lateral Movement (TA0008) ─────────────────────────────────────────────
 
+  detect_nopac_samaccountname_spoof:
+    description: "NoPac sAMAccountName Spoofing Detection (CVE-2021-42278/42287)"
+    mitre_id: "T1210"
+    tactic: lateral_movement
+    severity: critical
+    red_team_tool: nopac
+    auto_pivot: true
+    event_ids: ["4741", "4781", "5136"]
+    filter_stages:
+      - ['samaccountname', 'sam.account.name', 'oldtargetusername', 'newtargetusername']
+
   detect_pass_the_hash:
     description: "Pass-the-Hash Detection"
     mitre_id: "T1550.002"

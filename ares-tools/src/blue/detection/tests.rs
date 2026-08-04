@@ -632,3 +632,28 @@ fn escape_validator_catches_the_original_bug() {
         None
     );
 }
+
+#[test]
+fn nopac_template_carries_the_technique_red_records() {
+    let (_, entry) = ares_core::detection::find_template("detect_nopac_samaccountname_spoof")
+        .expect("detect_nopac_samaccountname_spoof must exist");
+    assert_eq!(
+        entry.mitre_id, "T1210",
+        "red records NoPac as T1210; coverage is an exact-or-parent/child join, so a \
+         sibling or a privesc ID would leave T1210 permanently missed"
+    );
+
+    let tmpl = build_detection_template("detect_nopac_samaccountname_spoof", None).unwrap();
+    for id in ["4741", "4781", "5136"] {
+        assert!(
+            tmpl.logql.contains(id),
+            "event id {id} must scope the query — 5136 alone is every directory write: {}",
+            tmpl.logql
+        );
+    }
+    assert!(
+        tmpl.logql.contains("samaccountname"),
+        "the sAMAccountName write is what separates NoPac from a routine domain join: {}",
+        tmpl.logql
+    );
+}
