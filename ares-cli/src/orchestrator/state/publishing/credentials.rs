@@ -25,6 +25,18 @@ fn is_valid_ntlm_hash_value(value: &str) -> bool {
     }
 }
 
+fn krbtgt_nt_half(hash: &Hash) -> Option<&str> {
+    if !hash.username.trim().eq_ignore_ascii_case("krbtgt")
+        || !hash.hash_type.to_lowercase().contains("ntlm")
+        || hash.domain.trim().is_empty()
+    {
+        return None;
+    }
+    let value = hash.hash_value.trim();
+    let nt = value.rsplit(':').next().unwrap_or(value);
+    is_hex32(nt).then_some(nt)
+}
+
 impl SharedState {
     /// Add a credential to state and Redis (with dedup).
     ///
@@ -189,6 +201,23 @@ impl SharedState {
                     domain = %hash.domain,
                     hash_len = v.len(),
                     "Dropping malformed NTLM hash (expected 32 hex chars or LM:NT)"
+                );
+                return Ok(false);
+            }
+        }
+
+        if let Some(incoming_nt) = krbtgt_nt_half(&hash) {
+            let state_read = self.inner.read().await;
+            if let Some(existing) = state_read.hashes.iter().find(|h| {
+                !h.domain.eq_ignore_ascii_case(&hash.domain)
+                    && krbtgt_nt_half(h).is_some_and(|nt| nt.eq_ignore_ascii_case(incoming_nt))
+            }) {
+                tracing::warn!(
+                    incoming_domain = %hash.domain,
+                    incoming_source = %hash.source,
+                    existing_domain = %existing.domain,
+                    existing_source = %existing.source,
+                    "Dropping krbtgt NTLM hash already held by another domain — a krbtgt secret is unique per domain, so the incoming label is misattributed"
                 );
                 return Ok(false);
             }
@@ -1126,6 +1155,109 @@ mod tests {
             "should not synthesize dc_secretsdump vuln when domain is unresolvable"
         );
         assert!(s.dominated_domains.is_empty());
+    }
+
+    const KRBTGT_NT_A: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90"; // pragma: allowlist secret
+    const KRBTGT_NT_B: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"; // pragma: allowlist secret
+
+    async fn state_with_domains(op_id: &str, domains: &[&str]) -> SharedState {
+        let state = SharedState::new(op_id.to_string());
+        {
+            let mut s = state.inner.write().await;
+            for d in domains {
+                s.domains.push((*d).to_string());
+            }
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_rejects_same_nt_half_under_a_second_domain() {
+        let state = state_with_domains("op-1", &["contoso.local", "child.contoso.local"]).await;
+        let q = mock_queue();
+
+        let real = make_hash("krbtgt", "contoso.local", "NTLM", KRBTGT_NT_A);
+        assert!(state.publish_hash(&q, real).await.unwrap());
+
+        let mut phantom = make_hash("krbtgt", "child.contoso.local", "NTLM", KRBTGT_NT_A);
+        phantom.source = "output_extraction".to_string();
+        assert!(
+            !state.publish_hash(&q, phantom).await.unwrap(),
+            "a krbtgt secret is unique per domain; the second label must be rejected"
+        );
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 1);
+        assert!(s.dominated_domains.contains("contoso.local"));
+        assert!(
+            !s.dominated_domains.contains("child.contoso.local"),
+            "misattributed krbtgt must not dominate a second domain"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_collision_detected_across_lm_nt_and_bare_nt_forms() {
+        let state = state_with_domains("op-1", &["contoso.local", "fabrikam.local"]).await;
+        let q = mock_queue();
+
+        let lm_nt = format!("aad3b435b51404eeaad3b435b51404ee:{KRBTGT_NT_A}");
+        let real = make_hash("krbtgt", "contoso.local", "NTLM", &lm_nt);
+        assert!(state.publish_hash(&q, real).await.unwrap());
+
+        let phantom = make_hash("krbtgt", "fabrikam.local", "NTLM", KRBTGT_NT_A);
+        assert!(!state.publish_hash(&q, phantom).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.dominated_domains.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_allows_distinct_values_per_domain() {
+        let state = state_with_domains("op-1", &["contoso.local", "child.contoso.local"]).await;
+        let q = mock_queue();
+
+        let root = make_hash("krbtgt", "contoso.local", "NTLM", KRBTGT_NT_A);
+        let child = make_hash("krbtgt", "child.contoso.local", "NTLM", KRBTGT_NT_B);
+        assert!(state.publish_hash(&q, root).await.unwrap());
+        assert!(state.publish_hash(&q, child).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 2);
+        assert!(s.dominated_domains.contains("contoso.local"));
+        assert!(s.dominated_domains.contains("child.contoso.local"));
+    }
+
+    #[tokio::test]
+    async fn publish_non_krbtgt_still_keeps_shared_hash_across_domains() {
+        let state = state_with_domains("op-1", &["contoso.local", "fabrikam.local"]).await;
+        let q = mock_queue();
+
+        let a = make_hash("Administrator", "contoso.local", "NTLM", KRBTGT_NT_A);
+        let b = make_hash("Administrator", "fabrikam.local", "NTLM", KRBTGT_NT_A);
+        assert!(state.publish_hash(&q, a).await.unwrap());
+        assert!(
+            state.publish_hash(&q, b).await.unwrap(),
+            "a reused local Administrator password across realms is a real finding"
+        );
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_without_domain_is_not_treated_as_a_collision() {
+        let state = state_with_domains("op-1", &["contoso.local"]).await;
+        let q = mock_queue();
+
+        let real = make_hash("krbtgt", "contoso.local", "NTLM", KRBTGT_NT_A);
+        assert!(state.publish_hash(&q, real).await.unwrap());
+
+        let unlabeled = make_hash("krbtgt", "", "NTLM", KRBTGT_NT_A);
+        state.publish_hash(&q, unlabeled).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.dominated_domains.contains("contoso.local"));
+        assert_eq!(s.dominated_domains.len(), 1);
     }
 
     #[tokio::test]
