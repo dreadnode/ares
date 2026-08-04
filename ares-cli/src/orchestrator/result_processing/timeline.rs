@@ -277,7 +277,7 @@ pub(super) fn exploitation_techniques(vuln_id: &str) -> Vec<String> {
     if vuln_lower.contains("mssql") {
         techniques.push("T1134".to_string());
     }
-    if vuln_lower.contains("esc1") || vuln_lower.contains("esc4") || vuln_lower.contains("esc8") {
+    if is_adcs_vuln(&vuln_lower) {
         techniques.push("T1649".to_string());
     }
     if vuln_lower.contains("rbcd") {
@@ -286,10 +286,35 @@ pub(super) fn exploitation_techniques(vuln_id: &str) -> Vec<String> {
     if vuln_lower.contains("smb_signing") {
         techniques.push("T1557.001".to_string());
     }
+    if vuln_lower.starts_with("acl_") || vuln_lower.contains("_acl_") {
+        techniques.push("T1098".to_string());
+    }
+    if vuln_lower.contains("winrm") {
+        techniques.push("T1021.006".to_string());
+    }
+    if vuln_lower.contains("child_to_parent") || vuln_lower.contains("forest_trust") {
+        techniques.push("T1134.005".to_string());
+    }
+    if vuln_lower.contains("nopac") {
+        techniques.push("T1210".to_string());
+    }
     if techniques.is_empty() {
         techniques.push("T1210".to_string());
     }
     techniques
+}
+
+fn is_adcs_vuln(vuln_lower: &str) -> bool {
+    if vuln_lower.contains("adcs")
+        || vuln_lower.contains("certificate")
+        || vuln_lower.contains("certipy")
+    {
+        return true;
+    }
+    vuln_lower
+        .split("esc")
+        .skip(1)
+        .any(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -477,6 +502,80 @@ mod tests {
     }
 
     #[test]
+    fn acl_edge_abuse_is_account_manipulation_not_the_fallback() {
+        for vuln in [
+            "acl_genericall_alice_dc01",
+            "acl_genericwrite_alice_domain admins",
+            "acl_writeproperty_alice_bob",
+            "acl_addmember_alice_ca01",
+            "acl_forcechangepassword_alice_bob",
+        ] {
+            let t = exploitation_techniques(vuln);
+            assert!(
+                t.contains(&"T1098".to_string()),
+                "{vuln} must map to T1098, which blue's delegation-abuse rule emits"
+            );
+            assert!(
+                !t.contains(&"T1210".to_string()),
+                "{vuln} must not land in the unclassified bucket: {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_esc_number_is_adcs_not_the_fallback() {
+        for vuln in [
+            "adcs_esc9__esc9",
+            "esc3_template",
+            "esc13_template",
+            "esc16_template",
+            "certificate_obtained_dc01",
+        ] {
+            let t = exploitation_techniques(vuln);
+            assert!(
+                t.contains(&"T1649".to_string()),
+                "{vuln} must map to T1649: {t:?}"
+            );
+            assert!(!t.contains(&"T1210".to_string()), "{vuln} -> {t:?}");
+        }
+    }
+
+    #[test]
+    fn escalate_is_not_mistaken_for_an_esc_template() {
+        let t = exploitation_techniques("escalate_local_admin");
+        assert!(
+            !t.contains(&"T1649".to_string()),
+            "the esc<N> probe must require a digit, not match the word 'escalate': {t:?}"
+        );
+    }
+
+    #[test]
+    fn winrm_access_is_remote_management_not_the_fallback() {
+        let t = exploitation_techniques("winrm_access_192.168.58.10");
+        assert!(t.contains(&"T1021.006".to_string()), "{t:?}");
+        assert!(!t.contains(&"T1210".to_string()), "{t:?}");
+    }
+
+    #[test]
+    fn nopac_keeps_t1210_so_the_id_still_means_exploitation() {
+        let t = exploitation_techniques("nopac_dc01");
+        assert!(
+            t.contains(&"T1210".to_string()),
+            "NoPac is genuine remote-service exploitation, so T1210 here is a real \
+             claim rather than the unclassified fallback: {t:?}"
+        );
+    }
+
+    #[test]
+    fn cross_domain_trust_abuse_is_sid_history() {
+        for vuln in ["child_to_parent_contoso_fabrikam", "forest_trust_contoso"] {
+            let t = exploitation_techniques(vuln);
+            assert!(t.contains(&"T1134.005".to_string()), "{vuln} -> {t:?}");
+            assert!(!t.contains(&"T1210".to_string()), "{vuln} -> {t:?}");
+        }
+    }
+
+    #[test]
     fn exploitation_techniques_smb_signing() {
         let t = exploitation_techniques("smb_signing_disabled_192.168.58.10");
         assert!(t.contains(&"T1557.001".to_string()));
@@ -514,6 +613,14 @@ mod tests {
             "esc8_ca01",
             "rbcd_dc01",
             "smb_signing_disabled_192.168.58.10",
+            "acl_genericall_alice_dc01",
+            "acl_forcechangepassword_alice_bob",
+            "adcs_esc9__esc9",
+            "certificate_obtained_dc01",
+            "winrm_access_192.168.58.10",
+            "nopac_dc01",
+            "child_to_parent_contoso_fabrikam",
+            "forest_trust_contoso",
             "some_unmapped_vuln",
         ] {
             for red in exploitation_techniques(vuln) {
