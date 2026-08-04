@@ -720,3 +720,46 @@ fn shadow_credentials_template_covers_the_key_credential_attribute() {
     );
     assert!(tmpl.logql.contains("keycredential"), "{}", tmpl.logql);
 }
+
+#[test]
+fn coercion_template_keys_on_victim_telemetry_not_attacker_tool_names() {
+    let tmpl = build_detection_template("detect_ntlm_relay", None).unwrap();
+    assert!(tmpl.logql.contains("5145"), "{}", tmpl.logql);
+    for pipe in ["efsrpc", "netdfs", "spoolss"] {
+        assert!(
+            tmpl.logql.contains(pipe),
+            "coercion is observable as a named-pipe bind on the victim; {pipe} missing: {}",
+            tmpl.logql
+        );
+    }
+    for tool in ["ntlmrelayx", "smbrelay", "responder", "inveigh"] {
+        assert!(
+            !tmpl.logql.contains(tool),
+            "a victim's Security log never contains the attacker's tool name, so keying \
+             on {tool} made this template unfireable: {}",
+            tmpl.logql
+        );
+    }
+    assert!(
+        !tmpl.logql.contains("lsarpc") && !tmpl.logql.contains("samr"),
+        "lsarpc/samr binds are ordinary domain traffic and swamp the coercion pipes: {}",
+        tmpl.logql
+    );
+}
+
+#[test]
+fn coercion_template_covers_the_relay_subtechnique_by_parent_match() {
+    let (_, entry) = ares_core::detection::find_template("detect_ntlm_relay").expect("must exist");
+    assert_eq!(
+        entry.mitre_id, "T1557",
+        "red emits T1557 for coercion and T1557.001 for smb_signing; the base ID covers \
+         both because the join matches a sub-technique against its parent"
+    );
+    assert!(
+        ares_core::correlation::redblue::RedBlueCorrelator::techniques_match(
+            Some("T1557.001"),
+            Some(&entry.mitre_id),
+        ),
+        "T1557.001 must resolve against this template"
+    );
+}

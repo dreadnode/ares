@@ -559,15 +559,16 @@ templates:
       - ['groups\.xml', 'scheduledtasks\.xml', 'services\.xml', 'datasources\.xml', 'drives\.xml', 'printers\.xml', 'cpassword', 'unattend\.xml', 'sysprep\.inf', 'defaultpassword', 'autologon', 'credman']
 
   detect_ntlm_relay:
-    description: "NTLM Relay Attack Detection"
+    description: "Authentication Coercion Detection (PetitPotam / PrinterBug / DFSCoerce)"
     mitre_id: "T1557"
     tactic: credential_access
-    severity: high
+    severity: critical
     connection_types: [ntlm_relay]
-    red_team_tool: ntlmrelayx
+    red_team_tool: coercer
+    auto_pivot: true
+    event_ids: ["5145"]
     filter_stages:
-      - ['ntlm', 'relay', 'responder', 'inveigh']
-      - ['ntlmrelayx', 'smbrelay', 'signing.*not.*required', 'coerce']
+      - ['efsrpc', 'netdfs', 'spoolss']
 
   detect_certificate_authentication:
     description: "Certificate-Based Authentication Detection"
