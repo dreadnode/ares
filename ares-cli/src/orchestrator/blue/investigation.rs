@@ -396,6 +396,14 @@ pub async fn run_investigation(
         .await
         .ok();
 
+    if let InvestigationOutcome::Escalated { reason, .. } = &investigation_outcome {
+        investigation
+            .state_writer
+            .set_escalation(conn, reason)
+            .await
+            .ok();
+    }
+
     // Release investigation lock
     investigation.state_writer.release_lock(conn).await.ok();
 

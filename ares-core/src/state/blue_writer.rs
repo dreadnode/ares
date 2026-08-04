@@ -290,6 +290,21 @@ impl BlueStateWriter {
         Ok(())
     }
 
+    pub async fn set_escalation(
+        &self,
+        conn: &mut impl AsyncCommands,
+        reason: &str,
+    ) -> Result<(), redis::RedisError> {
+        self.set_meta(conn, "escalated", &serde_json::Value::Bool(true))
+            .await?;
+        self.set_meta(
+            conn,
+            "escalation_reason",
+            &serde_json::Value::String(reason.to_string()),
+        )
+        .await
+    }
+
     /// Initialize investigation metadata.
     ///
     /// Sets alert, stage, started_at in the meta HASH.
@@ -809,6 +824,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(raw.as_deref(), Some("true"));
+    }
+
+    #[tokio::test]
+    async fn set_escalation_writes_fields_the_reader_surfaces() {
+        let mut conn = MockRedisConnection::new();
+        let w = make_writer();
+
+        w.set_escalation(&mut conn, "krbtgt extracted, forest compromise imminent")
+            .await
+            .unwrap();
+
+        let key = w.key(BLUE_KEY_META);
+        let escalated: Option<String> = redis::AsyncCommands::hget(&mut conn, &key, "escalated")
+            .await
+            .unwrap();
+        assert_eq!(
+            escalated.as_deref(),
+            Some("true"),
+            "reports count escalations off meta.escalated, not the status string"
+        );
+
+        let reason: Option<String> =
+            redis::AsyncCommands::hget(&mut conn, &key, "escalation_reason")
+                .await
+                .unwrap();
+        assert_eq!(
+            reason.as_deref(),
+            Some("\"krbtgt extracted, forest compromise imminent\""),
+        );
     }
 
     #[tokio::test]
