@@ -152,6 +152,20 @@ pub(super) static TECHNIQUES: LazyLock<HashMap<&'static str, Technique>> = LazyL
         detection: "Monitor for account modification events: Event 4738 (user account changed), Event 4728/4732 (member added to security group), Event 4720 (account created). Watch for SPN modification on user accounts and delegation flag changes.",
     });
 
+    m.insert("T1556", Technique {
+        name: "Modify Authentication Process",
+        description: "Adversaries may modify authentication mechanisms and processes to access user credentials or enable otherwise unwarranted access to accounts.",
+        tactics: &["Credential Access", "Defense Evasion", "Persistence"],
+        detection: "Monitor Event 5136 (directory service object modified) for writes to authentication-related attributes. Correlate an attribute write against an account with a subsequent certificate-based logon (Event 4768 with a certificate issuer) for that same account.",
+    });
+
+    m.insert("T1556.006", Technique {
+        name: "Multi-Factor Authentication",
+        description: "Adversaries may write msDS-KeyCredentialLink on a target account (Shadow Credentials), registering attacker-controlled key material so they can request a TGT as that account via PKINIT without knowing its password.",
+        tactics: &["Credential Access", "Defense Evasion", "Persistence"],
+        detection: "Monitor Event 5136 where AttributeLDAPDisplayName is msDS-KeyCredentialLink, especially on privileged targets (krbtgt, Administrator, domain controller computer objects). Writes performed by a principal that is not the account owner, or on accounts not enrolled in Windows Hello for Business, are the strongest signal.",
+    });
+
     m.insert("T1110", Technique {
         name: "Brute Force",
         description: "Adversaries may use brute force techniques to gain access to accounts when passwords are unknown or when password hashes are obtained. This includes password spraying, credential stuffing, and online brute force.",

@@ -35,6 +35,9 @@ T1558.002: { name: "Silver Ticket", tactic: "Credential Access" }
 T1558.003: { name: "Kerberoasting", tactic: "Credential Access" }
 T1558.004: { name: "AS-REP Roasting", tactic: "Credential Access" }
 
+T1556: { name: "Modify Authentication Process", tactic: "Credential Access" }
+T1556.006: { name: "Multi-Factor Authentication", tactic: "Credential Access" }
+
 T1649: { name: "Steal or Forge Authentication Certificates", tactic: "Credential Access" }
 
 # Discovery (TA0007)
