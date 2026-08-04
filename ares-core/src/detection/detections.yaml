@@ -588,7 +588,7 @@ templates:
     severity: critical
     red_team_tool: nopac
     auto_pivot: true
-    event_ids: ["4741", "4781", "5136"]
+    event_ids: ["4781", "5136"]
     filter_stages:
       - ['samaccountname', 'sam.account.name', 'oldtargetusername', 'newtargetusername']
 

@@ -644,16 +644,24 @@ fn nopac_template_carries_the_technique_red_records() {
     );
 
     let tmpl = build_detection_template("detect_nopac_samaccountname_spoof", None).unwrap();
-    for id in ["4741", "4781", "5136"] {
+    for id in ["4781", "5136"] {
         assert!(
             tmpl.logql.contains(id),
-            "event id {id} must scope the query — 5136 alone is every directory write: {}",
+            "event id {id} carries the rename that defines NoPac: {}",
             tmpl.logql
         );
     }
     assert!(
+        !tmpl.logql.contains("4741"),
+        "4741 is every computer-account creation, including the ones ares makes for its own \
+         RBCD and ADCS work, and it carries a SamAccountName field so the filter stage cannot \
+         narrow it: {}",
+        tmpl.logql
+    );
+    assert!(
         tmpl.logql.contains("samaccountname"),
-        "the sAMAccountName write is what separates NoPac from a routine domain join: {}",
+        "5136 must stay pinned to the sAMAccountName attribute or it matches the \
+         msDS-AllowedToActOnBehalfOfOtherIdentity write that RBCD already owns: {}",
         tmpl.logql
     );
 }
