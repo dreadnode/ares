@@ -274,7 +274,9 @@ pub(super) fn exploitation_techniques(vuln_id: &str) -> Vec<String> {
     } else if vuln_lower.contains("constrained_delegation") {
         techniques.push("T1558.003".to_string());
     }
-    if vuln_lower.contains("mssql") {
+    if vuln_lower.contains("coerce") {
+        techniques.push("T1557".to_string());
+    } else if vuln_lower.contains("mssql") {
         techniques.push("T1134".to_string());
     }
     if is_adcs_vuln(&vuln_lower) {
@@ -486,6 +488,20 @@ mod tests {
     }
 
     #[test]
+    fn mssql_coercion_is_forced_auth_not_token_manipulation() {
+        let t = exploitation_techniques("mssql_ntlm_coerce_192_168_58_51_192_168_58_1");
+        assert!(
+            t.contains(&"T1557".to_string()),
+            "coercing NTLM off a SQL host is what detect_ntlm_relay watches for: {t:?}"
+        );
+        assert!(
+            !t.contains(&"T1134".to_string()),
+            "an MSSQL impersonation alert must not credit coverage for a coercion vuln \
+             just because the id starts with mssql_: {t:?}"
+        );
+    }
+
+    #[test]
     fn exploitation_techniques_mssql() {
         let t = exploitation_techniques("mssql_impersonation_sql01");
         assert!(t.contains(&"T1134".to_string()));
@@ -637,6 +653,7 @@ mod tests {
             "golden_ticket_contoso",
             "dc_secretsdump_dc01",
             "ntlm_relay_192.168.58.10",
+            "mssql_ntlm_coerce_192_168_58_51_192_168_58_1",
             "some_unmapped_vuln",
         ] {
             for red in exploitation_techniques(vuln) {
