@@ -52,6 +52,8 @@ pub struct OrchestratorConfig {
     /// reaper is a true backstop, not a premature killer.
     pub non_llm_task_timeout: Duration,
 
+    pub task_hard_timeout: Duration,
+
     /// Maximum age for deferred tasks before eviction (seconds).
     pub deferred_task_max_age: Duration,
 
@@ -78,6 +80,10 @@ pub struct OrchestratorConfig {
     /// Resolved from `ARES_LISTENER_IP` env var, or auto-detected via UDP socket
     /// probe toward the first target IP.
     pub listener_ip: Option<String>,
+}
+
+fn clamp_task_hard_timeout(requested_secs: u64, non_llm_task_timeout_secs: u64) -> u64 {
+    requested_secs.max(non_llm_task_timeout_secs.saturating_add(1))
 }
 
 /// A credential provided at operation launch time.
@@ -210,6 +216,10 @@ impl OrchestratorConfig {
         // Above DEFAULT_TOOL_TIMEOUT_SECS (5700) so the dispatcher's own result
         // — success or timeout-failure — always lands before this backstop fires.
         let non_llm_task_timeout_secs = parse_env("ARES_NON_LLM_TASK_TIMEOUT_SECS", 6000);
+        let task_hard_timeout_secs = clamp_task_hard_timeout(
+            parse_env("ARES_TASK_HARD_TIMEOUT_SECS", 7200u64),
+            non_llm_task_timeout_secs,
+        );
         let deferred_task_max_age_secs = parse_env("ARES_DEFERRED_TASK_MAX_AGE_SECS", 300);
         let max_deferred_per_type = parse_env("ARES_MAX_DEFERRED_PER_TYPE", 50);
         let max_deferred_total = parse_env("ARES_MAX_DEFERRED_TOTAL", 200);
@@ -228,6 +238,7 @@ impl OrchestratorConfig {
             dispatch_delay: Duration::from_millis(dispatch_delay_ms),
             stale_task_timeout: Duration::from_secs(stale_task_timeout_secs),
             non_llm_task_timeout: Duration::from_secs(non_llm_task_timeout_secs),
+            task_hard_timeout: Duration::from_secs(task_hard_timeout_secs),
             deferred_task_max_age: Duration::from_secs(deferred_task_max_age_secs),
             max_deferred_per_type,
             max_deferred_total,
@@ -383,6 +394,7 @@ mod tests {
             dispatch_delay: Duration::from_millis(0),
             stale_task_timeout: Duration::from_secs(900),
             non_llm_task_timeout: Duration::from_secs(6000),
+            task_hard_timeout: Duration::from_secs(7200),
             deferred_task_max_age: Duration::from_secs(300),
             max_deferred_per_type: 50,
             max_deferred_total: 200,
@@ -581,5 +593,22 @@ mod tests {
         assert!(cfg.initial_credential.is_none());
         // Default strategy should be Fast
         assert!(!cfg.strategy.should_continue_after_da());
+    }
+
+    #[test]
+    fn task_hard_timeout_is_raised_above_the_reaper_when_set_too_low() {
+        assert_eq!(clamp_task_hard_timeout(60, 6000), 6001);
+        assert_eq!(clamp_task_hard_timeout(6000, 6000), 6001);
+    }
+
+    #[test]
+    fn task_hard_timeout_is_left_alone_when_already_above_the_reaper() {
+        assert_eq!(clamp_task_hard_timeout(7200, 6000), 7200);
+        assert_eq!(clamp_task_hard_timeout(u64::MAX, 6000), u64::MAX);
+    }
+
+    #[test]
+    fn task_hard_timeout_clamp_cannot_overflow() {
+        assert_eq!(clamp_task_hard_timeout(0, u64::MAX), u64::MAX);
     }
 }

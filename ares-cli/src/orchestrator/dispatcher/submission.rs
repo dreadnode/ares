@@ -329,6 +329,7 @@ impl Dispatcher {
                 role: target_role.to_string(),
                 submitted_at: std::time::Instant::now(),
                 credential_key: cred_key.clone(),
+                abort: None,
             })
             .await;
 
@@ -402,8 +403,28 @@ impl Dispatcher {
         // spawn can record on RequestAssistance without re-resolving them.
         let state_for_assist = self.state.clone();
         let assist_key_for_spawn = assist_pattern_key(&tt, &payload);
-        tokio::spawn(async move {
-            let outcome = runner.execute_task(&tt, &tid, role, &payload).await;
+        let task_hard_timeout = self.config.task_hard_timeout;
+        let spawned = tokio::spawn(async move {
+            let outcome = match tokio::time::timeout(
+                task_hard_timeout,
+                runner.execute_task(&tt, &tid, role, &payload),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    tracing::error!(
+                        task_id = %tid,
+                        task_type = %tt,
+                        timeout_secs = task_hard_timeout.as_secs(),
+                        "Task exceeded its hard wall-clock ceiling — aborting so it cannot block the operation indefinitely"
+                    );
+                    Err(anyhow::anyhow!(
+                        "task exceeded hard timeout of {}s",
+                        task_hard_timeout.as_secs()
+                    ))
+                }
+            };
 
             // Token usage is now recorded incrementally per-LLM-call via
             // CallbackHandler::on_token_usage — no batch recording needed here.
@@ -639,6 +660,10 @@ impl Dispatcher {
                 );
             }
         });
+
+        self.tracker
+            .set_abort(&task_id, spawned.abort_handle())
+            .await;
 
         Ok(SubmissionOutcome::Submitted(task_id))
     }

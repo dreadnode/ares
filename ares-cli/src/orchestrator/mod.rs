@@ -678,7 +678,7 @@ async fn run_inner() -> Result<()> {
     // lock expiry even if heartbeat sweeps or Redis calls hang.
     let lock_handle = spawn_lock_keeper(queue.clone(), config.clone(), shutdown_rx.clone());
 
-    let hb_handle = spawn_heartbeat_monitor(
+    let mut hb_handle = spawn_heartbeat_monitor(
         queue.clone(),
         registry.clone(),
         tracker.clone(),
@@ -1001,6 +1001,19 @@ async fn run_inner() -> Result<()> {
 
             // Poll for remote stop signal from `ares ops stop`
             _ = stop_check.tick() => {
+                if hb_handle.is_finished() {
+                    error!("Heartbeat monitor exited unexpectedly — stale-task reaping is down, restarting");
+                    hb_handle = spawn_heartbeat_monitor(
+                        queue.clone(),
+                        registry.clone(),
+                        tracker.clone(),
+                        dispatcher.credential_inflight.clone(),
+                        shared_state.clone(),
+                        config.clone(),
+                        shutdown_rx.clone(),
+                    );
+                }
+
                 let mut conn = queue.connection();
                 match ares_core::state::is_stop_requested(&mut conn, &config.operation_id).await {
                     Ok(true) => {

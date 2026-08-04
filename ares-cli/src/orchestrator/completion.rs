@@ -17,7 +17,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use redis::AsyncCommands;
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::SharedState;
@@ -441,6 +441,23 @@ pub(crate) fn evaluate_completion(
     }
 }
 
+async fn snapshot_unless_hard_capped(
+    state: &SharedState,
+    elapsed: Duration,
+    hard_max_runtime: Duration,
+) -> Option<(bool, bool, bool, Option<Duration>)> {
+    if elapsed >= hard_max_runtime {
+        return None;
+    }
+    let inner = state.read().await;
+    Some((
+        inner.has_domain_admin,
+        inner.has_golden_ticket,
+        inner.completed,
+        inner.all_forests_dominated_at.map(|t| t.elapsed()),
+    ))
+}
+
 pub async fn wait_for_completion(
     state: &SharedState,
     dispatcher: &Arc<Dispatcher>,
@@ -484,14 +501,22 @@ pub async fn wait_for_completion(
         }
 
         let elapsed = start.elapsed();
-        let (has_da, has_gt, completed, all_dominated_for) = {
-            let inner = state.read().await;
-            (
-                inner.has_domain_admin,
-                inner.has_golden_ticket,
-                inner.completed,
-                inner.all_forests_dominated_at.map(|t| t.elapsed()),
+
+        let Some((has_da, has_gt, completed, all_dominated_for)) =
+            snapshot_unless_hard_capped(state, elapsed, hard_max_runtime).await
+        else {
+            error!(
+                elapsed_secs = elapsed.as_secs(),
+                hard_max_runtime_secs = hard_max_runtime.as_secs(),
+                "Hard max runtime exceeded — stopping operation without reading shared state"
+            );
+            ares_core::state::request_stop_operation(
+                &mut dispatcher.queue.connection(),
+                &dispatcher.config.operation_id,
             )
+            .await
+            .unwrap_or_else(|e| warn!(err = %e, "Failed to signal stop after hard cap"));
+            return;
         };
 
         // The grace-period check needs to know whether ALL forests are dominated.
@@ -1881,6 +1906,42 @@ mod tests {
                 three_min(),
             ),
             CompletionDecision::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_cap_fires_while_shared_state_is_locked() {
+        let state = SharedState::new("op-wedged".to_string());
+        let _held = state.write().await;
+
+        let decided = tokio::time::timeout(
+            Duration::from_secs(2),
+            snapshot_unless_hard_capped(
+                &state,
+                Duration::from_secs(7201),
+                Duration::from_secs(7200),
+            ),
+        )
+        .await
+        .expect("hard-cap check must not block on the state lock");
+
+        assert!(decided.is_none(), "blown cap must short-circuit the read");
+    }
+
+    #[tokio::test]
+    async fn under_the_cap_the_snapshot_still_waits_for_the_lock() {
+        let state = SharedState::new("op-wedged".to_string());
+        let _held = state.write().await;
+
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(250),
+            snapshot_unless_hard_capped(&state, Duration::from_secs(1), Duration::from_secs(7200)),
+        )
+        .await;
+
+        assert!(
+            blocked.is_err(),
+            "a held write lock must block the read path"
         );
     }
 

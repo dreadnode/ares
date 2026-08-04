@@ -22,6 +22,7 @@ pub struct ActiveTask {
     /// and every subsequent task with the same credential gets deferred
     /// forever.
     pub credential_key: Option<String>,
+    pub abort: Option<tokio::task::AbortHandle>,
 }
 
 /// Thread-safe tracker for all in-flight tasks.
@@ -56,6 +57,13 @@ impl ActiveTaskTracker {
         let mut inner = self.inner.lock().await;
         *inner.role_counts.entry(task.role.clone()).or_insert(0) += 1;
         inner.tasks.insert(task.task_id.clone(), task);
+    }
+
+    pub async fn set_abort(&self, task_id: &str, abort: tokio::task::AbortHandle) {
+        let mut inner = self.inner.lock().await;
+        if let Some(task) = inner.tasks.get_mut(task_id) {
+            task.abort = Some(abort);
+        }
     }
 
     /// Remove a completed/failed task. Returns the task if it was tracked.
@@ -145,6 +153,7 @@ mod tests {
                 role: "recon".into(),
                 submitted_at: std::time::Instant::now(),
                 credential_key: None,
+                abort: None,
             })
             .await;
 
@@ -181,6 +190,7 @@ mod tests {
                     role: role.into(),
                     submitted_at: std::time::Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -200,6 +210,7 @@ mod tests {
                 role: "recon".into(),
                 submitted_at: std::time::Instant::now() - std::time::Duration::from_secs(120),
                 credential_key: None,
+                abort: None,
             })
             .await;
 
@@ -210,6 +221,7 @@ mod tests {
                 role: "recon".into(),
                 submitted_at: std::time::Instant::now(),
                 credential_key: None,
+                abort: None,
             })
             .await;
 
@@ -230,6 +242,7 @@ mod tests {
                 role: "recon".into(),
                 submitted_at: std::time::Instant::now(),
                 credential_key: None,
+                abort: None,
             })
             .await;
         tracker
@@ -239,6 +252,7 @@ mod tests {
                 role: "privesc".into(),
                 submitted_at: std::time::Instant::now(),
                 credential_key: None,
+                abort: None,
             })
             .await;
 
@@ -258,6 +272,7 @@ mod tests {
                 role: "recon".into(),
                 submitted_at: std::time::Instant::now(),
                 credential_key: None,
+                abort: None,
             })
             .await;
         tracker.remove("t1").await;

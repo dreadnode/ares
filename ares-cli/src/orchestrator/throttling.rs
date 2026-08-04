@@ -317,6 +317,7 @@ mod tests {
             dispatch_delay: std::time::Duration::from_millis(0),
             stale_task_timeout: std::time::Duration::from_secs(300),
             non_llm_task_timeout: std::time::Duration::from_secs(6000),
+            task_hard_timeout: std::time::Duration::from_secs(7200),
             deferred_task_max_age: std::time::Duration::from_secs(300),
             max_deferred_per_type: 5,
             max_deferred_total: 20,
@@ -363,6 +364,7 @@ mod tests {
                     role: "recon".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -383,6 +385,7 @@ mod tests {
                     role: "recon".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -404,6 +407,7 @@ mod tests {
                     role: "recon".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -426,6 +430,7 @@ mod tests {
                     role: "recon".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -449,6 +454,7 @@ mod tests {
                     role: "recon".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -475,6 +481,7 @@ mod tests {
                     role: "privesc".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -498,6 +505,7 @@ mod tests {
                     role: "privesc".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }

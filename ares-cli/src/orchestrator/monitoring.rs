@@ -252,28 +252,31 @@ pub fn spawn_heartbeat_monitor(
                 }
             }
 
-            if let Err(e) = run_heartbeat_sweep(&queue, &registry, &config).await {
-                consecutive_failures += 1;
-                warn!(
-                    attempt = consecutive_failures,
-                    err = %e,
-                    "Heartbeat sweep failed"
-                );
-                // Exponential backoff on repeated failures
-                let delay = std::time::Duration::from_secs(std::cmp::min(
-                    15,
-                    (consecutive_failures as u64) * 5,
-                ));
-                tokio::time::sleep(delay).await;
-                continue;
+            match run_heartbeat_sweep(&queue, &registry, &config).await {
+                Err(e) => {
+                    consecutive_failures += 1;
+                    warn!(
+                        attempt = consecutive_failures,
+                        err = %e,
+                        "Heartbeat sweep failed"
+                    );
+                }
+                Ok(()) => consecutive_failures = 0,
             }
-            consecutive_failures = 0;
 
             // Clean up stale tasks (salvage any pending results first)
             if let Err(e) =
                 cleanup_stale_tasks(&tracker, &queue, &credential_inflight, &state, &config).await
             {
                 warn!(err = %e, "Stale task cleanup failed");
+            }
+
+            if consecutive_failures > 0 {
+                let delay = std::time::Duration::from_secs(std::cmp::min(
+                    15,
+                    (consecutive_failures as u64) * 5,
+                ));
+                tokio::time::sleep(delay).await;
             }
         }
     })
@@ -336,6 +339,18 @@ fn stale_threshold_for(
     }
 }
 
+async fn release_reaped_task(
+    reaped: &crate::orchestrator::routing::ActiveTask,
+    credential_inflight: &CredentialInflight,
+) {
+    if let Some(ref key) = reaped.credential_key {
+        credential_inflight.release(key).await;
+    }
+    if let Some(ref abort) = reaped.abort {
+        abort.abort();
+    }
+}
+
 /// Remove tasks that have been active longer than the configured stale timeout.
 async fn cleanup_stale_tasks(
     tracker: &ActiveTaskTracker,
@@ -385,9 +400,7 @@ async fn cleanup_stale_tasks(
         // every subsequent task with the same credential gets deferred
         // until the future eventually returns.
         if let Some(removed) = tracker.remove(&task.task_id).await {
-            if let Some(ref key) = removed.credential_key {
-                credential_inflight.release(key).await;
-            }
+            release_reaped_task(&removed, credential_inflight).await;
         }
 
         let age_secs = task.submitted_at.elapsed().as_secs();
@@ -627,6 +640,50 @@ mod tests {
 
         assert!(age < stale_threshold_for("crack", llm, non_llm));
         assert!(age >= stale_threshold_for("recon", llm, non_llm));
+    }
+
+    #[tokio::test]
+    async fn reaping_an_active_task_aborts_its_spawned_future() {
+        let tracker = ActiveTaskTracker::new();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let spawned = tokio::spawn(async move {
+            let _ = rx.await;
+        });
+
+        tracker
+            .add(crate::orchestrator::routing::ActiveTask {
+                task_id: "hung".into(),
+                task_type: "recon".into(),
+                role: "recon".into(),
+                submitted_at: std::time::Instant::now(),
+                credential_key: None,
+                abort: None,
+            })
+            .await;
+        tracker.set_abort("hung", spawned.abort_handle()).await;
+
+        let removed = tracker.remove("hung").await.expect("task was tracked");
+        release_reaped_task(&removed, &CredentialInflight::new(1)).await;
+
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
+            .await
+            .expect("reaped task's future must stop promptly, not outlive the reap");
+        assert!(
+            joined.is_err_and(|e| e.is_cancelled()),
+            "reaped task's future must actually stop, not merely detach"
+        );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn set_abort_on_an_already_removed_task_is_a_noop() {
+        let tracker = ActiveTaskTracker::new();
+        let spawned = tokio::spawn(async {});
+        tracker
+            .set_abort("never-tracked", spawned.abort_handle())
+            .await;
+        assert_eq!(tracker.total().await, 0);
+        let _ = spawned.await;
     }
 
     #[tokio::test]
