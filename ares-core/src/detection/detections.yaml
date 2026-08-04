@@ -262,7 +262,7 @@ templates:
 
   detect_mssql_linked_server:
     description: "MSSQL Linked Server Exploitation Detection"
-    mitre_id: "T1210"
+    mitre_id: "T1134"
     tactic: lateral_movement
     severity: critical
     connection_types: [mssql]

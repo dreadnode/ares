@@ -144,7 +144,7 @@ pub fn mitre_for_connection_type(conn_type: &str) -> Option<&'static str> {
         m.entry("ssh").or_insert("T1021.004");
         m.entry("dcom").or_insert("T1021.003");
         m.entry("scheduled_task").or_insert("T1053.005");
-        m.entry("mssql").or_insert("T1210");
+        m.entry("mssql").or_insert("T1134");
         m.entry("constrained_delegation").or_insert("T1550.003");
         m.entry("ntlm_relay").or_insert("T1557");
 
