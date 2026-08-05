@@ -16,6 +16,27 @@ pub(crate) fn format_duration(seconds: u64) -> String {
     }
 }
 
+/// Wait for SIGTERM or SIGINT (Ctrl-C).
+pub(crate) async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM");
+        let mut sigint = signal(SignalKind::interrupt()).expect("failed to register SIGINT");
+        tokio::select! {
+            _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
+            _ = sigint.recv() => tracing::info!("Received SIGINT"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to register Ctrl-C handler");
+        tracing::info!("Received Ctrl-C");
+    }
+}
+
 #[cfg(feature = "blue")]
 pub(crate) fn parse_datetime(s: &str) -> Result<DateTime<Utc>> {
     let fixed = s.replace('Z', "+00:00");

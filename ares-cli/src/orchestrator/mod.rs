@@ -41,7 +41,6 @@ mod tool_dispatcher;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::signal;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
@@ -970,6 +969,12 @@ async fn run_inner() -> Result<()> {
     let mut stop_check = tokio::time::interval(std::time::Duration::from_secs(5));
     stop_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel::<()>(1);
+    tokio::spawn(async move {
+        crate::util::wait_for_shutdown_signal().await;
+        let _ = signal_tx.send(()).await;
+    });
+
     loop {
         tokio::select! {
             // Process completed task results
@@ -1028,7 +1033,7 @@ async fn run_inner() -> Result<()> {
             }
 
             // Graceful shutdown on SIGTERM / SIGINT
-            _ = signal::ctrl_c() => {
+            _ = signal_rx.recv() => {
                 info!("Shutdown signal received");
                 break;
             }
@@ -1463,7 +1468,7 @@ async fn run_blue_only() -> Result<()> {
     );
 
     // Wait for shutdown signal
-    signal::ctrl_c().await?;
+    crate::util::wait_for_shutdown_signal().await;
     info!("Shutdown signal received");
     let _ = shutdown_tx.send(true);
 

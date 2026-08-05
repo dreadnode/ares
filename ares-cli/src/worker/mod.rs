@@ -100,7 +100,7 @@ pub async fn run() -> anyhow::Result<()> {
     // Spawn SIGTERM/SIGINT handler
     let shutdown_for_signal = Arc::clone(&shutdown_signal);
     tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
+        crate::util::wait_for_shutdown_signal().await;
         info!("Shutdown signal received, draining...");
         shutdown_for_signal.notify_waiters();
     });
@@ -154,25 +154,4 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     result
-}
-
-/// Wait for SIGTERM or SIGINT (Ctrl-C).
-async fn wait_for_shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("failed to register SIGTERM");
-        let mut sigint = signal(SignalKind::interrupt()).expect("failed to register SIGINT");
-        tokio::select! {
-            _ = sigterm.recv() => info!("Received SIGTERM"),
-            _ = sigint.recv() => info!("Received SIGINT"),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to register Ctrl-C handler");
-        info!("Received Ctrl-C");
-    }
 }

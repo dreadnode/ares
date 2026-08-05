@@ -15,6 +15,7 @@ use serde_json::json;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use crate::orchestrator::acl_graph::is_usable_hash;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
@@ -63,9 +64,11 @@ struct SidEnumWork {
 /// Hash rows we can actually NTLM-bind with. `krbtgt` is a KDC signing key,
 /// not an interactive principal. Machine accounts (`*$`) carry lockout risk
 /// and the secret is rarely usable for LSARPC. History entries (`is_previous`)
-/// may decrypt old tickets but won't bind today.
+/// may decrypt old tickets but won't bind today. [`is_usable_hash`] draws the
+/// remaining line: roast ciphertext has a non-empty `hash_value` and the
+/// emptiness-only check let it through as `credential.hash` for the bind.
 fn is_usable_for_ntlm_bind(h: &ares_core::models::Hash) -> bool {
-    if h.is_previous || h.hash_value.is_empty() {
+    if h.is_previous || !is_usable_hash(h) {
         return false;
     }
     let user = h.username.to_lowercase();
@@ -455,6 +458,23 @@ mod tests {
         assert_eq!(work.len(), 1);
         assert!(matches!(work[0].auth, SidEnumAuth::Hash(_)));
         assert_eq!(work[0].auth.username(), "Administrator");
+    }
+
+    #[test]
+    fn collect_skips_uncracked_asrep_hash() {
+        let mut state = StateInner::new("test-op".into());
+        state
+            .domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let mut h = make_hash("bob", "contoso.local");
+        h.hash_type = "AS-REP".into();
+        h.hash_value = "$krb5asrep$23$bob@CONTOSO.LOCAL:aabbccdd".into();
+        state.hashes.push(h);
+
+        assert!(
+            collect_sid_enum_work(&state).is_empty(),
+            "roast ciphertext cannot NTLM-bind for lookupsid"
+        );
     }
 
     #[test]

@@ -710,6 +710,7 @@ async fn task_dropped_by_containment(
         let domain = cred.get("domain").and_then(|v| v.as_str()).unwrap_or("");
         if !user.is_empty() && !domain.is_empty() && state.is_credential_revoked(user, domain) {
             let kind = ContainmentKind::CredentialRevoked;
+            let attribution = state.credential_containment_attribution(user, domain);
             return Some(ContainmentDrop {
                 kind,
                 attribution,
@@ -1075,7 +1076,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn weak_credential_reject_deletes_queued_work_when_blue_runs() {
+    async fn weak_credential_reject_is_not_blue_containment_merely_because_blue_runs() {
         let state = SharedState::new("op-x".into());
         state.set_blue_enabled(true).await;
         state
@@ -1083,9 +1084,58 @@ mod tests {
             .await;
         let drop = task_dropped_by_containment(&credential_task(), &state)
             .await
-            .expect("blue running keeps the containment reading");
+            .expect("the rejection is still surfaced");
+        assert!(
+            !drop.deletes,
+            "blue being switched on is not evidence that blue contained anything"
+        );
+        assert_eq!(drop.attribution, ContainmentAttribution::RedInferred);
+        assert!(
+            !drop.detail.contains("revoked"),
+            "detail claims revocation on red's own auth failure: {}",
+            drop.detail
+        );
+        assert!(
+            state
+                .read()
+                .await
+                .is_credential_revoked("svc_mssql", "contoso.local"),
+            "the credential must still be hidden from the LLM"
+        );
+    }
+
+    #[tokio::test]
+    async fn blue_actuated_revocation_deletes_queued_work() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_credential_revoked("svc_mssql", "contoso.local", "blue_simulated:inv-7")
+            .await;
+        let drop = task_dropped_by_containment(&credential_task(), &state)
+            .await
+            .expect("a blue-actuated revocation drops the task");
         assert!(drop.deletes);
         assert_eq!(drop.attribution, ContainmentAttribution::BlueActive);
+        assert!(
+            drop.detail.contains("credential revoked"),
+            "{}",
+            drop.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn blue_actuation_is_tracked_per_principal() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_credential_revoked("svc_mssql", "contoso.local", "blue_simulated:inv-7")
+            .await;
+        state
+            .publish_credential_revoked("alice", "contoso.local", "STATUS_LOGON_FAILURE")
+            .await;
+        let s = state.read().await;
+        assert!(s.credential_revocation_deletes_queued_work("svc_mssql", "contoso.local"));
+        assert!(!s.credential_revocation_deletes_queued_work("alice", "contoso.local"));
     }
 
     #[tokio::test]

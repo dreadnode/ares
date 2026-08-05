@@ -1137,6 +1137,7 @@ tasks:
       RDS_DB: '{{.RDS_DB | default "ares_history"}}'
       LLM_MODEL: '{{.LLM_MODEL | default ""}}'
       FLUSH_REDIS: '{{.FLUSH_REDIS | default "true"}}'
+      ORCH_STOP_TIMEOUT: '{{.ORCH_STOP_TIMEOUT | default "180"}}'
       # Observability endpoint overrides — take precedence over Secrets Manager
       # values so laptop-shape URLs in ares/api-keys (e.g. http://localhost:3000
       # from the obs:forward pattern) don't wedge on the EC2 box, which reaches
@@ -1317,6 +1318,15 @@ tasks:
           FLUSH_CMD="redis-cli FLUSHDB; echo Redis flushed;"
         fi
 
+        ORCH_STOP_CMD='ORCH_PAT="^/usr/local/bin/ares orchestrator"; PIDS=$(pgrep -f "$ORCH_PAT" 2>/dev/null || true); '
+        ORCH_STOP_CMD+='if [ -z "$PIDS" ]; then echo "no prior orchestrator running"; else '
+        ORCH_STOP_CMD+='echo "stopping prior orchestrator ($PIDS) — waiting up to {{.ORCH_STOP_TIMEOUT}}s for its teardown pass"; '
+        ORCH_STOP_CMD+='kill -TERM $PIDS 2>/dev/null || true; '
+        ORCH_STOP_CMD+='for _ in $(seq 1 {{.ORCH_STOP_TIMEOUT}}); do sleep 1; pgrep -f "$ORCH_PAT" >/dev/null 2>&1 || break; done; '
+        ORCH_STOP_CMD+='LEFT=$(pgrep -f "$ORCH_PAT" 2>/dev/null || true); '
+        ORCH_STOP_CMD+='if [ -n "$LEFT" ]; then echo "WARNING: orchestrator $LEFT ignored SIGTERM for {{.ORCH_STOP_TIMEOUT}}s — SIGKILLing; its target mutations will NOT be reverted"; kill -KILL $LEFT 2>/dev/null || true; sleep 2; '
+        ORCH_STOP_CMD+='else echo "prior orchestrator exited cleanly"; fi; fi'
+
         WORKER_RESTART_CMD='UNITS=$(systemctl list-units --type=service --state=active --no-legend "ares@*.service" 2>/dev/null | awk "{print \$1}" | sort -u); '
         WORKER_RESTART_CMD+='if [ -z "$UNITS" ]; then echo "no ares@ worker units active — skipping restart"; else echo "restarting workers: $UNITS"; systemctl restart $UNITS; sleep 2; systemctl is-active $UNITS | sort -u; fi'
 
@@ -1375,9 +1385,9 @@ tasks:
         LAUNCH_SCRIPT="#!/bin/bash
         set -e
         ${ENV_FILE_CMD}
+        ${ORCH_STOP_CMD}
         ${FLUSH_CMD}
         ${WORKER_RESTART_CMD}
-        pkill -f 'ares orchestrator' 2>/dev/null || true; sleep 1
         export OPENAI_API_KEY='${OPENAI_KEY}'
         export ANTHROPIC_API_KEY='${ANTHROPIC_KEY}'
         # Observability endpoints (GRAFANA_URL/LOKI_URL and tokens) are gated by
@@ -1406,7 +1416,11 @@ tasks:
         # pre-op hook). Honors ARES_KEEP_WORKSPACE=1 for dev loops.
         echo '[launch] pre-op workspace sanitize:'
         /usr/local/bin/ares ops sanitize || echo '[launch] WARNING: ops sanitize failed'
-        nohup /usr/local/bin/ares orchestrator >{{.ARES_LOG_DIR}}/orchestrator.log 2>&1 &
+        if [ -s {{.ARES_LOG_DIR}}/orchestrator.log ]; then
+          mv {{.ARES_LOG_DIR}}/orchestrator.log {{.ARES_LOG_DIR}}/orchestrator.log.\$(date -u +%Y%m%dT%H%M%SZ)
+          ls -1t {{.ARES_LOG_DIR}}/orchestrator.log.* 2>/dev/null | tail -n +11 | xargs -r rm -f
+        fi
+        nohup /usr/local/bin/ares orchestrator >>{{.ARES_LOG_DIR}}/orchestrator.log 2>&1 &
         sleep 2
         if pgrep -f 'ares orchestrator' >/dev/null; then
           echo Orchestrator started for ${OP_ID}

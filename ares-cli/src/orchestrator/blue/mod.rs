@@ -13,7 +13,7 @@ mod callbacks;
 pub mod chaining;
 mod investigation;
 pub(crate) mod runner;
-mod simulated_response;
+pub(crate) mod simulated_response;
 mod sub_agent;
 mod sweep;
 

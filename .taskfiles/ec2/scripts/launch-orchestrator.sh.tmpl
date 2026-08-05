@@ -49,11 +49,23 @@ fi
 
 mkdir -p /var/log/ares
 
-# Stop any prior orchestrator (transient unit or stray nohup process).
+ORCH_STOP_TIMEOUT="${ORCH_STOP_TIMEOUT:-180}"
+ORCH_PAT="^/usr/local/bin/ares orchestrator"
 systemctl stop ares-orchestrator.service 2>/dev/null || true
 systemctl reset-failed ares-orchestrator.service 2>/dev/null || true
-pkill -f 'ares orchestrator' 2>/dev/null || true
-sleep 1
+if PIDS=$(pgrep -f "$ORCH_PAT" 2>/dev/null) && [ -n "$PIDS" ]; then
+  echo "stopping prior orchestrator ($PIDS) — waiting up to ${ORCH_STOP_TIMEOUT}s for its teardown pass"
+  kill -TERM $PIDS 2>/dev/null || true
+  for _ in $(seq 1 "$ORCH_STOP_TIMEOUT"); do
+    sleep 1
+    pgrep -f "$ORCH_PAT" >/dev/null 2>&1 || break
+  done
+  if LEFT=$(pgrep -f "$ORCH_PAT" 2>/dev/null) && [ -n "$LEFT" ]; then
+    echo "WARNING: orchestrator $LEFT ignored SIGTERM for ${ORCH_STOP_TIMEOUT}s — SIGKILLing; its target mutations will NOT be reverted"
+    kill -KILL $LEFT 2>/dev/null || true
+    sleep 2
+  fi
+fi
 
 # Spawn as a transient systemd service in system-ares.slice. --setenv=NAME
 # (no value) inherits from current environment, preserving quoting that

@@ -6,6 +6,7 @@ use tracing::{debug, info, instrument};
 
 use ares_core::models::{Credential, Hash};
 
+use crate::orchestrator::acl_graph::is_usable_hash;
 use crate::orchestrator::state::{StateInner, DEDUP_CROSS_REALM_LATERAL, DEDUP_SCANNED_TARGETS};
 
 use super::Dispatcher;
@@ -45,8 +46,13 @@ impl ExploitAuth {
 /// Lookup order:
 ///   1. Credential by `account_name` (any domain).
 ///   2. Credential in the target domain, excluding delegation accounts.
-///   3. Hash by `account_name` (any domain).
-///   4. Hash in the target domain.
+///   3. [`is_usable_hash`] hash by `account_name` (any domain).
+///   4. [`is_usable_hash`] hash in the target domain.
+///
+/// An uncracked kerberoast/AS-REP blob is crack material, never auth: counting
+/// one satisfied [`ExploitAuth::matches_domain`] on domain alone, so the gate
+/// below dispatched the exploit with the ciphertext in `payload["hash"]`
+/// instead of deferring it until the cracker returned a plaintext.
 ///
 /// When no `domain` is supplied, falls back to "any non-delegation credential"
 /// — preserved for legacy callers that dispatch domain-agnostic exploits.
@@ -84,12 +90,12 @@ fn select_exploit_auth(
         state
             .hashes
             .iter()
-            .find(|h| h.username.eq_ignore_ascii_case(acct))
+            .find(|h| h.username.eq_ignore_ascii_case(acct) && is_usable_hash(h))
     } else if !domain.is_empty() {
         state
             .hashes
             .iter()
-            .find(|h| h.domain.eq_ignore_ascii_case(domain))
+            .find(|h| h.domain.eq_ignore_ascii_case(domain) && is_usable_hash(h))
     } else {
         None
     }
@@ -846,6 +852,64 @@ mod tests {
         let auth = select_exploit_auth(&state, None, "fabrikam.local");
 
         assert_eq!(auth.hash.as_ref().unwrap().domain, "fabrikam.local");
+    }
+
+    fn make_asrep_hash(username: &str, domain: &str) -> Hash {
+        let mut h = make_hash(username, domain);
+        h.hash_type = "AS-REP".into();
+        h.hash_value = format!("$krb5asrep$23${username}@{domain}:aabbccdd");
+        h
+    }
+
+    #[test]
+    fn select_auth_skips_uncracked_asrep_hash() {
+        let mut state = StateInner::new("op-test".into());
+        state.hashes.push(make_asrep_hash("bob", "fabrikam.local"));
+
+        let auth = select_exploit_auth(&state, None, "fabrikam.local");
+
+        assert!(
+            auth.hash.is_none(),
+            "AS-REP ciphertext is crack material, not auth the exploit worker can use"
+        );
+        assert!(
+            !auth.matches_domain("fabrikam.local"),
+            "the gate must defer the exploit, not dispatch it with a roast blob attached"
+        );
+    }
+
+    #[test]
+    fn select_auth_skips_asrep_hash_matched_by_account_name() {
+        let mut state = StateInner::new("op-test".into());
+        state.hashes.push(make_asrep_hash("bob", "fabrikam.local"));
+
+        let auth = select_exploit_auth(&state, Some("bob"), "fabrikam.local");
+
+        assert!(auth.hash.is_none());
+    }
+
+    #[test]
+    fn select_auth_takes_ntlm_hash_past_an_asrep_hash() {
+        let mut state = StateInner::new("op-test".into());
+        state.hashes.push(make_asrep_hash("bob", "fabrikam.local"));
+        state.hashes.push(make_hash("carol", "fabrikam.local"));
+
+        let auth = select_exploit_auth(&state, None, "fabrikam.local");
+
+        assert_eq!(auth.hash.as_ref().unwrap().username, "carol");
+        assert!(auth.matches_domain("fabrikam.local"));
+    }
+
+    #[test]
+    fn select_auth_takes_cracked_password_while_asrep_hash_lingers() {
+        let mut state = StateInner::new("op-test".into());
+        state.hashes.push(make_asrep_hash("bob", "fabrikam.local"));
+        state.credentials.push(make_cred("bob", "fabrikam.local"));
+
+        let auth = select_exploit_auth(&state, None, "fabrikam.local");
+
+        assert_eq!(auth.credential.as_ref().unwrap().username, "bob");
+        assert!(auth.matches_domain("fabrikam.local"));
     }
 
     #[test]

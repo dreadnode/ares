@@ -261,7 +261,7 @@ fn probe_verdict(success: bool, output: &str, expect_absent: Option<&str>) -> En
 /// either of which would restore the bug this function exists to prevent.
 fn object_absent(output: &str) -> bool {
     let lower = output.to_lowercase();
-    lower.contains("no result found") || lower.contains("nosuchobject")
+    lower.contains("no object found") || lower.contains("nosuchobject")
 }
 
 /// Auth material teardown can present for a revert.
@@ -775,8 +775,10 @@ mod tests {
     /// machine-account deletion to unverified.
     #[test]
     fn a_deleted_object_still_verifies() {
-        let out = "[-] No result found with:\n\tsearch base: DC=contoso,DC=local\n\
-                   \tsearch filter: (sAMAccountName=WS01$)";
+        let out = "Traceback (most recent call last):\n  \
+                   File \"/usr/lib/python3/dist-packages/bloodyAD/network/ldap.py\", line 259\n\
+                   bloodyAD.exceptions.NoResultError: [-] No object found in \
+                   DC=contoso,DC=local with filter: (sAMAccountName=WS01$)";
         assert!(matches!(
             probe_verdict(false, out, Some("WS01$")),
             EntryStatus::Verified
@@ -813,7 +815,10 @@ mod tests {
     #[test]
     fn impacket_does_not_exist_is_not_an_object_miss() {
         assert!(!object_absent("[-] Account to modify does not exist!"));
-        assert!(object_absent("[-] No result found with: search base ..."));
+        assert!(object_absent(
+            "bloodyAD.exceptions.NoResultError: [-] No object found in DC=contoso,DC=local \
+             with filter: (sAMAccountName=WS01$)"
+        ));
         assert!(object_absent("[-] noSuchObject"));
     }
 }

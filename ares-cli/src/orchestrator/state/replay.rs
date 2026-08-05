@@ -32,7 +32,24 @@ use ares_core::models::{
 use ares_core::nats::{op_state_filter_for_op, NatsBroker, OP_STATE_STREAM};
 
 use super::inner::StateInner;
+
 use super::SharedState;
+
+fn classify_revocation_strength(
+    source: &str,
+    key: &str,
+    kdc_declared: &mut HashSet<String>,
+    blue_actuated: &mut HashSet<String>,
+) {
+    use crate::orchestrator::blue::simulated_response::BLUE_SIMULATED_SOURCE_PREFIX;
+    use crate::orchestrator::result_processing::containment_recovery::KDC_CLIENT_REVOKED_MARKER;
+    if source.contains(KDC_CLIENT_REVOKED_MARKER) {
+        kdc_declared.insert(key.to_string());
+    }
+    if source.starts_with(BLUE_SIMULATED_SOURCE_PREFIX) {
+        blue_actuated.insert(key.to_string());
+    }
+}
 
 /// Lightweight, serialisable snapshot of operation state reconstructed from
 /// the event log. Used by `ares ops replay`
@@ -269,10 +286,21 @@ pub fn apply_event_to_state(state: &mut StateInner, event: &OpStateEvent) {
             state.exploited_vulnerabilities.insert(vuln_id.clone());
         }
         OpStateEventPayload::CredentialRevoked {
-            username, domain, ..
+            username,
+            domain,
+            source,
+            ..
         } => {
             let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
-            state.revoked_principals.insert(key, event.recorded_at);
+            state
+                .revoked_principals
+                .insert(key.clone(), event.recorded_at);
+            classify_revocation_strength(
+                source,
+                &key,
+                &mut state.kdc_declared_revocations,
+                &mut state.blue_actuated_revocations,
+            );
         }
         OpStateEventPayload::HostIsolated { ip, .. } => {
             state.isolated_hosts.insert(ip.clone(), event.recorded_at);

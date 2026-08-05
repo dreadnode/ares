@@ -13,6 +13,7 @@ use serde_json::json;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use crate::orchestrator::acl_graph::is_usable_hash;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
@@ -219,7 +220,7 @@ pub(crate) fn select_gmsa_work(state: &StateInner) -> Vec<GmsaWork> {
         let named_hash = reader.and_then(|r| {
             state.hashes.iter().find(|h| {
                 h.username.eq_ignore_ascii_case(r)
-                    && !h.hash_value.is_empty()
+                    && is_usable_hash(h)
                     && (domain.is_empty() || h.domain.to_lowercase() == domain.to_lowercase())
             })
         });
@@ -543,6 +544,43 @@ mod tests {
         assert_eq!(work[0].gmsa_account, "gmsa_svc$");
         assert_eq!(work[0].credential.username, "alice");
         assert!(work[0].reader_hash.is_none());
+    }
+
+    #[test]
+    fn select_gmsa_ignores_roast_ciphertext_for_the_named_reader() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.hashes.push(ares_core::models::Hash {
+            id: "h-svc".into(),
+            username: "svc_reader".into(),
+            hash_value: "$krb5tgs$23$*svc_reader$CONTOSO.LOCAL*".into(),
+            hash_type: "Kerberoast".into(),
+            domain: "contoso.local".into(),
+            cracked_password: None,
+            source: "kerberoast".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        });
+        let v = make_gmsa_vuln("v1", "gmsa_svc$", Some("svc_reader"), "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+
+        let work = select_gmsa_work(&s);
+
+        assert_eq!(work.len(), 1);
+        assert!(
+            work[0].reader_hash.is_none(),
+            "roast ciphertext is not -H auth material"
+        );
+        assert_eq!(work[0].credential.username, "alice");
     }
 
     #[test]

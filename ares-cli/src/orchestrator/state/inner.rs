@@ -287,6 +287,8 @@ pub struct StateInner {
     /// revocation may delete queued work or only hide the credential.
     pub kdc_declared_revocations: HashSet<String>,
 
+    pub blue_actuated_revocations: HashSet<String>,
+
     /// Hosts blue firewalled off. Keyed by IP string. Populated when SMB,
     /// WinRM and LDAP to a previously-reachable host all start returning
     /// network-unreachable inside a short window. Consumers skip vulns
@@ -389,6 +391,7 @@ impl StateInner {
             blue_enabled: false,
             revoked_principals: HashMap::new(),
             kdc_declared_revocations: HashSet::new(),
+            blue_actuated_revocations: HashSet::new(),
             isolated_hosts: HashMap::new(),
             krbtgt_rotated_at: HashMap::new(),
             revoked_certificates: HashMap::new(),
@@ -426,13 +429,25 @@ impl StateInner {
     /// queued work that depends on it, as opposed to only hiding the
     /// credential from the LLM.
     ///
-    /// A KDC-declared revocation always is. An inferred one only counts while
-    /// blue is running: with blue off, two `STATUS_LOGON_FAILURE`s against one
-    /// principal are ordinary auth noise, and deleting every queued task bound
-    /// to that principal destroys red's own work on a guess.
     pub fn credential_revocation_deletes_queued_work(&self, username: &str, domain: &str) -> bool {
         self.is_credential_revoked(username, domain)
-            && (self.blue_enabled || self.is_kdc_declared_revocation(username, domain))
+            && (self.is_blue_actuated_revocation(username, domain)
+                || self.is_kdc_declared_revocation(username, domain))
+    }
+
+    pub fn is_blue_actuated_revocation(&self, username: &str, domain: &str) -> bool {
+        let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+        self.blue_actuated_revocations.contains(&key)
+    }
+
+    pub fn credential_containment_attribution(
+        &self,
+        username: &str,
+        domain: &str,
+    ) -> ares_core::blue_invalidation::ContainmentAttribution {
+        ares_core::blue_invalidation::ContainmentAttribution::from_blue_enabled(
+            self.is_blue_actuated_revocation(username, domain),
+        )
     }
 
     /// Whether the given IP has been observed cut off.

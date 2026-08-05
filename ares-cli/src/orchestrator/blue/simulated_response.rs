@@ -19,6 +19,8 @@ use ares_core::models::{OpStateEvent, OpStateEventPayload};
 use ares_core::op_state_log::OpStateRecorder;
 use tracing::{info_span, warn, Span};
 
+pub const BLUE_SIMULATED_SOURCE_PREFIX: &str = "blue_simulated:";
+
 /// Action-type slugs used both in the tool schema enum and as the span-name
 /// suffix. Keep the two in sync: adding a new variant here requires updating
 /// the `confirm_escalation` schema in `ares-llm::tool_registry::blue::callbacks`.
@@ -77,7 +79,7 @@ pub(super) fn payload_for_containment(
     if target.trim().is_empty() {
         return None;
     }
-    let source = format!("blue_simulated:{investigation_id}");
+    let source = format!("{BLUE_SIMULATED_SOURCE_PREFIX}{investigation_id}");
     match action_type {
         ACTION_DISABLE_AD_ACCOUNT => {
             let (username, domain) = split_user_at_domain(target)?;

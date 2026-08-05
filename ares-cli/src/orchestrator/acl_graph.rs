@@ -541,9 +541,13 @@ fn distances_to_terminal(edges: &[AclEdge], state: &StateInner) -> HashMap<Strin
 /// offline-crack material, not a login: `bloodyad_base` would be handed a
 /// `$krb5tgs$` blob as `-p LM:NT`. The credential resolver already draws this
 /// line with [`is_authenticating_hash_type`]; reuse it so the graph's notion of
-/// "usable" matches what the worker will actually inject.
+/// "usable" matches what the worker will actually inject. That predicate is a
+/// deny-list keyed on `hash_type`, so the `$`-delimited value shape is checked
+/// too — it is the tell no mislabeled roast blob can shed.
 pub(crate) fn is_usable_hash(hash: &ares_core::models::Hash) -> bool {
-    !hash.hash_value.is_empty() && is_authenticating_hash_type(&hash.hash_type)
+    !hash.hash_value.is_empty()
+        && !hash.hash_value.contains('$')
+        && is_authenticating_hash_type(&hash.hash_type)
 }
 
 /// Principals we hold usable auth material for, lowercased.
@@ -1032,6 +1036,17 @@ mod tests {
 
         assert!(!owned_principals(&s).contains("bob"));
         assert!(crackable_principals(&s).contains("bob"));
+    }
+
+    #[test]
+    fn mislabeled_roast_blob_is_not_usable_auth() {
+        let mut h = hash_for("bob", "contoso.local", "krb5-asrep-24");
+        h.hash_value = "$krb5asrep$24$bob@CONTOSO.LOCAL:aabb".into();
+
+        assert!(
+            !is_usable_hash(&h),
+            "the deny-list misses this hash_type, so the $-delimited value must reject it"
+        );
     }
 
     #[test]
