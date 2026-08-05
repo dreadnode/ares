@@ -6,6 +6,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
+use crate::orchestrator::flags::resolve_planner_enabled;
 use crate::orchestrator::proposals::mediation_enabled;
 
 const DEFAULT_INTERVAL_SECS: u64 = 180;
@@ -28,16 +29,6 @@ fn effective_interval_secs(configured: u64, window_secs: u64, mediation_on: bool
     configured.min((window_secs / REVIEWS_PER_WINDOW).max(1))
 }
 
-fn planner_enabled() -> bool {
-    match std::env::var("ARES_ORCHESTRATOR_PLANNER") {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
-        ),
-        Err(_) => true,
-    }
-}
-
 fn planning_turn_is_due(since_last_turn: Option<Duration>, min_gap: Duration) -> bool {
     match since_last_turn {
         None => true,
@@ -49,8 +40,12 @@ pub async fn auto_orchestrator_planning(
     dispatcher: Arc<Dispatcher>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    if !planner_enabled() {
-        info!("Orchestrator planner disabled by ARES_ORCHESTRATOR_PLANNER");
+    let (planner_on, planner_source) = resolve_planner_enabled();
+    if !planner_on {
+        info!(
+            source = planner_source.as_str(),
+            "Orchestrator planner disabled — no orchestrator turns will be created"
+        );
         return;
     }
 
@@ -194,7 +189,7 @@ mod tests {
         let key = "ARES_ORCHESTRATOR_PLANNER";
         std::env::remove_var(key);
         assert!(
-            planner_enabled(),
+            resolve_planner_enabled().0,
             "the orchestrator is the team lead; with the planner off nothing creates an \
              orchestrator turn, so complete_operation is never called and the rules are the \
              only scheduler"
@@ -202,12 +197,18 @@ mod tests {
 
         for falsey in ["0", "false", "off", "no", "FALSE", " Off "] {
             std::env::set_var(key, falsey);
-            assert!(!planner_enabled(), "{falsey} must disable the planner");
+            assert!(
+                !resolve_planner_enabled().0,
+                "{falsey} must disable the planner"
+            );
         }
 
         for truthy in ["1", "true", "on", "yes"] {
             std::env::set_var(key, truthy);
-            assert!(planner_enabled(), "{truthy} must leave the planner enabled");
+            assert!(
+                resolve_planner_enabled().0,
+                "{truthy} must leave the planner enabled"
+            );
         }
 
         std::env::remove_var(key);

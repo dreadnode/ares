@@ -117,6 +117,21 @@ operation:
 
   acl_publish_cap: 200
 
+# Orchestrator behaviour flags. ARES_ORCHESTRATOR_PLANNER and
+# ARES_ORCHESTRATOR_MEDIATION override these at runtime and always win; the
+# resolved value and its source are logged at startup as "Orchestrator flags".
+orchestrator:
+  # Run the LLM planner loop that creates orchestrator_plan tasks. It is the
+  # only producer of orchestrator turns and so the sole caller of
+  # complete_operation — off, the rules are the only scheduler and the op runs
+  # to its cap.
+  planner_enabled: true
+
+  # Let the orchestrator review and veto proposed tasks before dispatch.
+  # Opt-in: an orchestrator that does not rule within the window turns every
+  # proposal into a delayed auto-release.
+  mediation_enabled: false
+
 # Agent configurations
 agents:
   orchestrator:

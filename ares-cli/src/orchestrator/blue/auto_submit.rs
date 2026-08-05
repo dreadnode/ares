@@ -32,6 +32,40 @@ const INITIAL_DELAY_SECS: u64 = 90;
 /// How often to check if a new investigation should be submitted.
 const CHECK_INTERVAL_SECS: u64 = 30;
 
+const DEFAULT_REINVESTIGATE_AFTER_SECS: u64 = 900;
+
+fn reinvestigate_after_secs() -> u64 {
+    std::env::var("ARES_BLUE_REINVESTIGATE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_REINVESTIGATE_AFTER_SECS)
+}
+
+async fn has_unfinished_investigation(
+    conn: &mut redis::aio::ConnectionManager,
+    operation_id: &str,
+) -> bool {
+    let key = format!("ares:blue:op:{operation_id}:investigations");
+    let ids: Vec<String> = redis::cmd("SMEMBERS")
+        .arg(&key)
+        .query_async(conn)
+        .await
+        .unwrap_or_default();
+
+    for id in ids {
+        let status = ares_core::state::read_blue_status(conn, &id)
+            .await
+            .unwrap_or(None);
+        if !status
+            .as_deref()
+            .is_some_and(ares_core::state::blue_status_is_terminal)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Strength of the red-team milestone reached so far, read from Redis.
 ///
 /// Monotonic over an operation's life (credentials/vulns only grow;
@@ -143,8 +177,8 @@ async fn auto_submit_loop(
     }
 
     // Highest milestone level we've already submitted an investigation for.
-    // Re-fire only when red crosses a *stronger* milestone.
     let mut last_level: u8 = 0;
+    let mut last_submit: Option<tokio::time::Instant> = None;
     let reader = RedisStateReader::new(config.operation_id.clone());
 
     loop {
@@ -162,24 +196,35 @@ async fn auto_submit_loop(
         // is empty even though Redis holds the full historical loot; reading
         // Redis is what makes the alert body and technique list accurate.
         let mut conn = queue.connection();
-        match reader.load_state(&mut conn).await {
+        let loaded = reader.load_state(&mut conn).await;
+        match loaded {
             Ok(Some(state)) => {
                 let level = milestone_level(&state);
-                if level > last_level {
+                let interval = reinvestigate_after_secs();
+                let stale = interval > 0
+                    && level > 0
+                    && last_submit.is_some_and(|at| at.elapsed() >= Duration::from_secs(interval));
+                let refresh =
+                    stale && !has_unfinished_investigation(&mut conn, &config.operation_id).await;
+
+                if level > last_level || refresh {
                     info!(
                         credentials = state.all_credentials.len(),
                         vulns = state.discovered_vulnerabilities.len(),
                         has_domain_admin = state.has_domain_admin,
                         milestone_level = level,
-                        "Blue auto-submit: red crossed a milestone, submitting investigation"
+                        refresh,
+                        "Blue auto-submit: submitting investigation"
                     );
                     match submit_investigation(&queue, &state, &config, &model_spec).await {
                         Ok(inv_id) => {
-                            last_level = level;
+                            last_level = last_level.max(level);
+                            last_submit = Some(tokio::time::Instant::now());
                             info!(
                                 investigation_id = %inv_id,
                                 operation_id = %config.operation_id,
                                 milestone_level = level,
+                                refresh,
                                 "Blue auto-submit: investigation queued"
                             );
                         }
@@ -366,6 +411,19 @@ mod tests {
     #[test]
     fn milestone_level_empty_is_zero() {
         assert_eq!(milestone_level(&state()), 0);
+    }
+
+    #[test]
+    fn reinvestigate_interval_defaults_and_respects_override() {
+        std::env::remove_var("ARES_BLUE_REINVESTIGATE_SECS");
+        assert_eq!(reinvestigate_after_secs(), DEFAULT_REINVESTIGATE_AFTER_SECS);
+        std::env::set_var("ARES_BLUE_REINVESTIGATE_SECS", "600");
+        assert_eq!(reinvestigate_after_secs(), 600);
+        std::env::set_var("ARES_BLUE_REINVESTIGATE_SECS", "0");
+        assert_eq!(reinvestigate_after_secs(), 0);
+        std::env::set_var("ARES_BLUE_REINVESTIGATE_SECS", "junk");
+        assert_eq!(reinvestigate_after_secs(), DEFAULT_REINVESTIGATE_AFTER_SECS);
+        std::env::remove_var("ARES_BLUE_REINVESTIGATE_SECS");
     }
 
     #[test]

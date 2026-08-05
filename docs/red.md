@@ -145,7 +145,8 @@ outcome**, and the prompt says so.
 
 Guards: single-flight (one planning task at a time, via
 `tracker.count_for_role`), skipped while red is draining, and a warm-up delay
-so the first turn sees post-recon state. On by default;
+so the first turn sees post-recon state. On by default, declared as
+`orchestrator.planner_enabled` in `config/ares.yaml`;
 `ARES_ORCHESTRATOR_PLANNER=0` disables it. Disabling it does not merely stop
 periodic planning — `orchestrator_plan` is the only task type that maps to
 `AgentRole::Orchestrator` and this loop is its only producer, so with the
@@ -174,7 +175,8 @@ it has no proposals to review.
 
 ### Mediation: automations as the orchestrator's instruments
 
-Off by default; `ARES_ORCHESTRATOR_MEDIATION=1` turns it on and makes the
+Off by default, declared as `orchestrator.mediation_enabled` in
+`config/ares.yaml`; `ARES_ORCHESTRATOR_MEDIATION=1` turns it on and makes the
 orchestrator the decision-maker rather than a supervisor over an
 already-scheduled system. It is opt-in because an orchestrator that does not
 rule within the window turns every proposal into a delayed auto-release, which
@@ -241,6 +243,26 @@ the same work can be proposed again later.
 | `ARES_ORCHESTRATOR_MEDIATION_CAPACITY` | 200 | Pool cap before fall-through |
 | `ARES_ORCHESTRATOR_MEDIATION_REJECTION_TTL_SECS` | 600 | Rejection cooldown |
 | `ARES_ORCHESTRATOR_MEDIATION_DISPATCH_TTL_SECS` | 600 | Cooldown before dispatched work may be re-proposed |
+
+**Where the two on/off flags live.** `planner_enabled` and `mediation_enabled`
+resolve in three layers — environment variable, then the `orchestrator:` section
+of `config/ares.yaml`, then the compiled-in fallback. The environment always
+wins, so existing deployments that set the variables are unaffected. Both were
+env-only until the config section existed, which meant an operator could read
+`agents.orchestrator.model` in the config, conclude the orchestrator was
+running, and be wrong: nothing in the repo set either variable, so on a default
+run zero orchestrator turns fired. The resolved values and the layer each came
+from are logged once at startup next to `Orchestrator model`:
+
+```
+INFO Orchestrator flags planner_enabled=true planner_source=config
+     mediation_enabled=false mediation_source=config
+```
+
+`planner_source=default` means no config section was found and the fallback
+applied; `env` means a variable overrode the file. On EC2 the authoritative
+environment is `/etc/ares/env`, which is outside the repo — that log line is the
+only place a run states plainly which layer decided.
 
 **Privilege boundary**: `dispatch_*` and `complete_operation` are offered to the
 orchestrator alone, but the agent loop routes callbacks by *tool name* for every

@@ -30,6 +30,8 @@ const DEFAULT_PATHS: &[&str] = &[
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AresConfig {
     pub operation: OperationConfig,
+    #[serde(default)]
+    pub orchestrator: OrchestratorConfig,
     pub agents: HashMap<String, AgentConfig>,
     pub timeouts: TimeoutConfig,
     pub recovery: RecoveryConfig,

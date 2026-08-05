@@ -25,6 +25,7 @@ mod deferred;
 mod dispatcher;
 mod diversity;
 pub(crate) mod exploitation;
+pub(crate) mod flags;
 pub(crate) mod llm_runner;
 mod monitoring;
 pub(crate) mod output_extraction;
@@ -509,6 +510,23 @@ async fn run_inner() -> Result<()> {
             "No LLM model configured — set ARES_LLM_MODEL or agents.orchestrator.model in config YAML",
         )?;
     info!(model = %orch_spec, "Orchestrator model");
+
+    let orchestrator_flags = yaml_doc
+        .as_ref()
+        .and_then(|doc| doc.get("orchestrator"))
+        .cloned()
+        .and_then(|v| serde_yaml::from_value::<ares_core::config::OrchestratorConfig>(v).ok())
+        .unwrap_or_default();
+    flags::init_config_defaults(orchestrator_flags);
+    let (planner_on, planner_source) = flags::resolve_planner_enabled();
+    let (mediation_on, mediation_source) = flags::resolve_mediation_enabled();
+    info!(
+        planner_enabled = planner_on,
+        planner_source = planner_source.as_str(),
+        mediation_enabled = mediation_on,
+        mediation_source = mediation_source.as_str(),
+        "Orchestrator flags"
+    );
 
     let mut providers: std::collections::HashMap<
         ares_llm::tool_registry::AgentRole,

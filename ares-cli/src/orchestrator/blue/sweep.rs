@@ -51,6 +51,8 @@ const DEFAULT_SWEEP_TIMEOUT_SECS: u64 = 360;
 /// this to 2 (larger windows time out through the Grafana proxy).
 const SWEEP_HOURS_BACK: i64 = 2;
 
+const DEFAULT_SWEEP_REFRESH_SECS: u64 = 900;
+
 // ─── Golden ticket correlation ──────────────────────────────────────────────
 //
 // A Golden Ticket is a TGT forged offline from the krbtgt key, so the DC never
@@ -1442,6 +1444,46 @@ pub(crate) fn sweep_enabled() -> bool {
     }
 }
 
+pub(crate) fn sweep_refresh_secs() -> u64 {
+    std::env::var("ARES_BLUE_SWEEP_REFRESH_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SWEEP_REFRESH_SECS)
+}
+
+pub(crate) fn spawn_sweep_refresh(
+    investigation_id: String,
+    attack_start: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !sweep_enabled() {
+        return None;
+    }
+    let interval = sweep_refresh_secs();
+    if interval == 0 {
+        return None;
+    }
+    info!(
+        investigation_id = %investigation_id,
+        interval_secs = interval,
+        "Sweep refresh armed"
+    );
+    Some(tokio::spawn(async move {
+        let mut round: u32 = 0;
+        loop {
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+            round += 1;
+            let outcome = run_detection_sweep(&investigation_id, attack_start).await;
+            info!(
+                investigation_id = %investigation_id,
+                round,
+                fired = outcome.fired.len(),
+                failed = outcome.failed.len(),
+                "Sweep refresh round completed"
+            );
+        }
+    }))
+}
+
 /// Whether the golden-ticket correlation should run. Defaults on; set
 /// `ARES_BLUE_GOLDEN_TICKET_CORRELATION=0` to disable.
 fn golden_ticket_enabled() -> bool {
@@ -1663,6 +1705,33 @@ mod tests {
         std::env::set_var("ARES_BLUE_DETERMINISTIC_SWEEP", "1");
         assert!(sweep_enabled());
         std::env::remove_var("ARES_BLUE_DETERMINISTIC_SWEEP");
+    }
+
+    #[test]
+    fn sweep_refresh_defaults_and_respects_override() {
+        std::env::remove_var("ARES_BLUE_SWEEP_REFRESH_SECS");
+        assert_eq!(sweep_refresh_secs(), DEFAULT_SWEEP_REFRESH_SECS);
+        std::env::set_var("ARES_BLUE_SWEEP_REFRESH_SECS", "300");
+        assert_eq!(sweep_refresh_secs(), 300);
+        std::env::set_var("ARES_BLUE_SWEEP_REFRESH_SECS", "0");
+        assert_eq!(sweep_refresh_secs(), 0);
+        std::env::set_var("ARES_BLUE_SWEEP_REFRESH_SECS", "not-a-number");
+        assert_eq!(sweep_refresh_secs(), DEFAULT_SWEEP_REFRESH_SECS);
+        std::env::remove_var("ARES_BLUE_SWEEP_REFRESH_SECS");
+    }
+
+    #[tokio::test]
+    async fn sweep_refresh_is_disabled_by_the_sweep_toggle_and_by_zero() {
+        std::env::set_var("ARES_BLUE_DETERMINISTIC_SWEEP", "0");
+        std::env::remove_var("ARES_BLUE_SWEEP_REFRESH_SECS");
+        assert!(spawn_sweep_refresh("inv-test".into(), None).is_none());
+
+        std::env::set_var("ARES_BLUE_DETERMINISTIC_SWEEP", "1");
+        std::env::set_var("ARES_BLUE_SWEEP_REFRESH_SECS", "0");
+        assert!(spawn_sweep_refresh("inv-test".into(), None).is_none());
+
+        std::env::remove_var("ARES_BLUE_DETERMINISTIC_SWEEP");
+        std::env::remove_var("ARES_BLUE_SWEEP_REFRESH_SECS");
     }
 
     #[test]

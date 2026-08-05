@@ -246,6 +246,9 @@ pub async fn run_investigation(
         op_state_recorder,
     ));
 
+    let sweep_refresh =
+        super::sweep::spawn_sweep_refresh(investigation.investigation_id.clone(), attack_start);
+
     // Run the orchestrator agent loop
     let outcome = run_agent_loop(RunAgentLoopParams {
         provider: provider.as_ref(),
@@ -260,6 +263,10 @@ pub async fn run_investigation(
         hostname_map: None,
     })
     .await;
+
+    if let Some(handle) = sweep_refresh {
+        handle.abort();
+    }
 
     let investigation_outcome = process_outcome(&outcome, &investigation.investigation_id);
 
@@ -337,6 +344,17 @@ pub async fn run_investigation(
                 "Inline chained hunts timed out — proceeding to report/scoring"
             );
         }
+    }
+
+    if super::sweep::sweep_enabled() && super::sweep::sweep_refresh_secs() > 0 {
+        let closing =
+            super::sweep::run_detection_sweep(&investigation.investigation_id, attack_start).await;
+        info!(
+            investigation_id = %investigation.investigation_id,
+            fired = closing.fired.len(),
+            failed = closing.failed.len(),
+            "Closing detection sweep completed"
+        );
     }
 
     let (_golden, _silver) = tokio::join!(

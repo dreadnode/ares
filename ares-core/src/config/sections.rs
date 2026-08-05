@@ -311,6 +311,35 @@ pub struct GrafanaConfig {
     pub dashboard_uid: String,
 }
 
+/// Orchestrator behaviour flags.
+///
+/// Both fields are resolved with env-var override precedence at runtime:
+/// `ARES_ORCHESTRATOR_PLANNER` and `ARES_ORCHESTRATOR_MEDIATION` win over
+/// these values, which in turn win over the compiled-in fallbacks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestratorConfig {
+    /// Whether the LLM planner loop creates `orchestrator_plan` tasks.
+    ///
+    /// With this off, no orchestrator turn is ever created, so
+    /// `complete_operation` is never called and the rules are the only
+    /// scheduler.
+    #[serde(default = "default_true")]
+    pub planner_enabled: bool,
+
+    /// Whether the orchestrator reviews and can veto proposed tasks.
+    #[serde(default)]
+    pub mediation_enabled: bool,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            planner_enabled: true,
+            mediation_enabled: false,
+        }
+    }
+}
+
 /// Observability backend URLs for blue team tools.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ObservabilityConfig {

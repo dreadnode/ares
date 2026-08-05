@@ -30,13 +30,7 @@ const SWEEP_INTERVAL_SECS: u64 = 5;
 const BEHIND_THRESHOLD: u32 = 2;
 
 pub fn mediation_enabled() -> bool {
-    match std::env::var("ARES_ORCHESTRATOR_MEDIATION") {
-        Ok(v) => matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on" | "yes"
-        ),
-        Err(_) => false,
-    }
+    crate::orchestrator::flags::resolve_mediation_enabled().0
 }
 
 fn secs_from_env(key: &str, default: u64) -> u64 {
