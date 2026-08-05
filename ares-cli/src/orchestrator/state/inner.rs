@@ -302,6 +302,18 @@ pub struct StateInner {
     /// cached TGTs and forged tickets for the realm.
     pub krbtgt_rotated_at: HashMap<String, DateTime<Utc>>,
 
+    /// Subset of [`Self::krbtgt_rotated_at`] that a blue response actuator
+    /// actually performed, keyed the same way.
+    ///
+    /// `KRB_AP_ERR_MODIFIED` is not proof of a rotation. The KDC returns it
+    /// whenever a ticket cannot be decrypted by the service it was presented
+    /// to, which a wrong-SPN or wrong-realm target string produces just as
+    /// readily as a rotated key — and Impacket's cross-realm handling emits
+    /// exactly that. Membership here is what separates "blue rotated the
+    /// realm's key" from "red mis-targeted a ticket", and it decides whether
+    /// the observation may delete queued work or only skip it.
+    pub blue_actuated_krbtgt_rotations: HashSet<String>,
+
     /// Certificates blue revoked. Keyed by serial (hex, lowercase).
     /// Populated on PKINIT `KDC_ERR_CLIENT_REVOKED`. Consumers drop
     /// ADCS-based exploit paths pinned to the revoked serial.
@@ -397,6 +409,7 @@ impl StateInner {
             blue_actuated_revocations: HashSet::new(),
             isolated_hosts: HashMap::new(),
             krbtgt_rotated_at: HashMap::new(),
+            blue_actuated_krbtgt_rotations: HashSet::new(),
             revoked_certificates: HashMap::new(),
             self_ips: HashSet::new(),
             acl_publish_cap: default_acl_publish_cap(),
@@ -471,6 +484,37 @@ impl StateInner {
     /// (case-insensitive).
     pub fn is_krbtgt_rotated(&self, domain: &str) -> bool {
         self.krbtgt_rotated_at.contains_key(&domain.to_lowercase())
+    }
+
+    /// Whether a blue response actuator performed this realm's rotation,
+    /// rather than it being inferred from red's own `KRB_AP_ERR_MODIFIED`.
+    pub fn is_blue_actuated_krbtgt_rotation(&self, domain: &str) -> bool {
+        self.blue_actuated_krbtgt_rotations
+            .contains(&domain.to_lowercase())
+    }
+
+    /// Whether a rotation observation on this realm is strong enough to delete
+    /// queued work that depends on it, as opposed to only skipping it.
+    ///
+    /// Deletion is irreversible here: the deferred queue leaves the dropped
+    /// task's signature in place as a tombstone, so an inferred rotation that
+    /// deletes also blocks producers from ever re-emitting the same work.
+    pub fn krbtgt_rotation_deletes_queued_work(&self, domain: &str) -> bool {
+        self.is_krbtgt_rotated(domain) && self.is_blue_actuated_krbtgt_rotation(domain)
+    }
+
+    /// Whether blue can be blamed for a drop in this specific realm.
+    ///
+    /// A live blue team that never rotated this realm's krbtgt is no
+    /// explanation for a ticket failing to decrypt, so this deliberately
+    /// ignores operation-wide blue enablement.
+    pub fn krbtgt_containment_attribution(
+        &self,
+        domain: &str,
+    ) -> ares_core::blue_invalidation::ContainmentAttribution {
+        ares_core::blue_invalidation::ContainmentAttribution::from_blue_action(
+            self.is_blue_actuated_krbtgt_rotation(domain),
+        )
     }
 
     pub fn latest_krbtgt_source(&self) -> Option<&str> {

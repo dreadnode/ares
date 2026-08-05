@@ -22,6 +22,7 @@
 //! | `blue_enabled` | `1`/`0`, whether blue ran for the operation at all |
 //! | `retained_total` | Tasks *kept* despite a containment observation too weak to delete them |
 //! | `retained_role:{target_role}` | Retained tasks, per agent role |
+//! | `retained_reason:{kind}` | Retained tasks, per containment kind |
 //!
 //! Role, task-type and reason names are bounded, operator-authored identifiers,
 //! so they are stored verbatim rather than encoded. The revoked principal
@@ -38,13 +39,14 @@
 //! revoked the principal, `credential_rejected_inferred` when nothing blue did
 //! explains the reject.
 //!
-//! The blue-action test is per drop, not per operation. Host and realm drops
-//! ask whether blue ran at all; credential drops ask the narrower question of
-//! whether blue actuated *that* principal's revocation, because a live blue
-//! team that never touched `alice` is no explanation for `alice` failing to
-//! authenticate. `blue_enabled` is recorded
-//! separately so a reader can tell the two apart and only claim "blue was not
-//! running" when that is the actual reason.
+//! The blue-action test is per drop, not per operation. Credential and realm
+//! drops ask the narrow question of whether blue actuated *that* principal's
+//! revocation or *that* realm's rotation, because a live blue team that never
+//! touched `alice` is no explanation for `alice` failing to authenticate, and
+//! one that never rotated a realm's krbtgt is no explanation for a ticket that
+//! fails to decrypt. Host drops still ask only whether blue ran at all.
+//! `blue_enabled` is recorded separately so a reader can tell the two apart and
+//! only claim "blue was not running" when that is the actual reason.
 
 use std::collections::BTreeMap;
 
@@ -66,14 +68,22 @@ const FIELD_BLUE_ENABLED: &str = "blue_enabled";
 const FIELD_RETAINED_TOTAL: &str = "retained_total";
 /// HASH field prefix for per-role retained counters.
 const RETAINED_ROLE_PREFIX: &str = "retained_role";
+/// HASH field prefix for per-containment-kind retained counters.
+///
+/// Without this a reader cannot tell which observation was too weak to act on,
+/// and the runtime summary has to guess — it used to name a credential
+/// rejection unconditionally, which is wrong the moment a realm-wide or host
+/// observation is retained.
+const RETAINED_REASON_PREFIX: &str = "retained_reason";
 
 /// Who a dropped task can honestly be blamed on.
 ///
 /// The classifier that produces containment observations reads red's own tool
 /// output; it has no channel to blue. What separates these two variants is
 /// whether the orchestrator holds a blue action that explains the failure —
-/// blue being enabled for host and realm drops, blue having actuated that
-/// specific principal's revocation for credential drops.
+/// blue being enabled for host drops, blue having actuated that specific
+/// principal's revocation or realm's rotation for credential and krbtgt
+/// drops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub enum ContainmentAttribution {
     /// A blue action covers this drop, so containment is a live explanation
@@ -193,6 +203,8 @@ pub struct BlueInvalidatedTasks {
     pub retained_total: u64,
     /// Retained tasks per agent role.
     pub retained_by_role: BTreeMap<String, u64>,
+    /// Retained tasks per containment kind.
+    pub retained_by_reason: BTreeMap<String, u64>,
     /// Whether blue ran for this operation at all. `None` for operations that
     /// predate the field, which callers must treat as unknown rather than as
     /// "blue was off".
@@ -209,6 +221,7 @@ impl BlueInvalidatedTasks {
             && self.by_attribution.is_empty()
             && self.retained_total == 0
             && self.retained_by_role.is_empty()
+            && self.retained_by_reason.is_empty()
     }
 
     /// Drops recorded while blue was running for the operation.
@@ -252,6 +265,11 @@ impl BlueInvalidatedTasks {
     /// Roles ordered by retained-task count, highest first.
     pub fn retained_roles_by_count(&self) -> Vec<(&str, u64)> {
         rank_by_count(&self.retained_by_role)
+    }
+
+    /// Containment kinds ordered by retained-task count, highest first.
+    pub fn retained_reasons_by_count(&self) -> Vec<(&str, u64)> {
+        rank_by_count(&self.retained_by_reason)
     }
 }
 
@@ -321,6 +339,7 @@ pub async fn record_retained_task(
     conn: &mut impl AsyncCommands,
     operation_id: &str,
     target_role: &str,
+    kind: ContainmentKind,
 ) -> Result<(), redis::RedisError> {
     let key = blue_invalidated_key(operation_id);
 
@@ -335,6 +354,13 @@ pub async fn record_retained_task(
             .arg(format!("{RETAINED_ROLE_PREFIX}:{target_role}"))
             .arg(1);
     }
+    pipe.cmd("HINCRBY")
+        .arg(&key)
+        .arg(format!(
+            "{RETAINED_REASON_PREFIX}:{}",
+            kind.reason_field(ContainmentAttribution::RedInferred)
+        ))
+        .arg(1);
 
     pipe.query_async::<()>(conn).await?;
     Ok(())
@@ -388,6 +414,8 @@ pub async fn get_blue_invalidated_tasks(
             counts.retained_total = count;
         } else if let Some(role) = field.strip_prefix(&format!("{RETAINED_ROLE_PREFIX}:")) {
             counts.retained_by_role.insert(role.to_string(), count);
+        } else if let Some(reason) = field.strip_prefix(&format!("{RETAINED_REASON_PREFIX}:")) {
+            counts.retained_by_reason.insert(reason.to_string(), count);
         } else if let Some(role) = field.strip_prefix(&format!("{ROLE_PREFIX}:")) {
             counts.by_role.insert(role.to_string(), count);
         } else if let Some(task_type) = field.strip_prefix(&format!("{TYPE_PREFIX}:")) {
@@ -514,9 +542,14 @@ mod tests {
         .await
         .expect("record should succeed");
         for _ in 0..40 {
-            record_retained_task(&mut conn, "op-test-001", "recon")
-                .await
-                .expect("record should succeed");
+            record_retained_task(
+                &mut conn,
+                "op-test-001",
+                "recon",
+                ContainmentKind::CredentialRevoked,
+            )
+            .await
+            .expect("record should succeed");
         }
 
         let counts = get_blue_invalidated_tasks(&mut conn, "op-test-001")
@@ -533,9 +566,14 @@ mod tests {
     #[tokio::test]
     async fn retention_alone_is_not_an_empty_record() {
         let mut conn = MockRedisConnection::new();
-        record_retained_task(&mut conn, "op-test-001", "recon")
-            .await
-            .expect("record should succeed");
+        record_retained_task(
+            &mut conn,
+            "op-test-001",
+            "recon",
+            ContainmentKind::CredentialRevoked,
+        )
+        .await
+        .expect("record should succeed");
 
         let counts = get_blue_invalidated_tasks(&mut conn, "op-test-001")
             .await
@@ -742,6 +780,7 @@ mod tests {
             by_attribution: BTreeMap::new(),
             retained_total: 0,
             retained_by_role: BTreeMap::new(),
+            retained_by_reason: BTreeMap::new(),
             blue_team_enabled: None,
         };
 
@@ -764,6 +803,7 @@ mod tests {
             by_attribution: BTreeMap::new(),
             retained_total: 0,
             retained_by_role: BTreeMap::new(),
+            retained_by_reason: BTreeMap::new(),
             blue_team_enabled: None,
         };
 
@@ -786,6 +826,7 @@ mod tests {
             by_attribution: BTreeMap::new(),
             retained_total: 0,
             retained_by_role: BTreeMap::new(),
+            retained_by_reason: BTreeMap::new(),
             blue_team_enabled: None,
         };
 

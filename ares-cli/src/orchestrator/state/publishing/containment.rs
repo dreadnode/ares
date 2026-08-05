@@ -133,9 +133,15 @@ impl SharedState {
     /// realm; forest-wide `KRB_AP_ERR_MODIFIED` should collapse to one event.
     pub async fn publish_krbtgt_rotated(&self, domain: &str, source: &str) -> bool {
         let key = domain.to_lowercase();
+        let blue_actuated = source.starts_with(
+            crate::orchestrator::blue::simulated_response::BLUE_SIMULATED_SOURCE_PREFIX,
+        );
         let (added, attribution) = {
             let mut state = self.inner.write().await;
-            let attribution = state.containment_attribution();
+            if blue_actuated {
+                state.blue_actuated_krbtgt_rotations.insert(key.clone());
+            }
+            let attribution = state.krbtgt_containment_attribution(domain);
             (
                 state.krbtgt_rotated_at.insert(key, Utc::now()).is_none(),
                 attribution,
@@ -285,6 +291,22 @@ mod tests {
         let evs = recorder.captured().await;
         assert_eq!(evs.len(), 1);
         matches!(evs[0].payload, OpStateEventPayload::HostIsolated { .. });
+    }
+
+    #[tokio::test]
+    async fn krbtgt_rotation_records_blue_actuation_only_for_blue_sources() {
+        let s = SharedState::new("op-x".into());
+        s.set_blue_enabled(true).await;
+        s.publish_krbtgt_rotated("contoso.local", "blue_simulated:inv-1")
+            .await;
+        s.publish_krbtgt_rotated("fabrikam.local", "KRB_AP_ERR_MODIFIED via secretsdump")
+            .await;
+        let state = s.read().await;
+        assert!(state.is_blue_actuated_krbtgt_rotation("contoso.local"));
+        assert!(state.krbtgt_rotation_deletes_queued_work("contoso.local"));
+        assert!(!state.is_blue_actuated_krbtgt_rotation("fabrikam.local"));
+        assert!(state.is_krbtgt_rotated("fabrikam.local"));
+        assert!(!state.krbtgt_rotation_deletes_queued_work("fabrikam.local"));
     }
 
     #[tokio::test]

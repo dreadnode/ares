@@ -638,12 +638,13 @@ impl DeferredQueue {
     /// Best-effort for the same reason as [`Self::record_blue_invalidation`].
     /// A retained task is the visible half of refusing to delete work on weak
     /// evidence; without the counter the operator only sees drops disappear.
-    pub async fn record_containment_retention(&self, target_role: &str) {
+    pub async fn record_containment_retention(&self, target_role: &str, kind: ContainmentKind) {
         let mut conn = self.queue_conn();
         if let Err(e) = ares_core::blue_invalidation::record_retained_task(
             &mut conn,
             &self.config.operation_id,
             target_role,
+            kind,
         )
         .await
         {
@@ -798,10 +799,11 @@ pub(in crate::orchestrator) async fn payload_dropped_by_containment(
         || technique.to_lowercase().contains("golden");
     if !realm.is_empty() && kerberos_shaped && state.is_krbtgt_rotated(realm) {
         let kind = ContainmentKind::KrbtgtRotated;
+        let attribution = state.krbtgt_containment_attribution(realm);
         return Some(ContainmentDrop {
             kind,
             attribution,
-            deletes: true,
+            deletes: state.krbtgt_rotation_deletes_queued_work(realm),
             detail: format!("{} ({realm})", kind.detail_label(attribution)),
         });
     }
@@ -875,10 +877,10 @@ pub fn spawn_deferred_processor(
                                 task_type = %task.task_type,
                                 target_role = %task.target_role,
                                 reason = %kept.detail,
-                                "Keeping deferred task — inferred credential rejection is too weak to delete queued work (no blue revocation on the principal, no KDC_ERR_CLIENT_REVOKED)"
+                                "Keeping deferred task — containment observation is too weak to delete queued work (no blue action on the affected identity, no unambiguous KDC declaration)"
                             );
                             deferred
-                                .record_containment_retention(&task.target_role)
+                                .record_containment_retention(&task.target_role, kept.kind)
                                 .await;
                         }
                         if let Some(drop) = verdict.filter(|v| v.deletes) {
@@ -1338,7 +1340,54 @@ mod tests {
             .expect("expected kerberoast to be dropped");
         assert_eq!(drop.kind, ContainmentKind::KrbtgtRotated);
         assert_eq!(drop.attribution, ContainmentAttribution::BlueActive);
+        assert!(drop.deletes);
         assert!(drop.detail.contains("krbtgt rotated"));
+    }
+
+    #[tokio::test]
+    async fn inferred_krbtgt_rotation_keeps_the_task() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_krbtgt_rotated("contoso.local", "KRB_AP_ERR_MODIFIED via secretsdump")
+            .await;
+        let task = task_with_payload(
+            "credential_access",
+            serde_json::json!({
+                "dc_ip": "192.168.58.240",
+                "domain": "contoso.local",
+                "technique": "Kerberoasting",
+            }),
+        );
+        let verdict = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("an inferred rotation is still an observation");
+        assert_eq!(verdict.kind, ContainmentKind::KrbtgtRotated);
+        assert_eq!(verdict.attribution, ContainmentAttribution::RedInferred);
+        assert!(
+            !verdict.deletes,
+            "a wrong-SPN KRB_AP_ERR_MODIFIED must not delete queued work"
+        );
+    }
+
+    #[tokio::test]
+    async fn blue_enabled_alone_does_not_attribute_a_rotation_to_blue() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_krbtgt_rotated("contoso.local", "KRB_AP_ERR_MODIFIED via getST")
+            .await;
+        let task = task_with_payload(
+            "kerberos",
+            serde_json::json!({
+                "dc_ip": "192.168.58.240",
+                "domain": "contoso.local",
+            }),
+        );
+        let verdict = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("observation recorded");
+        assert_eq!(verdict.attribution, ContainmentAttribution::RedInferred);
     }
 
     fn budget(secs: u64) -> (tokio::time::Instant, tokio::time::Instant) {

@@ -80,7 +80,7 @@ impl Dispatcher {
                 return Ok(SubmissionOutcome::Dropped);
             }
             self.deferred
-                .record_containment_retention(target_role)
+                .record_containment_retention(target_role, drop.kind)
                 .await;
         }
 

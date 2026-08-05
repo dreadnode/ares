@@ -41,14 +41,17 @@ fn format_retained(counts: &ares_core::blue_invalidation::BlueInvalidatedTasks) 
     }
     let plural = if counts.retained_total == 1 { "" } else { "s" };
     let cause = if counts.blue_was_off() {
-        "no KDC_ERR_CLIENT_REVOKED, blue not running"
+        "blue not running, so nothing blue did explains the failure"
     } else {
-        "no KDC_ERR_CLIENT_REVOKED, no blue revocation on the principal"
+        "no blue action on the affected identity"
     };
     let mut lines = vec![format!(
-        "Note: {} deferred task{plural} kept despite an inferred credential rejection — credential hidden from the LLM, queued work left intact ({cause})",
+        "Note: {} deferred task{plural} kept despite an inferred containment observation — the affected identity is hidden from the LLM, queued work left intact ({cause})",
         counts.retained_total
     )];
+    if let Some(line) = breakdown_line("reason", &counts.retained_reasons_by_count()) {
+        lines.push(line);
+    }
     if let Some(line) = breakdown_line("role", &counts.retained_roles_by_count()) {
         lines.push(line);
     }
@@ -366,6 +369,7 @@ mod tests {
             by_attribution: Default::default(),
             retained_total: 0,
             retained_by_role: Default::default(),
+            retained_by_reason: Default::default(),
             blue_team_enabled: None,
         }
     }
@@ -545,7 +549,7 @@ mod tests {
 
         assert_eq!(lines.len(), 2);
         assert!(
-            lines[0].contains("40 deferred tasks kept despite an inferred credential rejection"),
+            lines[0].contains("40 deferred tasks kept despite an inferred containment observation"),
             "got {}",
             lines[0]
         );
@@ -566,12 +570,10 @@ mod tests {
             "got {}",
             lines[0]
         );
-        assert!(
-            lines
-                .iter()
-                .any(|l| l
-                    .contains("40 deferred tasks kept despite an inferred credential rejection"))
-        );
+        assert!(lines
+            .iter()
+            .any(|l| l
+                .contains("40 deferred tasks kept despite an inferred containment observation")));
     }
 
     #[test]
