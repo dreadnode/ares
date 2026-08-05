@@ -10,6 +10,7 @@ use crate::orchestrator::proposals::mediation_enabled;
 
 const DEFAULT_INTERVAL_SECS: u64 = 180;
 const DEFAULT_WARMUP_SECS: u64 = 120;
+const DEFAULT_MIN_GAP_SECS: u64 = 60;
 const REVIEWS_PER_WINDOW: u64 = 3;
 
 fn secs_from_env(key: &str, default: u64) -> u64 {
@@ -29,11 +30,18 @@ fn effective_interval_secs(configured: u64, window_secs: u64, mediation_on: bool
 
 fn planner_enabled() -> bool {
     match std::env::var("ARES_ORCHESTRATOR_PLANNER") {
-        Ok(v) => matches!(
+        Ok(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on" | "yes"
+            "0" | "false" | "off" | "no"
         ),
-        Err(_) => false,
+        Err(_) => true,
+    }
+}
+
+fn planning_turn_is_due(since_last_turn: Option<Duration>, min_gap: Duration) -> bool {
+    match since_last_turn {
+        None => true,
+        Some(elapsed) => elapsed >= min_gap,
     }
 }
 
@@ -51,6 +59,10 @@ pub async fn auto_orchestrator_planning(
         DEFAULT_INTERVAL_SECS,
     );
     let warmup_secs = secs_from_env("ARES_ORCHESTRATOR_PLANNER_WARMUP_SECS", DEFAULT_WARMUP_SECS);
+    let min_gap_secs = secs_from_env(
+        "ARES_ORCHESTRATOR_PLANNER_MIN_GAP_SECS",
+        DEFAULT_MIN_GAP_SECS,
+    );
     let window_secs = dispatcher.proposals.window().as_secs();
     let mediation_on = mediation_enabled();
     let interval_secs =
@@ -59,12 +71,17 @@ pub async fn auto_orchestrator_planning(
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    let min_gap = Duration::from_secs(min_gap_secs);
+    let planning_notify = dispatcher.planning_notify.clone();
+    let mut last_turn: Option<Instant> = None;
+
     let start = Instant::now();
     info!(
         interval_secs,
         configured_interval_secs,
         warmup_secs,
         window_secs,
+        min_gap_secs,
         mediation_on,
         "Orchestrator planner started"
     );
@@ -72,6 +89,7 @@ pub async fn auto_orchestrator_planning(
     loop {
         tokio::select! {
             _ = interval.tick() => {},
+            _ = planning_notify.notified() => {},
             _ = shutdown.changed() => break,
         }
         if *shutdown.borrow() {
@@ -79,6 +97,11 @@ pub async fn auto_orchestrator_planning(
         }
 
         if start.elapsed() < Duration::from_secs(warmup_secs) {
+            continue;
+        }
+
+        if !planning_turn_is_due(last_turn.map(|t| t.elapsed()), min_gap) {
+            debug!("Orchestrator planner: inside the minimum gap, skipping wake");
             continue;
         }
 
@@ -105,6 +128,8 @@ pub async fn auto_orchestrator_planning(
                 warn!(err = %e, "Orchestrator planner: failed to submit planning task");
             }
         }
+
+        last_turn = Some(Instant::now());
     }
 
     info!("Orchestrator planner stopped");
@@ -165,12 +190,14 @@ mod tests {
     }
 
     #[test]
-    fn planner_defaults_off_and_respects_falsey_values() {
+    fn planner_defaults_on_and_respects_falsey_values() {
         let key = "ARES_ORCHESTRATOR_PLANNER";
         std::env::remove_var(key);
         assert!(
-            !planner_enabled(),
-            "planner must be opt-in, or a gpt-5.2 planning turn fires on every op by default"
+            planner_enabled(),
+            "the orchestrator is the team lead; with the planner off nothing creates an \
+             orchestrator turn, so complete_operation is never called and the rules are the \
+             only scheduler"
         );
 
         for falsey in ["0", "false", "off", "no", "FALSE", " Off "] {
@@ -184,6 +211,47 @@ mod tests {
         }
 
         std::env::remove_var(key);
+    }
+
+    #[test]
+    fn the_first_wake_always_plans() {
+        assert!(
+            planning_turn_is_due(None, Duration::from_secs(60)),
+            "the warm-up delay already gates the first turn; the gap must not add a second wait"
+        );
+    }
+
+    #[test]
+    fn a_discovery_burst_cannot_outpace_the_minimum_gap() {
+        let min_gap = Duration::from_secs(60);
+        assert!(
+            !planning_turn_is_due(Some(Duration::from_secs(1)), min_gap),
+            "wake-on-discovery without a floor is what turned a 180s cadence into 208 turns in \
+             one op, because every publish woke the planner and single-flight caps concurrency \
+             rather than frequency"
+        );
+        assert!(!planning_turn_is_due(
+            Some(Duration::from_secs(59)),
+            min_gap
+        ));
+    }
+
+    #[test]
+    fn a_discovery_after_the_gap_plans_without_waiting_for_the_tick() {
+        let min_gap = Duration::from_secs(60);
+        assert!(planning_turn_is_due(Some(Duration::from_secs(60)), min_gap));
+        assert!(
+            planning_turn_is_due(Some(Duration::from_secs(61)), min_gap),
+            "reacting to published discoveries faster than the timer is the point of the signal"
+        );
+    }
+
+    #[test]
+    fn a_zero_gap_leaves_every_wake_eligible() {
+        assert!(planning_turn_is_due(
+            Some(Duration::from_secs(0)),
+            Duration::ZERO
+        ));
     }
 
     #[test]

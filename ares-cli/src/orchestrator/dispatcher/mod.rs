@@ -115,6 +115,8 @@ pub struct Dispatcher {
     pub credential_access_notify: Arc<Notify>,
     /// Notifies auto_delegation_enumeration to wake up when new creds arrive.
     pub delegation_notify: Arc<Notify>,
+    /// Notifies auto_orchestrator_planning that workers published discoveries.
+    pub planning_notify: Arc<Notify>,
     /// LLM runner — drives tasks through the Rust agent loop.
     pub llm_runner: Arc<LlmTaskRunner>,
     /// Per-credential concurrency limiter.
@@ -172,6 +174,7 @@ impl Dispatcher {
             ares_config,
             credential_access_notify: Arc::new(Notify::new()),
             delegation_notify: Arc::new(Notify::new()),
+            planning_notify: Arc::new(Notify::new()),
             llm_runner,
             // Allow up to 3 concurrent tasks per credential
             credential_inflight: CredentialInflight::new(3),

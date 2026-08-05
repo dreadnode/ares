@@ -822,6 +822,7 @@ pub async fn process_completed_task(
 
     dispatcher.credential_access_notify.notify_waiters();
     dispatcher.delegation_notify.notify_waiters();
+    dispatcher.planning_notify.notify_waiters();
 
     let _ = dispatcher.notify_state_update().await;
 }

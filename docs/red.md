@@ -145,8 +145,23 @@ outcome**, and the prompt says so.
 
 Guards: single-flight (one planning task at a time, via
 `tracker.count_for_role`), skipped while red is draining, and a warm-up delay
-so the first turn sees post-recon state. Opt-in: `ARES_ORCHESTRATOR_PLANNER=1`
-enables it, and the rules are the only scheduler otherwise.
+so the first turn sees post-recon state. On by default;
+`ARES_ORCHESTRATOR_PLANNER=0` disables it. Disabling it does not merely stop
+periodic planning — `orchestrator_plan` is the only task type that maps to
+`AgentRole::Orchestrator` and this loop is its only producer, so with the
+planner off no orchestrator turn is ever created. Nothing then calls the
+orchestrator-only tools, including `complete_operation`, the sole writer of
+`state.completed`; the op can only end on the completion caps.
+
+The planner wakes on two signals: its timer, and `planning_notify` — fired
+wherever workers publish discoveries into the coordination layer
+(`result_processing`), so a new credential or vuln gets a planning turn without
+waiting out the interval. A floor
+(`ARES_ORCHESTRATOR_PLANNER_MIN_GAP_SECS`, default 60s) bounds how often a wake
+can produce a turn. The floor is not optional: an earlier build woke on every
+proposal arrival with no floor and ran **208 planning turns in a 2h op** against
+a 180s timer that permits 40, because single-flight caps concurrency rather than
+frequency.
 
 The planning turn is also what rules on parked proposals, so when mediation is
 on the planner tick is capped at a third of the auto-release window
