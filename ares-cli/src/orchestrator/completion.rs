@@ -354,6 +354,35 @@ pub(crate) struct CompletionSnapshot {
     /// `Some(elapsed_since_dominance)` when the `all_forests_dominated_at`
     /// timestamp has been recorded; `None` before it's been set.
     pub all_dominated_for: Option<Duration>,
+    /// Time since the advancement watermark (exploited vulns + credentials +
+    /// hashes) last increased. `None` before the first tick establishes a
+    /// baseline. Only consulted past the soft cap.
+    pub since_last_advance: Option<Duration>,
+}
+
+const DEFAULT_EXTENSION_STALL_SECS: u64 = 600;
+
+fn extension_stall_timeout_from_env() -> Duration {
+    Duration::from_secs(
+        std::env::var("ARES_COMPLETION_EXTENSION_STALL_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_EXTENSION_STALL_SECS),
+    )
+}
+
+/// Runtime budget and stop-condition policy the decision helper applies.
+#[derive(Debug, Clone)]
+pub(crate) struct CompletionPolicy {
+    pub soft_max_runtime: Duration,
+    pub hard_max_runtime: Duration,
+    pub stop_on_da: bool,
+    pub stop_on_gt: bool,
+    pub grace_period: Duration,
+    /// How long the advancement watermark may sit still before a post-soft-cap
+    /// extension is treated as wedged rather than progressing.
+    pub extension_stall_timeout: Duration,
 }
 
 /// Outcome of a single completion check.
@@ -384,7 +413,11 @@ pub(crate) enum CompletionDecision {
 /// 1. `completed` flag set externally → Stop("operation marked completed")
 /// 2. `elapsed >= hard_max_runtime` → Stop("hard max runtime exceeded")
 /// 3. `elapsed >= soft_max_runtime`:
-///     - DA achieved AND undominated forests remain → fall through (extend)
+///     - DA achieved AND undominated forests remain AND the advancement
+///       watermark moved within `extension_stall_timeout` → fall through
+///       (extend)
+///     - DA achieved AND undominated forests remain AND the watermark is
+///       stale → Stop("extension stalled — no advancement")
 ///     - otherwise → Stop("max runtime exceeded")
 /// 4. `has_domain_admin && stop_on_da` → Stop on DA
 /// 5. `has_domain_admin && stop_on_gt`:
@@ -399,30 +432,32 @@ pub(crate) enum CompletionDecision {
 pub(crate) fn evaluate_completion(
     snapshot: &CompletionSnapshot,
     elapsed: Duration,
-    soft_max_runtime: Duration,
-    hard_max_runtime: Duration,
-    stop_on_da: bool,
-    stop_on_gt: bool,
-    grace_period: Duration,
+    policy: &CompletionPolicy,
 ) -> CompletionDecision {
     if snapshot.completed {
         return CompletionDecision::Stop("operation marked completed");
     }
-    if elapsed >= hard_max_runtime {
+    if elapsed >= policy.hard_max_runtime {
         return CompletionDecision::Stop("hard max runtime exceeded");
     }
-    if elapsed >= soft_max_runtime
-        && (!snapshot.has_domain_admin || snapshot.undominated_forests_empty)
-    {
-        return CompletionDecision::Stop("max runtime exceeded");
+    if elapsed >= policy.soft_max_runtime {
+        if !snapshot.has_domain_admin || snapshot.undominated_forests_empty {
+            return CompletionDecision::Stop("max runtime exceeded");
+        }
+        if snapshot
+            .since_last_advance
+            .is_some_and(|since| since >= policy.extension_stall_timeout)
+        {
+            return CompletionDecision::Stop("extension stalled — no advancement");
+        }
     }
     if !snapshot.has_domain_admin {
         return CompletionDecision::Continue;
     }
-    if stop_on_da {
+    if policy.stop_on_da {
         return CompletionDecision::Stop("domain admin achieved (stop_on_domain_admin)");
     }
-    if stop_on_gt {
+    if policy.stop_on_gt {
         return if snapshot.has_golden_ticket {
             CompletionDecision::Stop("golden ticket forged (stop_on_golden_ticket)")
         } else {
@@ -433,7 +468,7 @@ pub(crate) fn evaluate_completion(
         return CompletionDecision::Continue;
     }
     match snapshot.all_dominated_for {
-        Some(since) if since >= grace_period => {
+        Some(since) if since >= policy.grace_period => {
             CompletionDecision::Stop("all forests dominated (post-exploitation complete)")
         }
         Some(_) => CompletionDecision::Continue,
@@ -445,7 +480,7 @@ async fn snapshot_unless_hard_capped(
     state: &SharedState,
     elapsed: Duration,
     hard_max_runtime: Duration,
-) -> Option<(bool, bool, bool, Option<Duration>)> {
+) -> Option<(bool, bool, bool, Option<Duration>, u64)> {
     if elapsed >= hard_max_runtime {
         return None;
     }
@@ -455,7 +490,19 @@ async fn snapshot_unless_hard_capped(
         inner.has_golden_ticket,
         inner.completed,
         inner.all_forests_dominated_at.map(|t| t.elapsed()),
+        advancement_watermark(
+            inner.exploited_vulnerabilities.len(),
+            inner.credentials.len(),
+            inner.hashes.len(),
+        ),
     ))
+}
+
+/// Forward-progress signal for the post-soft-cap extension: material the op can
+/// only gain, never lose. A run that is genuinely closing on an undominated
+/// forest moves at least one of these; a wedged run moves none.
+pub(crate) fn advancement_watermark(exploited: usize, credentials: usize, hashes: usize) -> u64 {
+    exploited as u64 + credentials as u64 + hashes as u64
 }
 
 pub async fn wait_for_completion(
@@ -484,14 +531,19 @@ pub async fn wait_for_completion(
     // normal ceiling; the hard cap is the strict upper bound that fires even
     // when the op is still visibly progressing on an undominated forest.
     let hard_max_runtime = max_runtime.saturating_mul(2);
+    let extension_stall_timeout = extension_stall_timeout_from_env();
 
     info!(
         max_runtime_secs = max_runtime.as_secs(),
         hard_max_runtime_secs = hard_max_runtime.as_secs(),
+        extension_stall_timeout_secs = extension_stall_timeout.as_secs(),
         stop_on_domain_admin = stop_on_da,
         stop_on_golden_ticket = stop_on_gt,
         "Completion monitor started"
     );
+
+    let mut last_advancement: Option<u64> = None;
+    let mut last_advance_at = tokio::time::Instant::now();
 
     loop {
         // Check shutdown
@@ -502,7 +554,7 @@ pub async fn wait_for_completion(
 
         let elapsed = start.elapsed();
 
-        let Some((has_da, has_gt, completed, all_dominated_for)) =
+        let Some((has_da, has_gt, completed, all_dominated_for, advancement)) =
             snapshot_unless_hard_capped(state, elapsed, hard_max_runtime).await
         else {
             error!(
@@ -535,22 +587,31 @@ pub async fn wait_for_completion(
             false
         };
 
+        if last_advancement.is_none_or(|seen| advancement > seen) {
+            last_advancement = Some(advancement);
+            last_advance_at = tokio::time::Instant::now();
+        }
+
         let snapshot = CompletionSnapshot {
             has_domain_admin: has_da,
             has_golden_ticket: has_gt,
             completed,
             undominated_forests_empty,
             all_dominated_for,
+            since_last_advance: Some(last_advance_at.elapsed()),
         };
         let grace_period = Duration::from_secs(180);
         let decision = evaluate_completion(
             &snapshot,
             elapsed,
-            max_runtime,
-            hard_max_runtime,
-            stop_on_da,
-            stop_on_gt,
-            grace_period,
+            &CompletionPolicy {
+                soft_max_runtime: max_runtime,
+                hard_max_runtime,
+                stop_on_da,
+                stop_on_gt,
+                grace_period,
+                extension_stall_timeout,
+            },
         );
 
         let reason = match decision {
@@ -1654,6 +1715,7 @@ mod tests {
             completed: false,
             undominated_forests_empty: false,
             all_dominated_for: None,
+            since_last_advance: None,
         }
     }
 
@@ -1666,21 +1728,108 @@ mod tests {
     fn three_min() -> Duration {
         Duration::from_secs(180)
     }
+    fn policy(stop_on_da: bool, stop_on_gt: bool) -> CompletionPolicy {
+        CompletionPolicy {
+            soft_max_runtime: ten_min(),
+            hard_max_runtime: twenty_min(),
+            stop_on_da,
+            stop_on_gt,
+            grace_period: three_min(),
+            extension_stall_timeout: ten_min(),
+        }
+    }
+
+    fn extending_snapshot(since_last_advance: Duration) -> CompletionSnapshot {
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.undominated_forests_empty = false;
+        snap.since_last_advance = Some(since_last_advance);
+        snap
+    }
+
+    #[test]
+    fn extension_continues_while_the_watermark_is_still_moving() {
+        let snap = extending_snapshot(Duration::from_secs(60));
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
+            CompletionDecision::Continue,
+            "an op still gaining material must keep its extension"
+        );
+    }
+
+    #[test]
+    fn extension_stops_once_the_watermark_goes_stale() {
+        let snap = extending_snapshot(Duration::from_secs(600));
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
+            CompletionDecision::Stop("extension stalled — no advancement"),
+            "a wedged op must not ride the extension to the hard cap"
+        );
+    }
+
+    #[test]
+    fn a_stalled_watermark_below_the_soft_cap_does_not_stop_the_op() {
+        let snap = extending_snapshot(Duration::from_secs(6000));
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(60), &policy(false, false)),
+            CompletionDecision::Continue,
+            "the stall gate is an extension guard, not a general watchdog"
+        );
+    }
+
+    #[test]
+    fn an_unmeasured_watermark_preserves_the_old_extension_behaviour() {
+        let mut snap = extending_snapshot(Duration::ZERO);
+        snap.since_last_advance = None;
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
+            CompletionDecision::Continue
+        );
+    }
+
+    #[test]
+    fn the_hard_cap_still_wins_over_a_moving_watermark() {
+        let snap = extending_snapshot(Duration::ZERO);
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(1201), &policy(false, false)),
+            CompletionDecision::Stop("hard max runtime exceeded")
+        );
+    }
+
+    #[test]
+    fn the_watermark_only_counts_material_the_op_gained() {
+        assert_eq!(advancement_watermark(0, 0, 0), 0);
+        assert!(advancement_watermark(1, 2, 3) > advancement_watermark(1, 2, 2));
+        assert_eq!(advancement_watermark(2, 3, 4), 9);
+    }
+
+    #[test]
+    fn extension_stall_timeout_rejects_zero_and_garbage() {
+        let key = "ARES_COMPLETION_EXTENSION_STALL_SECS";
+        std::env::remove_var(key);
+        assert_eq!(
+            extension_stall_timeout_from_env(),
+            Duration::from_secs(DEFAULT_EXTENSION_STALL_SECS)
+        );
+        for bad in ["0", "abc", "", "-5"] {
+            std::env::set_var(key, bad);
+            assert_eq!(
+                extension_stall_timeout_from_env(),
+                Duration::from_secs(DEFAULT_EXTENSION_STALL_SECS),
+                "{bad} must fall back to the default"
+            );
+        }
+        std::env::set_var(key, "120");
+        assert_eq!(extension_stall_timeout_from_env(), Duration::from_secs(120));
+        std::env::remove_var(key);
+    }
 
     #[test]
     fn completion_completed_flag_wins() {
         let mut snap = empty_snapshot();
         snap.completed = true;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Stop("operation marked completed")
         );
     }
@@ -1689,15 +1838,7 @@ mod tests {
     fn completion_max_runtime_exceeded() {
         let snap = empty_snapshot();
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::from_secs(601),
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
             CompletionDecision::Stop("max runtime exceeded")
         );
     }
@@ -1706,15 +1847,7 @@ mod tests {
     fn completion_no_da_continues() {
         let snap = empty_snapshot();
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Continue
         );
     }
@@ -1724,15 +1857,7 @@ mod tests {
         let mut snap = empty_snapshot();
         snap.has_domain_admin = true;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                true,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(true, false)),
             CompletionDecision::Stop("domain admin achieved (stop_on_domain_admin)")
         );
     }
@@ -1742,28 +1867,12 @@ mod tests {
         let mut snap = empty_snapshot();
         snap.has_domain_admin = true;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                false,
-                true,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, true)),
             CompletionDecision::Continue
         );
         snap.has_golden_ticket = true;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                false,
-                true,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, true)),
             CompletionDecision::Stop("golden ticket forged (stop_on_golden_ticket)")
         );
     }
@@ -1774,15 +1883,7 @@ mod tests {
         snap.has_domain_admin = true;
         snap.undominated_forests_empty = false;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Continue
         );
     }
@@ -1793,15 +1894,7 @@ mod tests {
         snap.has_domain_admin = true;
         snap.undominated_forests_empty = true;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::BeginGracePeriod
         );
     }
@@ -1813,15 +1906,7 @@ mod tests {
         snap.undominated_forests_empty = true;
         snap.all_dominated_for = Some(Duration::from_secs(60));
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Continue
         );
     }
@@ -1833,15 +1918,7 @@ mod tests {
         snap.undominated_forests_empty = true;
         snap.all_dominated_for = Some(Duration::from_secs(181));
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Stop("all forests dominated (post-exploitation complete)")
         );
     }
@@ -1852,15 +1929,7 @@ mod tests {
         snap.has_domain_admin = true;
         snap.completed = true;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                true,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(true, false)),
             CompletionDecision::Stop("operation marked completed")
         );
     }
@@ -1873,15 +1942,7 @@ mod tests {
         snap.has_domain_admin = true;
         snap.undominated_forests_empty = true;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::from_secs(601),
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min(),
-            ),
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
             CompletionDecision::Stop("max runtime exceeded")
         );
     }
@@ -1896,15 +1957,7 @@ mod tests {
         snap.has_domain_admin = true;
         snap.undominated_forests_empty = false;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::from_secs(601),
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min(),
-            ),
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
             CompletionDecision::Continue
         );
     }
@@ -1953,15 +2006,7 @@ mod tests {
         snap.has_domain_admin = true;
         snap.undominated_forests_empty = false;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::from_secs(1201),
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min(),
-            ),
+            evaluate_completion(&snap, Duration::from_secs(1201), &policy(false, false)),
             CompletionDecision::Stop("hard max runtime exceeded")
         );
     }
@@ -2054,15 +2099,7 @@ mod tests {
         snap.undominated_forests_empty = true;
         snap.all_dominated_for = Some(three_min());
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::ZERO,
-                ten_min(),
-                twenty_min(),
-                false,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Stop("all forests dominated (post-exploitation complete)")
         );
     }
