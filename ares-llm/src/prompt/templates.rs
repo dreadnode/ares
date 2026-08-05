@@ -17,6 +17,8 @@ const ACL_TEMPLATE: &str = include_str!("../../templates/redteam/agents/acl.md.t
 const PRIVESC_TEMPLATE: &str = include_str!("../../templates/redteam/agents/privesc.md.tera");
 const LATERAL_TEMPLATE: &str = include_str!("../../templates/redteam/agents/lateral.md.tera");
 const COERCION_TEMPLATE: &str = include_str!("../../templates/redteam/agents/coercion.md.tera");
+const ORCHESTRATOR_TEMPLATE: &str =
+    include_str!("../../templates/redteam/agents/orchestrator.md.tera");
 const SYSTEM_INSTRUCTIONS_TEMPLATE: &str =
     include_str!("../../templates/redteam/agents/system_instructions.md.tera");
 
@@ -39,6 +41,8 @@ const TASK_RECON_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/re
 const TASK_CRACK_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/crack.md.tera");
 const TASK_LATERAL_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/lateral.md.tera");
 const TASK_COERCION_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/coercion.md.tera");
+const TASK_ORCHESTRATOR_PLAN_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/orchestrator_plan.md.tera");
 const TASK_PRIVESC_ENUMERATION_TEMPLATE: &str =
     include_str!("../../templates/redteam/tasks/privesc_enumeration.md.tera");
 const TASK_ACL_ANALYSIS_TEMPLATE: &str =
@@ -127,6 +131,7 @@ pub const TEMPLATE_ACL: &str = "redteam/agents/acl";
 pub const TEMPLATE_PRIVESC: &str = "redteam/agents/privesc";
 pub const TEMPLATE_LATERAL: &str = "redteam/agents/lateral";
 pub const TEMPLATE_COERCION: &str = "redteam/agents/coercion";
+pub const TEMPLATE_ORCHESTRATOR: &str = "redteam/agents/orchestrator";
 pub const TEMPLATE_SYSTEM_INSTRUCTIONS: &str = "redteam/agents/system_instructions";
 
 // Special-purpose templates (from Jinja2 ports)
@@ -143,6 +148,7 @@ pub const TASK_RECON: &str = "redteam/tasks/recon";
 pub const TASK_CRACK: &str = "redteam/tasks/crack";
 pub const TASK_LATERAL: &str = "redteam/tasks/lateral";
 pub const TASK_COERCION: &str = "redteam/tasks/coercion";
+pub const TASK_ORCHESTRATOR_PLAN: &str = "redteam/tasks/orchestrator_plan";
 pub const TASK_PRIVESC_ENUMERATION: &str = "redteam/tasks/privesc_enumeration";
 pub const TASK_ACL_ANALYSIS: &str = "redteam/tasks/acl_analysis";
 pub const TASK_ACL_CHAIN_STEP: &str = "redteam/tasks/acl_chain_step";
@@ -211,6 +217,7 @@ static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
         (TEMPLATE_PRIVESC, PRIVESC_TEMPLATE),
         (TEMPLATE_LATERAL, LATERAL_TEMPLATE),
         (TEMPLATE_COERCION, COERCION_TEMPLATE),
+        (TEMPLATE_ORCHESTRATOR, ORCHESTRATOR_TEMPLATE),
         (TEMPLATE_SYSTEM_INSTRUCTIONS, SYSTEM_INSTRUCTIONS_TEMPLATE),
         // Task templates
         (TEMPLATE_INITIAL_TASK, INITIAL_TASK_TEMPLATE),
@@ -231,6 +238,7 @@ static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
         (TASK_CRACK, TASK_CRACK_TEMPLATE),
         (TASK_LATERAL, TASK_LATERAL_TEMPLATE),
         (TASK_COERCION, TASK_COERCION_TEMPLATE),
+        (TASK_ORCHESTRATOR_PLAN, TASK_ORCHESTRATOR_PLAN_TEMPLATE),
         (TASK_PRIVESC_ENUMERATION, TASK_PRIVESC_ENUMERATION_TEMPLATE),
         (TASK_ACL_ANALYSIS, TASK_ACL_ANALYSIS_TEMPLATE),
         (TASK_ACL_CHAIN_STEP, TASK_ACL_CHAIN_STEP_TEMPLATE),
@@ -567,6 +575,28 @@ mod tests {
                 .unwrap();
         assert!(result.contains("Coercion Agent"));
         assert!(result.contains("- petitpotam"));
+    }
+
+    #[test]
+    fn render_orchestrator_template() {
+        let capabilities = vec!["dispatch_recon".to_string()];
+        let result =
+            render_agent_instructions(TEMPLATE_ORCHESTRATOR, &capabilities, false, &[], TEST_OP)
+                .unwrap();
+        assert!(result.contains("Red Team Orchestrator"));
+        assert!(result.contains("get_pending_tasks"));
+    }
+
+    #[test]
+    fn orchestrator_template_shows_no_secret_arguments() {
+        let result =
+            render_agent_instructions(TEMPLATE_ORCHESTRATOR, &[], false, &[], TEST_OP).unwrap();
+        for arg in ["password=", "hash_value=", "nt_hash=", "ticket_path="] {
+            assert!(
+                !result.contains(arg),
+                "orchestrator template still shows a secret argument: {arg}"
+            );
+        }
     }
 
     #[test]

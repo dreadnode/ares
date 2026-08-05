@@ -28,6 +28,7 @@ use redis::aio::ConnectionLike;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
+use crate::orchestrator::automation::GOLDEN_TICKET_DISPATCHED;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::output_extraction;
 use crate::orchestrator::results::CompletedTask;
@@ -284,6 +285,13 @@ pub async fn process_completed_task(
             .await;
         }
     }
+
+    release_unforged_golden_ticket_domain(
+        &task_params_snapshot,
+        task_domain.as_deref(),
+        dispatcher,
+    )
+    .await;
 
     // Handle exploit task outcomes — create timeline events for both success and failure
     if is_exploit_scoped_task_id(&completed.task_id) {
@@ -1174,6 +1182,64 @@ fn is_exploit_scoped_task_id(task_id: &str) -> bool {
         || task_id.starts_with("privesc_")
 }
 
+const MAX_GOLDEN_TICKET_FORGE_ATTEMPTS: u32 = 2;
+
+async fn release_unforged_golden_ticket_domain(
+    task_params: &std::collections::HashMap<String, serde_json::Value>,
+    task_domain: Option<&str>,
+    dispatcher: &Arc<Dispatcher>,
+) {
+    let is_golden_ticket = task_params
+        .get("technique")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| t.eq_ignore_ascii_case("golden_ticket"));
+    if !is_golden_ticket {
+        return;
+    }
+    let Some(domain) = task_domain.filter(|d| !d.is_empty()).map(str::to_lowercase) else {
+        return;
+    };
+    {
+        let state = dispatcher.state.read().await;
+        if state
+            .exploited_vulnerabilities
+            .contains(&format!("golden_ticket_{domain}"))
+        {
+            return;
+        }
+    }
+    let attempt = {
+        let mut state = dispatcher.state.write().await;
+        let n = state
+            .golden_ticket_forge_attempts
+            .entry(domain.clone())
+            .or_insert(0);
+        *n += 1;
+        *n
+    };
+    if attempt >= MAX_GOLDEN_TICKET_FORGE_ATTEMPTS {
+        warn!(
+            domain = %domain,
+            attempt,
+            "Golden ticket forge produced no ticket after repeated attempts — leaving domain closed"
+        );
+        return;
+    }
+    dispatcher
+        .state
+        .write()
+        .await
+        .unmark_processed(GOLDEN_TICKET_DISPATCHED, &domain);
+    let _ = dispatcher
+        .state
+        .unpersist_dedup(&dispatcher.queue, GOLDEN_TICKET_DISPATCHED, &domain)
+        .await;
+    warn!(
+        domain = %domain,
+        "Golden ticket forge produced no ticket — reopening domain for retry"
+    );
+}
+
 /// True when `vuln_type` (as recorded in `task.params.vuln_type`) belongs
 /// to a shadow-credentials dispatch — the shape of the vuln types kept in
 /// sync with `automation::shadow_credentials::is_shadow_cred_candidate`.
@@ -1586,7 +1652,10 @@ pub(crate) fn reconcile_extracted_credential_domain(
     let user_lc = username.to_lowercase();
     let mut domains: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for u in users {
-        if u.username.to_lowercase() == user_lc && !u.domain.is_empty() {
+        if u.username.to_lowercase() == user_lc
+            && !u.domain.is_empty()
+            && !user_source_is_model_authored(&u.source)
+        {
             domains.insert(u.domain.to_lowercase());
         }
     }
@@ -1598,6 +1667,10 @@ pub(crate) fn reconcile_extracted_credential_domain(
         return None;
     }
     Some(only)
+}
+
+pub(crate) fn user_source_is_model_authored(source: &str) -> bool {
+    matches!(source, "asrep_roastable_finding")
 }
 
 fn is_low_trust_realm_inferred_credential_source(source: &str) -> bool {

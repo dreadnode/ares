@@ -2876,6 +2876,49 @@ mod reconcile_extracted_credential_domain {
         }
     }
 
+    fn user_from(username: &str, domain: &str, source: &str) -> User {
+        User {
+            source: source.to_string(),
+            ..user(username, domain)
+        }
+    }
+
+    #[test]
+    fn a_model_authored_user_cannot_rewrite_a_parser_credential_realm() {
+        let users = vec![user_from(
+            "alice",
+            "fabrikam.local",
+            "asrep_roastable_finding",
+        )];
+        assert_eq!(
+            reconcile_extracted_credential_domain(&users, "alice", "contoso.local"),
+            None,
+            "report_finding is a model assertion and must not repoint a parsed credential"
+        );
+    }
+
+    #[test]
+    fn a_parser_derived_user_still_corrects_the_realm() {
+        let users = vec![user_from("alice", "child.contoso.local", "ldap_extraction")];
+        assert_eq!(
+            reconcile_extracted_credential_domain(&users, "alice", "contoso.local"),
+            Some("child.contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn a_model_authored_user_does_not_mask_a_parser_derived_one() {
+        let users = vec![
+            user_from("alice", "fabrikam.local", "asrep_roastable_finding"),
+            user_from("alice", "child.contoso.local", "ldap_extraction"),
+        ];
+        assert_eq!(
+            reconcile_extracted_credential_domain(&users, "alice", "contoso.local"),
+            Some("child.contoso.local".to_string()),
+            "the model-authored row must be ignored, not treated as an ambiguity"
+        );
+    }
+
     #[test]
     fn corrects_when_username_unique_in_other_domain() {
         let users = vec![user("alice", "child.contoso.local")];
@@ -3735,7 +3778,7 @@ const ACL_GRANTS_SRC: &str = include_str!("acl_grants.rs");
 const TIMELINE_SRC: &str = include_str!("timeline.rs");
 
 #[test]
-fn every_credential_publish_path_routes_through_the_shared_helper() {
+fn no_credential_publish_path_bypasses_the_shared_helper() {
     for (name, src) in [
         ("mod.rs", RESULT_PROCESSING_SRC),
         ("discovery_polling.rs", DISCOVERY_POLLING_SRC),
@@ -3782,6 +3825,16 @@ fn acl_grants_never_reads_a_credential_out_of_tool_arguments() {
         !ACL_GRANTS_SRC.contains(r#"arg("new_password")"#),
         "acl_grants.rs reads new_password out of the tool arguments again — that is \
          model-authored input, not parsed tool output, and it lands in state.credentials"
+    );
+}
+
+#[test]
+fn acl_grants_credits_no_credential_from_a_model_authored_password() {
+    assert!(
+        !ACL_GRANTS_SRC.contains("publish_credential_credited("),
+        "acl_grants.rs credits a credential again — a bloodyAD reset only proves \
+         the write landed, never what the password now is, so the value could \
+         only have come from the model's own new_password argument"
     );
 }
 

@@ -88,6 +88,7 @@ tool assignments. For detailed responsibilities, see sections below.
 
 | Agent | Purpose | Max Steps | Tool Classes |
 |-------|---------|-----------|--------------|
+| **ORCHESTRATOR** | Periodic gap-filling planner (dispatches, never executes) | 200 | `OrchestratorTools` |
 | **RECON** | Network scanning, enumeration, BloodHound | 100 | `NetworkEnumerationTools`, `BloodHoundTools`, `RedTeamReportingTools` |
 | **CREDENTIAL_ACCESS** | Password attacks, hash extraction | 100 | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `GMSATools` |
 | **CRACKER** | Offline hash cracking | 150 | `CrackingTools`, `CrackerCallbackTools` |
@@ -119,25 +120,114 @@ Models can be configured via environment variables (in order of precedence):
 
 ### Orchestrator Service
 
-**Purpose**: Central coordinator. It is a deterministic Rust service, **not an
-LLM agent** — nothing in it prompts a model to decide what to attack next.
+**Purpose**: Central coordinator. The scheduling is deterministic Rust; a
+periodic LLM planning turn runs *alongside* it to catch what the rules miss.
 
 **Process**: `ares orchestrator` (separate from worker processes)
 
-**What it does**:
+**What the deterministic part does**:
 
 - Runs the automations in `ares-cli/src/orchestrator/automation/`, which read
   operation state and submit follow-on tasks via `Dispatcher::throttled_submit`
 - Hosts every red agent loop in-process (`llm_runner.rs`), one `tokio` task per
   dispatched task, and owns the per-role LLM providers
-- Decides completion deterministically in `orchestrator/completion.rs`
+- Decides completion in `orchestrator/completion.rs`
 
-**What it is not**: earlier revisions of this document described a strategic
-LLM orchestrator agent with `dispatch_*` tools and a `complete_operation` call.
-That agent never ran — no code path ever produced its role, so its tools were
-never advertised to a model. The role, its tools, its prompt template and its
-dispatch handler were removed; the tool names stay trapped in
-`REMOVED_CALLBACK_TOOLS` so a hallucinated call cannot reach a worker.
+**What the planning turn does**: `auto_orchestrator_planning` submits an
+`orchestrator_plan` task on an interval. It runs as `AgentRole::Orchestrator`
+with `orchestrator.md.tera`, and may call `dispatch_*` to queue work or
+`complete_operation` to end the operation. Its purpose is *gap-filling*, not
+scheduling: the rules already dispatch the standard matrix, so the planner
+looks for work that needs two facts correlated across tools — a domain
+enumerated by one technique but not another, a discovered vuln nothing claimed,
+an uncracked hash with no crack task. **Dispatching nothing is its normal
+outcome**, and the prompt says so.
+
+Guards: single-flight (one planning task at a time, via
+`tracker.count_for_role`), skipped while red is draining, and a warm-up delay
+so the first turn sees post-recon state. `ARES_ORCHESTRATOR_PLANNER=0` disables
+it and leaves the rules as the only scheduler.
+
+### Mediation: automations as the orchestrator's instruments
+
+On by default; `ARES_ORCHESTRATOR_MEDIATION=0` turns it off and leaves the
+deterministic rules as the only scheduler. This default is what makes the
+orchestrator the decision-maker rather than a supervisor over an
+already-scheduled system.
+
+With mediation on, dispatch of *vetoable* work does not run immediately. It is
+parked in a **proposal pool** (`orchestrator/proposals.rs`) and the orchestrator
+rules on it with `get_proposed_work` / `approve_work` / `reject_work`. The
+automations keep their detection logic and payload construction unchanged — the
+orchestrator selects from validated, executable work rather than composing tool
+calls, so it cannot name a `vuln_id`, host or principal that does not exist.
+
+**Only a veto changes what runs.** Approved work dispatches; unreviewed work
+auto-releases and dispatches too. The two paths are indistinguishable in
+outcome, so approving is not what makes mediation worth its latency — rejecting
+is. Measured on `op-20260731-174811` with every task type mediated: 71 approved,
+353 auto-released, and **8 rejected**. Only those 8 dispatches differed from
+the un-mediated run, at the cost of a review window on all 432.
+
+`VETOABLE_TASK_TYPES` (`proposals.rs`) therefore scopes mediation to work where
+a veto has value — `exploit`, `lateral`, `coercion`, `acl_chain_step`. Routine
+enumeration, credential access and cracking dispatch straight through. This cuts
+review volume by roughly an order of magnitude so the orchestrator can actually
+keep up with the queue it is shown, instead of rubber-stamping a fraction of it
+while the rest expires. `ARES_ORCHESTRATOR_MEDIATION_SCOPE=all` restores full
+mediation.
+
+The narrower scope buys a longer window: 180s rather than 60s. The tradeoff is
+per-item latency — an exploit the orchestrator never looks at now waits three
+minutes before auto-release instead of one. Fewer dispatches pay that cost, but
+each pays more of it, so an orchestrator whose turn cadence exceeds the window
+adds roughly three minutes to every exploit in the operation. Shorten
+`ARES_ORCHESTRATOR_MEDIATION_WINDOW_SECS` if time-to-DA matters more than review
+coverage.
+
+The gate is a single line in `throttled_submit_outcome_inner`, which every
+automation dispatch already passes through. Dedup reuses
+`DeferredTask::signature()`, so an automation re-proposing the same work each
+tick collapses to one pool entry.
+
+Three properties make it safe to leave on:
+
+- **Fail-open.** `spawn_proposal_sweeper` releases anything the orchestrator has
+  not ruled on within the window (default 60s). A stalled, rate-limited or dead
+  orchestrator degrades to the un-mediated behavior plus that delay, never to a
+  frozen operation.
+- **Cap fall-through.** If the pool is at capacity, dispatch proceeds directly
+  rather than dropping work, so the cap cannot stall red.
+- **No deadlock.** `should_mediate` exempts `target_role == "orchestrator"` (the
+  planning task itself), orchestrator-directed dispatches (its own `dispatch_*`,
+  via a task-local), and approved releases. Each exemption has a named test in
+  `submission.rs::mediation_gate_tests`.
+
+Rejections are remembered by signature for a cooldown
+(`ARES_ORCHESTRATOR_MEDIATION_REJECTION_TTL_SECS`, default 600) so a rejected
+proposal is not re-proposed on the next tick. Approval frees the signature, so
+the same work can be proposed again later.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `ARES_ORCHESTRATOR_MEDIATION` | on | Route automation dispatch through the orchestrator |
+| `ARES_ORCHESTRATOR_MEDIATION_SCOPE` | vetoable | `all` mediates every task type instead |
+| `ARES_ORCHESTRATOR_MEDIATION_WINDOW_SECS` | 180 | How long work waits before auto-release |
+| `ARES_ORCHESTRATOR_MEDIATION_CAPACITY` | 200 | Pool cap before fall-through |
+| `ARES_ORCHESTRATOR_MEDIATION_REJECTION_TTL_SECS` | 600 | Rejection cooldown |
+
+**Privilege boundary**: `dispatch_*` and `complete_operation` are offered to the
+orchestrator alone, but the agent loop routes callbacks by *tool name* for every
+role. `OrchestratorCallbackHandler` therefore re-checks the caller's role and
+refuses these tools for workers — without that check, a worker hallucinating
+`complete_operation` would end the operation, and one hallucinating
+`dispatch_recon` would queue a real task.
+
+**Secret handling**: the orchestrator names principals (`username`, `domain`)
+and never sees secret material. `strip_secret_fields` removes secret-bearing
+properties from its schemas, and the dispatch handlers resolve the secret out of
+operation state. `get_hash_value` stays in `REMOVED_CALLBACK_TOOLS` — offered to
+no role — because raw hash material has no reason to enter LLM context.
 
 ### RECON
 
@@ -266,10 +356,13 @@ dispatch handler were removed; the tool names stay trapped in
 
 ## Operation Lifecycle
 
-> **Notation**: `dispatch_recon(...)` / `complete_operation()` below describe *what
-> gets submitted*, not LLM tool calls. There is no orchestrator agent; the
-> automations in `ares-cli/src/orchestrator/automation/` submit these tasks in
-> Rust, and completion is decided by `orchestrator/completion.rs`.
+> **Notation**: `dispatch_recon(...)` / `complete_operation()` below are real tool
+> names, but most dispatches in a run are submitted by the deterministic
+> automations in `ares-cli/src/orchestrator/automation/` rather than called by a
+> model. The orchestrator agent calls them when it is planning (and, under
+> `ARES_ORCHESTRATOR_MEDIATION`, when approving proposed work); completion is
+> decided by `orchestrator/completion.rs` unless the orchestrator sets the
+> `completed` flag via `complete_operation`.
 
 
 ### Phase 1: Initial Reconnaissance
@@ -628,10 +721,13 @@ When any agent discovers a credential:
 
 ## Task Flow Example
 
-> **Notation**: `dispatch_recon(...)` / `complete_operation()` below describe *what
-> gets submitted*, not LLM tool calls. There is no orchestrator agent; the
-> automations in `ares-cli/src/orchestrator/automation/` submit these tasks in
-> Rust, and completion is decided by `orchestrator/completion.rs`.
+> **Notation**: `dispatch_recon(...)` / `complete_operation()` below are real tool
+> names, but most dispatches in a run are submitted by the deterministic
+> automations in `ares-cli/src/orchestrator/automation/` rather than called by a
+> model. The orchestrator agent calls them when it is planning (and, under
+> `ARES_ORCHESTRATOR_MEDIATION`, when approving proposed work); completion is
+> decided by `orchestrator/completion.rs` unless the orchestrator sets the
+> `completed` flag via `complete_operation`.
 
 
 ```text

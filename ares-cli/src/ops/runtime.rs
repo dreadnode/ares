@@ -40,8 +40,13 @@ fn format_retained(counts: &ares_core::blue_invalidation::BlueInvalidatedTasks) 
         return Vec::new();
     }
     let plural = if counts.retained_total == 1 { "" } else { "s" };
+    let cause = if counts.blue_was_off() {
+        "no KDC_ERR_CLIENT_REVOKED, blue not running"
+    } else {
+        "no KDC_ERR_CLIENT_REVOKED, no blue revocation on the principal"
+    };
     let mut lines = vec![format!(
-        "Note: {} deferred task{plural} kept despite an inferred credential rejection — credential hidden from the LLM, queued work left intact (no KDC_ERR_CLIENT_REVOKED, blue not running)",
+        "Note: {} deferred task{plural} kept despite an inferred credential rejection — credential hidden from the LLM, queued work left intact ({cause})",
         counts.retained_total
     )];
     if let Some(line) = breakdown_line("role", &counts.retained_roles_by_count()) {
@@ -65,12 +70,17 @@ fn format_blue_invalidated(
     let inferred = counts.red_inferred_total();
     let headline = if inferred > 0 && blue > 0 {
         format!(
-            "Warning: {} deferred task{plural} deleted before dispatch — {blue} with blue active, {inferred} inferred from red's own tool failures with blue off (red verification may be voided)",
+            "Warning: {} deferred task{plural} deleted before dispatch — {blue} by a blue action, {inferred} inferred from red's own tool failures with no blue action behind them (red verification may be voided)",
+            counts.total
+        )
+    } else if inferred > 0 && counts.blue_was_off() {
+        format!(
+            "Warning: {} deferred task{plural} deleted before dispatch by inferred credential/host failure — blue was not running, so this is red's own auth noise and NOT blue containment (red verification may be voided)",
             counts.total
         )
     } else if inferred > 0 {
         format!(
-            "Warning: {} deferred task{plural} deleted before dispatch by inferred credential/host failure — blue was not running, so this is red's own auth noise and NOT blue containment (red verification may be voided)",
+            "Warning: {} deferred task{plural} deleted before dispatch by inferred credential/host failure — no blue action stands behind these, so this is red's own auth noise and NOT blue containment (red verification may be voided)",
             counts.total
         )
     } else {
@@ -351,6 +361,7 @@ mod tests {
             by_attribution: Default::default(),
             retained_total: 0,
             retained_by_role: Default::default(),
+            blue_team_enabled: None,
         }
     }
 
@@ -421,14 +432,20 @@ mod tests {
         assert_eq!(lines[2], "  by role: recon 40, lateral 35");
     }
 
-    #[test]
-    fn blue_off_drops_are_never_reported_as_blue_containment() {
+    fn inferred_credential_drops(
+        blue_team_enabled: Option<bool>,
+    ) -> ares_core::blue_invalidation::BlueInvalidatedTasks {
         let mut c = with_attribution(counts(11, &[("recon", 11)], &[]), 0, 11);
         c.by_reason = [("credential_rejected_inferred".to_string(), 11_u64)]
             .into_iter()
             .collect();
+        c.blue_team_enabled = blue_team_enabled;
+        c
+    }
 
-        let lines = format_blue_invalidated(&c);
+    #[test]
+    fn blue_off_drops_are_never_reported_as_blue_containment() {
+        let lines = format_blue_invalidated(&inferred_credential_drops(Some(false)));
 
         assert!(
             !lines[0].contains("by blue containment"),
@@ -445,10 +462,46 @@ mod tests {
     }
 
     #[test]
+    fn inferred_drops_with_blue_running_do_not_claim_blue_was_off() {
+        let lines = format_blue_invalidated(&inferred_credential_drops(Some(true)));
+
+        assert!(
+            !lines[0].contains("blue was not running"),
+            "headline calls a live blue team absent: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("by blue containment"),
+            "headline still blames blue: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("no blue action stands behind these"),
+            "got {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn drops_from_an_operation_predating_the_flag_stay_agnostic() {
+        let lines = format_blue_invalidated(&inferred_credential_drops(None));
+        assert!(
+            !lines[0].contains("blue was not running"),
+            "unknown enablement asserted as blue-off: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("no blue action stands behind these"),
+            "got {}",
+            lines[0]
+        );
+    }
+
+    #[test]
     fn mixed_attribution_headline_splits_the_two_causes() {
         let c = with_attribution(counts(9, &[("recon", 9)], &[]), 4, 5);
         let lines = format_blue_invalidated(&c);
-        assert!(lines[0].contains("4 with blue active"), "got {}", lines[0]);
+        assert!(lines[0].contains("4 by a blue action"), "got {}", lines[0]);
         assert!(
             lines[0].contains("5 inferred from red's own tool failures"),
             "got {}",

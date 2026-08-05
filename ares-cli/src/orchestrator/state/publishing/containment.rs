@@ -84,7 +84,7 @@ impl SharedState {
                 username = %username,
                 domain = %domain,
                 source = %source,
-                "Credential rejected — inferred dead, NOT attributed to blue (blue not running)"
+                "Credential rejected — inferred dead, NOT attributed to blue (no blue revocation on this principal)"
             ),
         }
         true

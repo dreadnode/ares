@@ -117,7 +117,7 @@ pub enum CallbackResult {
 /// built-in handler will be tried next.
 #[async_trait::async_trait]
 pub trait CallbackHandler: Send + Sync {
-    async fn handle_callback(&self, call: &ToolCall) -> Option<Result<CallbackResult>>;
+    async fn handle_callback(&self, call: &ToolCall, role: &str) -> Option<Result<CallbackResult>>;
 
     /// Check if a tool name should be routed as a callback rather than
     /// dispatched to a worker. Default returns false for all tools.

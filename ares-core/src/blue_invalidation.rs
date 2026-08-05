@@ -19,6 +19,7 @@
 //! | `type:{task_type}` | Tasks dropped, per task type |
 //! | `reason:{kind}` | Tasks dropped, per containment kind |
 //! | `attribution:{attribution}` | Tasks dropped, split by who the drop can honestly be blamed on |
+//! | `blue_enabled` | `1`/`0`, whether blue ran for the operation at all |
 //! | `retained_total` | Tasks *kept* despite a containment observation too weak to delete them |
 //! | `retained_role:{target_role}` | Retained tasks, per agent role |
 //!
@@ -31,10 +32,19 @@
 //!
 //! Red never sees a blue containment action. It sees a tool failing with a
 //! string such as `STATUS_LOGON_FAILURE` and infers one. That inference is
-//! only admissible when blue was actually running, so every drop carries a
-//! [`ContainmentAttribution`] and the `reason:` field is named after what the
-//! evidence supports: `credential_revoked` when blue was live,
-//! `credential_rejected_inferred` when it was not.
+//! only admissible when a blue action actually stands behind the failure, so
+//! every drop carries a [`ContainmentAttribution`] and the `reason:` field is
+//! named after what the evidence supports: `credential_revoked` when blue
+//! revoked the principal, `credential_rejected_inferred` when nothing blue did
+//! explains the reject.
+//!
+//! The blue-action test is per drop, not per operation. Host and realm drops
+//! ask whether blue ran at all; credential drops ask the narrower question of
+//! whether blue actuated *that* principal's revocation, because a live blue
+//! team that never touched `alice` is no explanation for `alice` failing to
+//! authenticate. `blue_enabled` is recorded
+//! separately so a reader can tell the two apart and only claim "blue was not
+//! running" when that is the actual reason.
 
 use std::collections::BTreeMap;
 
@@ -50,6 +60,8 @@ const TYPE_PREFIX: &str = "type";
 const REASON_PREFIX: &str = "reason";
 /// HASH field prefix for per-attribution counters.
 const ATTRIBUTION_PREFIX: &str = "attribution";
+/// HASH field recording whether blue ran for the operation at all.
+const FIELD_BLUE_ENABLED: &str = "blue_enabled";
 /// HASH field holding the operation-wide retained total.
 const FIELD_RETAINED_TOTAL: &str = "retained_total";
 /// HASH field prefix for per-role retained counters.
@@ -58,17 +70,19 @@ const RETAINED_ROLE_PREFIX: &str = "retained_role";
 /// Who a dropped task can honestly be blamed on.
 ///
 /// The classifier that produces containment observations reads red's own tool
-/// output; it has no channel to blue. The one fact the orchestrator does hold
-/// is whether blue was enabled for the operation, which is what separates
-/// these two variants.
+/// output; it has no channel to blue. What separates these two variants is
+/// whether the orchestrator holds a blue action that explains the failure —
+/// blue being enabled for host and realm drops, blue having actuated that
+/// specific principal's revocation for credential drops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub enum ContainmentAttribution {
-    /// Blue was running for this operation, so a containment action is a live
-    /// explanation for the failure red observed.
+    /// A blue action covers this drop, so containment is a live explanation
+    /// for the failure red observed.
     BlueActive,
-    /// Blue was not running. The drop rests entirely on red's own failing
-    /// tool output — a stale hash, a lockout, an expired ticket or a wrong
-    /// password guess — and is not evidence of any blue action.
+    /// No blue action covers this drop, either because blue never ran or
+    /// because it never acted on this principal. The drop rests entirely on
+    /// red's own failing tool output — a stale hash, a lockout, an expired
+    /// ticket or a wrong password guess.
     RedInferred,
 }
 
@@ -81,9 +95,13 @@ impl ContainmentAttribution {
         }
     }
 
-    /// Resolve from the operation's blue-team enablement.
-    pub fn from_blue_enabled(blue_enabled: bool) -> Self {
-        if blue_enabled {
+    /// Resolve from whether a blue action covers the drop.
+    ///
+    /// Callers pass the test appropriate to what they are dropping; passing
+    /// operation-wide blue enablement for a credential drop is what makes a
+    /// live blue team look responsible for red's own failed logons.
+    pub fn from_blue_action(blue_acted: bool) -> Self {
+        if blue_acted {
             Self::BlueActive
         } else {
             Self::RedInferred
@@ -118,10 +136,10 @@ impl ContainmentKind {
 
     /// Stable identifier naming what the evidence actually establishes.
     ///
-    /// With blue running, the containment reading stands. With blue off, the
-    /// same tool output only proves that an authentication was refused, a host
-    /// was unreachable, or a ticket failed to decrypt, so the name says that
-    /// instead of asserting a revocation nobody performed.
+    /// With a blue action behind it, the containment reading stands. Without
+    /// one, the same tool output only proves that an authentication was
+    /// refused, a host was unreachable, or a ticket failed to decrypt, so the
+    /// name says that instead of asserting a revocation nobody performed.
     pub fn reason_field(self, attribution: ContainmentAttribution) -> &'static str {
         match attribution {
             ContainmentAttribution::BlueActive => self.as_str(),
@@ -175,6 +193,10 @@ pub struct BlueInvalidatedTasks {
     pub retained_total: u64,
     /// Retained tasks per agent role.
     pub retained_by_role: BTreeMap<String, u64>,
+    /// Whether blue ran for this operation at all. `None` for operations that
+    /// predate the field, which callers must treat as unknown rather than as
+    /// "blue was off".
+    pub blue_team_enabled: Option<bool>,
 }
 
 impl BlueInvalidatedTasks {
@@ -197,12 +219,19 @@ impl BlueInvalidatedTasks {
             .unwrap_or(0)
     }
 
-    /// Drops recorded with blue off, which cannot be blue's doing.
+    /// Drops no blue action covers, which cannot be blue's doing.
     pub fn red_inferred_total(&self) -> u64 {
         self.by_attribution
             .get(ContainmentAttribution::RedInferred.as_str())
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Whether blue being off is the established reason these drops carry no
+    /// blue attribution, as opposed to blue running but never acting on the
+    /// principals involved.
+    pub fn blue_was_off(&self) -> bool {
+        self.blue_team_enabled == Some(false)
     }
 
     /// Roles ordered by dropped-task count, highest first, ties broken by name.
@@ -311,6 +340,24 @@ pub async fn record_retained_task(
     Ok(())
 }
 
+/// Record whether blue ran for this operation.
+///
+/// Written once at orchestrator startup. Without it a reader seeing only
+/// `red_inferred` drops cannot tell a blue-off operation from a live blue team
+/// that simply never revoked the principals red kept failing to authenticate,
+/// and reporting the first when the truth is the second slanders blue as
+/// absent for the whole run.
+pub async fn record_blue_team_enablement(
+    conn: &mut impl AsyncCommands,
+    operation_id: &str,
+    blue_enabled: bool,
+) -> Result<(), redis::RedisError> {
+    let key = blue_invalidated_key(operation_id);
+    let value = u8::from(blue_enabled);
+    conn.hset::<_, _, _, ()>(&key, FIELD_BLUE_ENABLED, value)
+        .await
+}
+
 /// Read the blue-invalidation counters for an operation.
 ///
 /// Returns an all-zero record when the key is absent, so a caller can render
@@ -324,6 +371,14 @@ pub async fn get_blue_invalidated_tasks(
 
     let mut counts = BlueInvalidatedTasks::default();
     for (field, value) in &data {
+        if field == FIELD_BLUE_ENABLED {
+            counts.blue_team_enabled = match value.as_str() {
+                "1" | "true" => Some(true),
+                "0" | "false" => Some(false),
+                _ => None,
+            };
+            continue;
+        }
         let Ok(count) = value.parse::<u64>() else {
             continue;
         };
@@ -371,13 +426,13 @@ mod tests {
     }
 
     #[test]
-    fn attribution_follows_blue_enablement() {
+    fn attribution_follows_blue_action() {
         assert_eq!(
-            ContainmentAttribution::from_blue_enabled(true),
+            ContainmentAttribution::from_blue_action(true),
             ContainmentAttribution::BlueActive
         );
         assert_eq!(
-            ContainmentAttribution::from_blue_enabled(false),
+            ContainmentAttribution::from_blue_action(false),
             ContainmentAttribution::RedInferred
         );
     }
@@ -540,6 +595,53 @@ mod tests {
             .expect("read should succeed");
         assert!(counts.is_empty());
         assert_eq!(counts.total, 0);
+        assert_eq!(counts.blue_team_enabled, None);
+        assert!(!counts.blue_was_off());
+    }
+
+    #[tokio::test]
+    async fn enablement_round_trips_and_never_manufactures_a_report() {
+        for enabled in [true, false] {
+            let mut conn = MockRedisConnection::new();
+            record_blue_team_enablement(&mut conn, "op-test-001", enabled)
+                .await
+                .expect("record should succeed");
+
+            let counts = get_blue_invalidated_tasks(&mut conn, "op-test-001")
+                .await
+                .expect("read should succeed");
+
+            assert_eq!(counts.blue_team_enabled, Some(enabled));
+            assert_eq!(counts.blue_was_off(), !enabled);
+            assert!(counts.is_empty(), "enablement alone forced a report");
+        }
+    }
+
+    #[tokio::test]
+    async fn enablement_survives_alongside_the_counters() {
+        let mut conn = MockRedisConnection::new();
+        record_blue_team_enablement(&mut conn, "op-test-001", true)
+            .await
+            .expect("record should succeed");
+        record_blue_invalidated_task(
+            &mut conn,
+            "op-test-001",
+            "exploit",
+            "acl",
+            ContainmentKind::CredentialRevoked,
+            ContainmentAttribution::RedInferred,
+        )
+        .await
+        .expect("record should succeed");
+
+        let counts = get_blue_invalidated_tasks(&mut conn, "op-test-001")
+            .await
+            .expect("read should succeed");
+
+        assert_eq!(counts.blue_team_enabled, Some(true));
+        assert!(!counts.blue_was_off());
+        assert_eq!(counts.red_inferred_total(), 1);
+        assert_eq!(counts.total, 1);
     }
 
     #[tokio::test]
@@ -640,6 +742,7 @@ mod tests {
             by_attribution: BTreeMap::new(),
             retained_total: 0,
             retained_by_role: BTreeMap::new(),
+            blue_team_enabled: None,
         };
 
         assert_eq!(
@@ -661,6 +764,7 @@ mod tests {
             by_attribution: BTreeMap::new(),
             retained_total: 0,
             retained_by_role: BTreeMap::new(),
+            blue_team_enabled: None,
         };
 
         assert_eq!(
@@ -682,6 +786,7 @@ mod tests {
             by_attribution: BTreeMap::new(),
             retained_total: 0,
             retained_by_role: BTreeMap::new(),
+            blue_team_enabled: None,
         };
 
         assert_eq!(

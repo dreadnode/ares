@@ -117,6 +117,7 @@ mod tests {
     use std::collections::HashSet;
 
     const ALL_ROLES: &[AgentRole] = &[
+        AgentRole::Orchestrator,
         AgentRole::Recon,
         AgentRole::CredentialAccess,
         AgentRole::Cracker,

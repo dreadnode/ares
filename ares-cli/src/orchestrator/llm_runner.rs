@@ -143,7 +143,7 @@ impl LlmTaskRunner {
         //    dynamic Operation Context block so the LLM sees current
         //    discoveries without invalidating the system-prompt cache.
         let task_prompt_body = build_task_prompt(task_type, task_id, payload, &snapshot)?;
-        let task_prompt = dynamic_context_block(&snapshot) + &task_prompt_body;
+        let task_prompt = dynamic_context_block(role, &snapshot) + &task_prompt_body;
 
         // 4. Get tool schemas for this role
         let tools = tool_registry::tools_for_role(role);
@@ -220,15 +220,15 @@ fn build_system_prompt(
     technique_priorities: &[(String, i32)],
     op: templates::OperationContext<'_>,
 ) -> Result<String> {
-    // Get capabilities from the tool definitions for this role
     let tools = tool_registry::tools_for_role(role);
     let capabilities: Vec<String> = tools
         .iter()
-        .filter(|t| !tool_registry::is_callback_tool(&t.name))
+        .filter(|t| role == AgentRole::Orchestrator || !tool_registry::is_callback_tool(&t.name))
         .map(|t| t.name.clone())
         .collect();
 
     let template_name = match role {
+        AgentRole::Orchestrator => templates::TEMPLATE_ORCHESTRATOR,
         AgentRole::Recon => templates::TEMPLATE_RECON,
         AgentRole::CredentialAccess => templates::TEMPLATE_CREDENTIAL_ACCESS,
         AgentRole::Cracker => templates::TEMPLATE_CRACKER,
@@ -260,7 +260,7 @@ fn build_system_prompt(
 /// prompt. This carries the snapshot state that previously lived in the
 /// system prompt (current discoveries, undominated forests) so the system
 /// prompt itself stays byte-stable for prefix-cache hits.
-fn dynamic_context_block(snapshot: &StateSnapshot) -> String {
+fn dynamic_context_block(role: AgentRole, snapshot: &StateSnapshot) -> String {
     let mut out = String::from("## Current Operation Context\n\n");
     if !snapshot.target_domain.is_empty() {
         out.push_str(&format!("- Target Domain: {}\n", snapshot.target_domain));
@@ -270,6 +270,15 @@ fn dynamic_context_block(snapshot: &StateSnapshot) -> String {
     }
     if !snapshot.target_dc_fqdn.is_empty() {
         out.push_str(&format!("- Target DC FQDN: {}\n", snapshot.target_dc_fqdn));
+    }
+    if role == AgentRole::Orchestrator && !snapshot.undominated_forests.is_empty() {
+        out.push_str("\n### Multi-Forest Status\n\n**The following forest roots have NOT been dominated (no krbtgt hash obtained):**\n\n");
+        for forest in &snapshot.undominated_forests {
+            out.push_str(&format!("- **{forest}** — needs krbtgt extraction\n"));
+        }
+        out.push_str(
+            "\nYou MUST NOT call `complete_operation()` until ALL forests are dominated or all attack paths are exhausted.\n",
+        );
     }
     out.push('\n');
     out
@@ -305,6 +314,7 @@ fn build_task_prompt(
 /// Map task type string to AgentRole.
 pub fn role_for_task_type(task_type: &str) -> Option<AgentRole> {
     match task_type {
+        "orchestrator_plan" => Some(AgentRole::Orchestrator),
         "recon" | "nmap" | "bloodhound" | "delegation_enum" | "certipy_find" => {
             Some(AgentRole::Recon)
         }
@@ -380,6 +390,46 @@ fn log_outcome(task_id: &str, outcome: &AgentLoopOutcome) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orchestrator_plan_task_resolves_to_a_runnable_orchestrator_turn() {
+        assert_eq!(
+            role_for_task_type("orchestrator_plan"),
+            Some(AgentRole::Orchestrator)
+        );
+
+        assert_eq!(
+            AgentRole::parse("orchestrator"),
+            Some(AgentRole::Orchestrator)
+        );
+
+        let system = build_system_prompt(AgentRole::Orchestrator, &[], test_op()).unwrap();
+        assert!(system.contains("Red Team Orchestrator"));
+
+        assert!(
+            system.contains("dispatch_recon"),
+            "orchestrator capabilities must survive the callback filter"
+        );
+
+        let payload = serde_json::json!({
+            "domains": ["contoso.local"],
+            "credentials": 2,
+            "uncracked_hashes": 1,
+            "unexploited_vulnerability_ids": ["esc1_ca01"],
+        });
+        let prompt = build_task_prompt(
+            "orchestrator_plan",
+            "plan-1",
+            &payload,
+            &StateSnapshot::default(),
+        )
+        .unwrap();
+        assert!(prompt.contains("esc1_ca01"));
+        assert!(
+            !prompt.contains("Payload:"),
+            "orchestrator_plan must render its template, not the raw-payload fallback"
+        );
+    }
 
     #[test]
     fn role_for_task_type_recon_variants() {
@@ -486,16 +536,28 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_context_block_carries_target_not_forests() {
+    fn dynamic_context_block_carries_target_not_forests_for_workers() {
         let snap = StateSnapshot {
             target_dc_ip: "192.168.58.10".into(),
             undominated_forests: vec!["fabrikam.local".into()],
             ..Default::default()
         };
-        let block = dynamic_context_block(&snap);
+        let block = dynamic_context_block(AgentRole::Privesc, &snap);
         assert!(block.contains("Target DC IP: 192.168.58.10"));
         assert!(!block.contains("Multi-Forest Status"));
         assert!(!block.contains("fabrikam.local"));
+    }
+
+    #[test]
+    fn dynamic_context_block_carries_forests_for_orchestrator() {
+        let snap = StateSnapshot {
+            target_dc_ip: "192.168.58.10".into(),
+            undominated_forests: vec!["fabrikam.local".into()],
+            ..Default::default()
+        };
+        let block = dynamic_context_block(AgentRole::Orchestrator, &snap);
+        assert!(block.contains("Multi-Forest Status"));
+        assert!(block.contains("fabrikam.local"));
     }
 
     #[test]

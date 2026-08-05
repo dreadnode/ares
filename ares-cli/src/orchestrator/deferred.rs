@@ -33,6 +33,38 @@ use crate::orchestrator::throttling::{ThrottleDecision, Throttler};
 /// Redis key prefix for deferred queues.
 pub const DEFERRED_QUEUE_PREFIX: &str = "ares:deferred";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainAction {
+    Dispatch,
+    Recheck(std::time::Duration),
+    SetAside,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepOutcome {
+    Dropped,
+    Dispatched,
+    Blocked,
+    BlockedRequeue,
+    ShutdownRequeue,
+}
+
+fn step_budget(now: tokio::time::Instant, deadline: tokio::time::Instant) -> std::time::Duration {
+    deadline.saturating_duration_since(now)
+}
+
+fn drain_action(
+    decision: &ThrottleDecision,
+    now: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+) -> DrainAction {
+    match decision {
+        ThrottleDecision::Allow => DrainAction::Dispatch,
+        ThrottleDecision::Wait(d) if now + *d < deadline => DrainAction::Recheck(*d),
+        ThrottleDecision::Wait(_) | ThrottleDecision::Defer => DrainAction::SetAside,
+    }
+}
+
 /// Atomic enqueue: signature dedup → per-type cap → global cap → ZADD →
 /// INCR counter → SADD signature.
 ///
@@ -293,6 +325,14 @@ impl DeferredQueue {
     /// signature SET — see [`DeferredTask::signature`] for what's
     /// considered equivalent.
     pub async fn enqueue(&self, task: &DeferredTask) -> Result<bool> {
+        self.enqueue_inner(task, true).await
+    }
+
+    pub async fn requeue(&self, task: &DeferredTask) -> Result<bool> {
+        self.enqueue_inner(task, false).await
+    }
+
+    async fn enqueue_inner(&self, task: &DeferredTask, log_accept: bool) -> Result<bool> {
         let key = self.zset_key(&task.task_type);
         let total_key = self.total_key();
         let sig_key = self.sig_key(&task.task_type);
@@ -316,14 +356,16 @@ impl DeferredQueue {
 
         match result {
             1 => {
-                info!(
-                    task_type = %task.task_type,
-                    role = %task.target_role,
-                    priority = task.priority,
-                    score,
-                    signature = %signature,
-                    "Task deferred"
-                );
+                if log_accept {
+                    info!(
+                        task_type = %task.task_type,
+                        role = %task.target_role,
+                        priority = task.priority,
+                        score,
+                        signature = %signature,
+                        "Task deferred"
+                    );
+                }
                 Ok(true)
             }
             0 => {
@@ -662,11 +704,11 @@ async fn scan_keys_async(conn: &mut redis::aio::ConnectionManager, pattern: &str
 /// evidence is strong enough to delete the task, plus the human-readable
 /// detail that names the revoked principal, isolated host or rotated realm
 /// for the log line.
-struct ContainmentDrop {
-    kind: ContainmentKind,
-    attribution: ContainmentAttribution,
-    deletes: bool,
-    detail: String,
+pub(in crate::orchestrator) struct ContainmentDrop {
+    pub(in crate::orchestrator) kind: ContainmentKind,
+    pub(in crate::orchestrator) attribution: ContainmentAttribution,
+    pub(in crate::orchestrator) deletes: bool,
+    pub(in crate::orchestrator) detail: String,
 }
 
 /// Return why a deferred task should be dropped from the queue because a
@@ -683,6 +725,19 @@ async fn task_dropped_by_containment(
     task: &DeferredTask,
     state: &crate::orchestrator::state::SharedState,
 ) -> Option<ContainmentDrop> {
+    payload_dropped_by_containment(&task.task_type, &task.payload, state).await
+}
+
+pub(in crate::orchestrator) async fn payload_dropped_by_containment(
+    task_type: &str,
+    payload: &serde_json::Value,
+    state: &crate::orchestrator::state::SharedState,
+) -> Option<ContainmentDrop> {
+    struct Task<'a> {
+        task_type: &'a str,
+        payload: &'a serde_json::Value,
+    }
+    let task = Task { task_type, payload };
     let state = state.read().await;
     let attribution = state.containment_attribution();
 
@@ -736,7 +791,7 @@ async fn task_dropped_by_containment(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let kerberos_shaped = matches!(
-        task.task_type.as_str(),
+        task.task_type,
         "authentication" | "kerberos" | "kerberoast" | "asrep_roast"
     ) || technique.to_lowercase().contains("kerberos")
         || technique.to_lowercase().contains("kerberoast")
@@ -768,6 +823,7 @@ pub fn spawn_deferred_processor(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(config.deferred_poll_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -784,8 +840,14 @@ pub fn spawn_deferred_processor(
             }
 
             // Try to drain as many as possible while slots are open
+            let cycle_deadline = tokio::time::Instant::now() + config.deferred_poll_interval;
             let mut dispatched = 0_u32;
+            let mut blocked = 0_u32;
+            let mut requeue: Vec<DeferredTask> = Vec::new();
             loop {
+                if tokio::time::Instant::now() >= cycle_deadline {
+                    break;
+                }
                 let Some(task) = (match deferred.pop_best().await {
                     Ok(t) => t,
                     Err(e) => {
@@ -796,128 +858,185 @@ pub fn spawn_deferred_processor(
                     break; // queue empty
                 };
 
-                // Drop deferred tasks whose target/credential blue has
-                // observably contained. Mirrors the pre-dispatch filter in
-                // `exploitation.rs`: without this, tasks deferred before
-                // blue took action get re-dispatched anyway, chew a
-                // credential-inflight slot, and surface as noisy
-                // STATUS_LOGON_FAILURE / STATUS_HOST_UNREACHABLE tool
-                // errors — exactly the visual mess the containment loop is
-                // supposed to prevent for the demo.
-                let verdict = task_dropped_by_containment(&task, &dispatcher.state).await;
-                if let Some(kept) = verdict.as_ref().filter(|v| !v.deletes) {
-                    info!(
+                let step = tokio::time::timeout(
+                    step_budget(tokio::time::Instant::now(), cycle_deadline),
+                    async {
+                        // Drop deferred tasks whose target/credential blue has
+                        // observably contained. Mirrors the pre-dispatch filter in
+                        // `exploitation.rs`: without this, tasks deferred before
+                        // blue took action get re-dispatched anyway, chew a
+                        // credential-inflight slot, and surface as noisy
+                        // STATUS_LOGON_FAILURE / STATUS_HOST_UNREACHABLE tool
+                        // errors — exactly the visual mess the containment loop is
+                        // supposed to prevent for the demo.
+                        let verdict = task_dropped_by_containment(&task, &dispatcher.state).await;
+                        if let Some(kept) = verdict.as_ref().filter(|v| !v.deletes) {
+                            info!(
+                                task_type = %task.task_type,
+                                target_role = %task.target_role,
+                                reason = %kept.detail,
+                                "Keeping deferred task — inferred credential rejection is too weak to delete queued work (no blue revocation on the principal, no KDC_ERR_CLIENT_REVOKED)"
+                            );
+                            deferred
+                                .record_containment_retention(&task.target_role)
+                                .await;
+                        }
+                        if let Some(drop) = verdict.filter(|v| v.deletes) {
+                            match drop.attribution {
+                                ContainmentAttribution::BlueActive => info!(
+                                    task_type = %task.task_type,
+                                    target_role = %task.target_role,
+                                    reason = %drop.detail,
+                                    "Dropping deferred task — invalidated by blue containment"
+                                ),
+                                ContainmentAttribution::RedInferred => info!(
+                                    task_type = %task.task_type,
+                                    target_role = %task.target_role,
+                                    reason = %drop.detail,
+                                    "Dropping deferred task — invalidated by inferred credential/host failure with no blue action behind it (NOT containment)"
+                                ),
+                            }
+                            // Signature is left in the SET by pop_best (POP_HOLD_SCRIPT
+                            // doesn't SREM it), so it now serves as the tombstone that
+                            // blocks producers from re-emitting equivalent work. No
+                            // explicit tombstone_signature call is needed.
+                            deferred
+                                .record_blue_invalidation(
+                                    &task.task_type,
+                                    &task.target_role,
+                                    drop.kind,
+                                    drop.attribution,
+                                )
+                                .await;
+                            return StepOutcome::Dropped;
+                        }
+
+                        // Re-check throttle before submitting
+                        let mut decision = throttler
+                            .check(&task.task_type, &task.target_role, Some(&task.payload))
+                            .await;
+
+                        if let DrainAction::Recheck(d) =
+                            drain_action(&decision, tokio::time::Instant::now(), cycle_deadline)
+                        {
+                            tokio::time::sleep(d).await;
+                            if *shutdown.borrow() {
+                                return StepOutcome::ShutdownRequeue;
+                            }
+                            decision = throttler
+                                .check(&task.task_type, &task.target_role, Some(&task.payload))
+                                .await;
+                        }
+
+                        match drain_action(&decision, tokio::time::Instant::now(), cycle_deadline) {
+                            DrainAction::Dispatch => {
+                                // Pre-check credential concurrency to avoid a hot
+                                // re-enqueue loop: submit_to_llm would re-defer the
+                                // task if the credential is at capacity, but this
+                                // drain loop would immediately pop it again.
+                                if let Some(cred_key) =
+                                    crate::orchestrator::dispatcher::credential_key_from_payload(
+                                        &task.payload,
+                                    )
+                                {
+                                    if !dispatcher.credential_inflight.can_acquire(&cred_key).await
+                                    {
+                                        return StepOutcome::BlockedRequeue;
+                                    }
+                                }
+
+                                // Not contained — the sig no longer needs to be held.
+                                // Release it before any dispatch or re-enqueue path so a
+                                // future equivalent enqueue (either by submit_to_llm
+                                // internally, or by a re-enqueue below) doesn't collapse
+                                // on the held sig and silently lose the task.
+                                deferred.release_signature(&task).await;
+
+                                // Route directly to the LLM agent loop via Dispatcher.
+                                // do_submit handles tracker.add() and throttler.record_dispatch().
+                                match dispatcher
+                                    .do_submit(
+                                        &task.task_type,
+                                        &task.target_role,
+                                        task.payload.clone(),
+                                        task.priority,
+                                    )
+                                    .await
+                                {
+                                    Ok(Some(tid)) => {
+                                        info!(
+                                            task_id = %tid,
+                                            task_type = %task.task_type,
+                                            "Deferred task dispatched"
+                                        );
+                                        StepOutcome::Dispatched
+                                    }
+                                    Ok(None) => {
+                                        // Credential concurrency block or no role mapping.
+                                        // Task may have been re-enqueued by submit_to_llm.
+                                        StepOutcome::Blocked
+                                    }
+                                    Err(e) => {
+                                        warn!(err = %e, "Failed to dispatch deferred task");
+                                        StepOutcome::BlockedRequeue
+                                    }
+                                }
+                            }
+                            DrainAction::Recheck(_) | DrainAction::SetAside => {
+                                StepOutcome::BlockedRequeue
+                            }
+                        }
+                    },
+                )
+                .await;
+
+                let Ok(step) = step else {
+                    warn!(
                         task_type = %task.task_type,
                         target_role = %task.target_role,
-                        reason = %kept.detail,
-                        "Keeping deferred task — inferred credential rejection is too weak to delete queued work (blue not running, no KDC_ERR_CLIENT_REVOKED)"
+                        "Deferred drain step exceeded the cycle budget — requeueing and ending cycle"
                     );
-                    deferred
-                        .record_containment_retention(&task.target_role)
-                        .await;
-                }
-                if let Some(drop) = verdict.filter(|v| v.deletes) {
-                    match drop.attribution {
-                        ContainmentAttribution::BlueActive => info!(
-                            task_type = %task.task_type,
-                            target_role = %task.target_role,
-                            reason = %drop.detail,
-                            "Dropping deferred task — invalidated by blue containment"
-                        ),
-                        ContainmentAttribution::RedInferred => info!(
-                            task_type = %task.task_type,
-                            target_role = %task.target_role,
-                            reason = %drop.detail,
-                            "Dropping deferred task — invalidated by inferred credential/host failure (blue not running, NOT containment)"
-                        ),
+                    requeue.push(task);
+                    break;
+                };
+
+                match step {
+                    StepOutcome::Dropped => {}
+                    StepOutcome::Dispatched => dispatched += 1,
+                    StepOutcome::Blocked => blocked += 1,
+                    StepOutcome::BlockedRequeue => {
+                        blocked += 1;
+                        requeue.push(task);
                     }
-                    // Signature is left in the SET by pop_best (POP_HOLD_SCRIPT
-                    // doesn't SREM it), so it now serves as the tombstone that
-                    // blocks producers from re-emitting equivalent work. No
-                    // explicit tombstone_signature call is needed.
-                    deferred
-                        .record_blue_invalidation(
-                            &task.task_type,
-                            &task.target_role,
-                            drop.kind,
-                            drop.attribution,
-                        )
-                        .await;
-                    continue;
-                }
-
-                // Not contained — the sig no longer needs to be held. Release
-                // it before any dispatch or re-enqueue path so a future
-                // equivalent enqueue (either by submit_to_llm internally, or by
-                // a re-enqueue below) doesn't collapse on the held sig and
-                // silently lose the task.
-                deferred.release_signature(&task).await;
-
-                // Re-check throttle before submitting
-                let decision = throttler
-                    .check(&task.task_type, &task.target_role, Some(&task.payload))
-                    .await;
-
-                match decision {
-                    ThrottleDecision::Allow => {
-                        // Pre-check credential concurrency to avoid a hot
-                        // re-enqueue loop: submit_to_llm would re-defer the
-                        // task if the credential is at capacity, but this
-                        // drain loop would immediately pop it again.
-                        if let Some(cred_key) =
-                            crate::orchestrator::dispatcher::credential_key_from_payload(
-                                &task.payload,
-                            )
-                        {
-                            if !dispatcher.credential_inflight.can_acquire(&cred_key).await {
-                                let _ = deferred.enqueue(&task).await;
-                                break;
-                            }
-                        }
-
-                        // Route directly to the LLM agent loop via Dispatcher.
-                        // do_submit handles tracker.add() and throttler.record_dispatch().
-                        match dispatcher
-                            .do_submit(
-                                &task.task_type,
-                                &task.target_role,
-                                task.payload.clone(),
-                                task.priority,
-                            )
-                            .await
-                        {
-                            Ok(Some(tid)) => {
-                                dispatched += 1;
-                                info!(
-                                    task_id = %tid,
-                                    task_type = %task.task_type,
-                                    "Deferred task dispatched"
-                                );
-                            }
-                            Ok(None) => {
-                                // Credential concurrency block or no role mapping.
-                                // Task may have been re-enqueued by submit_to_llm;
-                                // break to avoid hot loop.
-                                break;
-                            }
-                            Err(e) => {
-                                warn!(err = %e, "Failed to dispatch deferred task");
-                                // Re-enqueue so it is not lost
-                                let _ = deferred.enqueue(&task).await;
-                                break;
-                            }
-                        }
-                    }
-                    ThrottleDecision::Defer | ThrottleDecision::Wait(_) => {
-                        // Put it back; stop draining since capacity is full.
-                        let _ = deferred.enqueue(&task).await;
+                    StepOutcome::ShutdownRequeue => {
+                        requeue.push(task);
                         break;
                     }
                 }
             }
 
-            if dispatched > 0 {
-                info!(dispatched, "Deferred queue drain cycle");
+            let requeued = requeue.len();
+            let mut requeue_rejected = 0_u32;
+            for task in requeue {
+                deferred.release_signature(&task).await;
+                match deferred.requeue(&task).await {
+                    Ok(true) => {}
+                    Ok(false) => requeue_rejected += 1,
+                    Err(e) => {
+                        warn!(err = %e, task_type = %task.task_type, "Deferred requeue failed");
+                        requeue_rejected += 1;
+                    }
+                }
+            }
+            if requeue_rejected > 0 {
+                warn!(
+                    requeue_rejected,
+                    requeued, "Deferred requeue rejected by cap — queued work dropped"
+                );
+            }
+
+            if dispatched > 0 || requeued > 0 {
+                info!(dispatched, requeued, blocked, "Deferred queue drain cycle");
             }
         }
     })
@@ -927,6 +1046,7 @@ pub fn spawn_deferred_processor(
 mod tests {
     use super::*;
     use crate::orchestrator::state::SharedState;
+    use std::time::Duration;
 
     fn make_task(priority: i32, enqueue_time: f64) -> DeferredTask {
         DeferredTask {
@@ -1219,6 +1339,125 @@ mod tests {
         assert_eq!(drop.kind, ContainmentKind::KrbtgtRotated);
         assert_eq!(drop.attribution, ContainmentAttribution::BlueActive);
         assert!(drop.detail.contains("krbtgt rotated"));
+    }
+
+    fn budget(secs: u64) -> (tokio::time::Instant, tokio::time::Instant) {
+        let now = tokio::time::Instant::now();
+        (now, now + Duration::from_secs(secs))
+    }
+
+    #[test]
+    fn allow_dispatches() {
+        let (now, deadline) = budget(10);
+        assert_eq!(
+            drain_action(&ThrottleDecision::Allow, now, deadline),
+            DrainAction::Dispatch
+        );
+    }
+
+    #[test]
+    fn defer_sets_aside() {
+        let (now, deadline) = budget(10);
+        assert_eq!(
+            drain_action(&ThrottleDecision::Defer, now, deadline),
+            DrainAction::SetAside
+        );
+    }
+
+    #[test]
+    fn dispatch_delay_wait_is_rechecked_not_stopped() {
+        let (now, deadline) = budget(10);
+        let delay = Duration::from_millis(200);
+        assert_eq!(
+            drain_action(&ThrottleDecision::Wait(delay), now, deadline),
+            DrainAction::Recheck(delay)
+        );
+    }
+
+    #[test]
+    fn wait_longer_than_budget_sets_aside() {
+        let (now, deadline) = budget(10);
+        assert_eq!(
+            drain_action(
+                &ThrottleDecision::Wait(Duration::from_secs(60)),
+                now,
+                deadline
+            ),
+            DrainAction::SetAside
+        );
+    }
+
+    #[test]
+    fn wait_exactly_at_deadline_sets_aside() {
+        let (now, deadline) = budget(10);
+        assert_eq!(
+            drain_action(
+                &ThrottleDecision::Wait(Duration::from_secs(10)),
+                now,
+                deadline
+            ),
+            DrainAction::SetAside
+        );
+    }
+
+    #[test]
+    fn step_budget_is_the_cycle_remainder() {
+        let (now, deadline) = budget(10);
+        assert_eq!(step_budget(now, deadline), Duration::from_secs(10));
+        assert_eq!(
+            step_budget(now + Duration::from_secs(4), deadline),
+            Duration::from_secs(6)
+        );
+    }
+
+    #[test]
+    fn step_budget_past_the_deadline_is_zero_not_a_fresh_window() {
+        let (now, deadline) = budget(10);
+        assert!(step_budget(deadline, deadline).is_zero());
+        assert!(
+            step_budget(now + Duration::from_secs(30), deadline).is_zero(),
+            "a step that starts past the cycle deadline must get no budget — handing it a \
+             fresh per-step window is what let one stuck await hang the drain loop forever"
+        );
+    }
+
+    #[test]
+    fn wait_just_inside_budget_is_rechecked() {
+        let (now, deadline) = budget(10);
+        let d = Duration::from_millis(9_999);
+        assert_eq!(
+            drain_action(&ThrottleDecision::Wait(d), now, deadline),
+            DrainAction::Recheck(d)
+        );
+    }
+
+    #[test]
+    fn wait_near_an_exhausted_budget_sets_aside() {
+        let now = tokio::time::Instant::now();
+        let deadline = now + Duration::from_millis(50);
+        assert_eq!(
+            drain_action(
+                &ThrottleDecision::Wait(Duration::from_millis(200)),
+                now,
+                deadline
+            ),
+            DrainAction::SetAside
+        );
+    }
+
+    #[test]
+    fn a_full_delay_cycle_drains_many_tasks() {
+        let (now, deadline) = budget(10);
+        let delay = Duration::from_millis(200);
+        let mut at = now;
+        let mut admitted = 0;
+        while drain_action(&ThrottleDecision::Wait(delay), at, deadline)
+            == DrainAction::Recheck(delay)
+        {
+            at += delay;
+            admitted += 1;
+        }
+        assert_eq!(admitted, 49);
     }
 
     #[test]

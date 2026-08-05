@@ -252,7 +252,20 @@ impl BlueTeamReportGenerator {
         let detection_techniques: Vec<String> = input
             .coverage
             .as_ref()
-            .map(|c| c.missed.clone())
+            .map(|c| {
+                c.missed
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            "{} — {} red action{} unmatched ({})",
+                            m.id,
+                            m.executions,
+                            if m.executions == 1 { "" } else { "s" },
+                            m.reason
+                        )
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         // Build investigation details
@@ -383,7 +396,7 @@ impl BlueTeamReportGenerator {
 mod tests {
     use std::collections::HashMap;
 
-    use super::super::super::coverage::{CoverageEntry, RedTeamCoverage};
+    use super::super::super::coverage::{CoverageEntry, MissedEntry, RedTeamCoverage};
     use super::super::BlueTeamReportGenerator;
     use crate::reports::blueteam::types::BlueTeamReportInput;
 
@@ -443,10 +456,23 @@ mod tests {
         let input = BlueTeamReportInput {
             techniques: detected_t1003(),
             coverage: Some(RedTeamCoverage {
-                missed: vec!["T1210".into(), "T1552".into()],
+                missed: vec![
+                    MissedEntry {
+                        id: "T1210".into(),
+                        executions: 12,
+                        reason: "no matching blue detection".into(),
+                    },
+                    MissedEntry {
+                        id: "T1552".into(),
+                        executions: 1,
+                        reason: "no matching blue detection".into(),
+                    },
+                ],
                 detected: vec![CoverageEntry {
                     id: "T1003".into(),
                     matched_by: "T1003".into(),
+                    executions: 4,
+                    detected_executions: 4,
                 }],
                 ..Default::default()
             }),

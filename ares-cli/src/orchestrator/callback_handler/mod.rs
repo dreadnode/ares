@@ -4,6 +4,7 @@
 //! `get_operation_summary`) plus disabled-tool safety nets, all without going
 //! through Redis tool queues.
 
+mod dispatch;
 mod query;
 #[cfg(test)]
 mod tests;
@@ -16,6 +17,7 @@ use tracing::warn;
 use ares_llm::provider::ToolCall;
 use ares_llm::{CallbackHandler, CallbackResult};
 
+use crate::orchestrator::dispatcher::submission::as_orchestrator_directed;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::SharedState;
 use crate::orchestrator::task_queue::TaskQueue;
@@ -80,15 +82,66 @@ impl OrchestratorCallbackHandler {
     }
 }
 
+const ORCHESTRATOR_ONLY_TOOLS: &[&str] = &[
+    "dispatch_recon",
+    "dispatch_credential_access",
+    "dispatch_lateral_movement",
+    "dispatch_privesc_exploit",
+    "dispatch_coercion",
+    "dispatch_crack",
+    "get_proposed_work",
+    "approve_work",
+    "reject_work",
+    "complete_operation",
+];
+
 #[async_trait::async_trait]
 impl CallbackHandler for OrchestratorCallbackHandler {
-    async fn handle_callback(&self, call: &ToolCall) -> Option<Result<CallbackResult>> {
+    async fn handle_callback(&self, call: &ToolCall, role: &str) -> Option<Result<CallbackResult>> {
+        if ORCHESTRATOR_ONLY_TOOLS.contains(&call.name.as_str()) && role != "orchestrator" {
+            warn!(
+                role = role,
+                tool = %call.name,
+                "Refusing orchestrator-only tool called by a worker role"
+            );
+            return Some(Ok(CallbackResult::Continue(format!(
+                "You are not the orchestrator and cannot call {}. Only the orchestrator \
+                 submits work or ends the operation. Finish your own task and report what \
+                 you found with task_complete.",
+                call.name
+            ))));
+        }
+
         match call.name.as_str() {
             // Query tools
             "get_operation_summary" => Some(self.get_operation_summary().await),
+            "get_credential_summary" => Some(self.get_credential_summary().await),
+            "get_hash_summary" => Some(self.get_hash_summary().await),
+            "get_all_credentials" => Some(self.get_all_credentials(call).await),
+            "get_all_hashes" => Some(self.get_all_hashes(call).await),
+            "get_pending_tasks" => Some(self.get_pending_tasks().await),
+            "get_agent_status" => Some(self.get_agent_status().await),
             // list_credentials delegates to get_all_credentials so non-orchestrator
             // agents (lateral, exploit) get real credential data instead of a stub.
             "list_credentials" => Some(self.get_all_credentials(call).await),
+            "dispatch_recon" => Some(as_orchestrator_directed(self.dispatch_recon(call)).await),
+            "dispatch_credential_access" => {
+                Some(as_orchestrator_directed(self.dispatch_credential_access(call)).await)
+            }
+            "dispatch_lateral_movement" => {
+                Some(as_orchestrator_directed(self.dispatch_lateral(call)).await)
+            }
+            "dispatch_privesc_exploit" => {
+                Some(as_orchestrator_directed(self.dispatch_exploit(call)).await)
+            }
+            "dispatch_coercion" => {
+                Some(as_orchestrator_directed(self.dispatch_coercion(call)).await)
+            }
+            "dispatch_crack" => Some(as_orchestrator_directed(self.dispatch_crack(call)).await),
+            "get_proposed_work" => Some(self.get_proposed_work(call).await),
+            "approve_work" => Some(as_orchestrator_directed(self.approve_work(call)).await),
+            "reject_work" => Some(self.reject_work(call).await),
+            "complete_operation" => Some(self.complete_operation(call).await),
             // Recording tools — persist to state and Redis
             "record_credential" => Some(self.record_credential(call).await),
             "record_timeline_event" => Some(self.record_timeline_event(call).await),

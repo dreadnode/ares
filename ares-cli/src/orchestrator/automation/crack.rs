@@ -1,11 +1,12 @@
 //! auto_crack_dispatch -- submit crack tasks for new hashes.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
@@ -90,7 +91,10 @@ fn is_krbtgt(username: &str) -> bool {
 /// behind ~12 such already-owned NTLM jobs, then cracked in <1 min the moment it
 /// reached a slot. Roastables (priority 0) are never dropped here — only NTLM of
 /// an already-dominated domain. `dominated` is expected lowercased.
-fn is_owned_domain_ntlm(hash: &ares_core::models::Hash, dominated: &HashSet<String>) -> bool {
+pub(crate) fn is_owned_domain_ntlm(
+    hash: &ares_core::models::Hash,
+    dominated: &HashSet<String>,
+) -> bool {
     let domain = hash.domain.trim().to_lowercase();
     crack_priority(&hash.hash_type) > 0 && !domain.is_empty() && dominated.contains(&domain)
 }
@@ -114,12 +118,22 @@ const NTLM_TURN_AFTER_ROASTABLE_STREAK: u32 = 2;
 const DEFAULT_MAX_ACTIVE_CRACK_TASKS: usize = 2;
 const CRACK_INFLIGHT_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 
+const CRACK_TASK_STALL_TTL: Duration = Duration::from_secs(30 * 60);
+
 fn max_active_crack_tasks() -> usize {
     std::env::var("ARES_MAX_ACTIVE_CRACK_TASKS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_MAX_ACTIVE_CRACK_TASKS)
+}
+
+struct InflightCrackSlot(Arc<AtomicUsize>);
+
+impl Drop for InflightCrackSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Slot-time cost class for a hash's hashcat mode. Lower cracks fast; higher
@@ -203,6 +217,7 @@ pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watc
     // secretsdump aren't starved by a continuous roastable inflow.
     let mut roastable_streak: u32 = 0;
     let mut inflight_crack_dedup: HashMap<String, Instant> = HashMap::new();
+    let inflight_crack_tasks = Arc::new(AtomicUsize::new(0));
 
     loop {
         tokio::select! {
@@ -215,12 +230,12 @@ pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watc
 
         // Age out inflight guards by TTL only. The direct dispatch path
         // (tokio::spawn → tool_dispatcher::dispatch_tool) is not registered with
-        // `dispatcher.tracker`, so `count_for_role("cracker")` returns 0 while
-        // hashcat is running in the background. Using that as a "clear inflight"
+        // `dispatcher.tracker`, so any tracker-derived count is blind to this
+        // tick's own hashcat runs. Using such a count as a "clear inflight"
         // trigger deleted the guard every tick, letting the same hash be
         // re-selected, re-dispatched, and burn all MAX_CRACK_ATTEMPTS retries in
         // ~45s before the first hashcat run had a chance to finish.
-        let active_crack_tasks = dispatcher.tracker.count_for_role("cracker").await;
+        let active_crack_tasks = inflight_crack_tasks.load(Ordering::Relaxed);
         let now = Instant::now();
         inflight_crack_dedup
             .retain(|_, submitted_at| now.duration_since(*submitted_at) < CRACK_INFLIGHT_TTL);
@@ -287,9 +302,11 @@ pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watc
         // earlier batch is still running.
         let max_active = max_active_crack_tasks();
         if active_crack_tasks >= max_active {
-            debug!(
+            warn!(
                 active = active_crack_tasks,
-                max_active, "Crack task cap reached, skipping dispatch this tick"
+                max_active,
+                crackable = crackable_hashes,
+                "crack_tick: cap reached, skipping dispatch this tick"
             );
             continue;
         }
@@ -357,12 +374,26 @@ pub async fn auto_crack_dispatch(dispatcher: Arc<Dispatcher>, mut shutdown: watc
             for (dedup, _hash) in &batch {
                 inflight_crack_dedup.insert(dedup.clone(), now);
             }
+            inflight_crack_tasks.fetch_add(1, Ordering::Relaxed);
+            let slot = InflightCrackSlot(inflight_crack_tasks.clone());
             tokio::spawn(async move {
-                let dispatch_result = dispatcher_bg
-                    .llm_runner
-                    .tool_dispatcher()
-                    .dispatch_tool("cracker", &task_id, &call)
-                    .await;
+                let _slot = slot;
+                let Ok(dispatch_result) = tokio::time::timeout(
+                    CRACK_TASK_STALL_TTL,
+                    dispatcher_bg
+                        .llm_runner
+                        .tool_dispatcher()
+                        .dispatch_tool("cracker", &task_id, &call),
+                )
+                .await
+                else {
+                    warn!(
+                        task_id = %task_id,
+                        stall_secs = CRACK_TASK_STALL_TTL.as_secs(),
+                        "crack_tick: direct crack dispatch stalled — reclaiming slot"
+                    );
+                    return;
+                };
                 match dispatch_result {
                     Ok(result) => {
                         info!(
@@ -519,11 +550,13 @@ mod tests {
     use super::{
         batch_same_mode_roastable, crack_mode_cost, crack_priority, is_krbtgt,
         is_owned_domain_ntlm, is_uncrackable, select_next_crack, sort_crack_work,
-        MAX_CRACK_ATTEMPTS, NTLM_TURN_AFTER_ROASTABLE_STREAK,
+        InflightCrackSlot, MAX_CRACK_ATTEMPTS, NTLM_TURN_AFTER_ROASTABLE_STREAK,
     };
     use crate::orchestrator::state::{StateInner, DEDUP_CRACK_REQUESTS};
     use ares_core::models::Hash;
     use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     fn mk(hash_type: &str) -> (String, Hash) {
         (
@@ -977,5 +1010,32 @@ mod tests {
         assert!(state.is_processed(DEDUP_CRACK_REQUESTS, stuck));
         assert!(!state.is_processed(DEDUP_CRACK_REQUESTS, fresh));
         assert_eq!(state.crack_attempts.get(fresh).copied(), None);
+    }
+
+    #[test]
+    fn inflight_slot_is_released_on_drop_including_panic() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        count.fetch_add(1, Ordering::Relaxed);
+        {
+            let _slot = InflightCrackSlot(count.clone());
+            assert_eq!(count.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 0, "normal exit must release");
+
+        count.fetch_add(1, Ordering::Relaxed);
+        let unwound = std::panic::catch_unwind({
+            let count = count.clone();
+            move || {
+                let _slot = InflightCrackSlot(count);
+                panic!("dispatch blew up");
+            }
+        });
+        assert!(unwound.is_err());
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            0,
+            "a panicking dispatch must not leak the slot — a leaked slot starves the tick forever"
+        );
     }
 }

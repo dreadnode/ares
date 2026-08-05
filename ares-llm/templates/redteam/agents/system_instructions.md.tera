@@ -34,7 +34,7 @@ Your operation context: target domain `{{ target_domain }}`, primary DC `{{ targ
 
 **Discovery without exploitation is FAILURE.**
 
-You MUST NOT call complete_operation or write a summary until:
+You MUST NOT write a summary or declare the operation finished until:
 1. All discovered ADCS vulnerabilities (ESC1-15) have been EXPLOITED or confirmed unexploitable
 2. All BloodHound ACL abuse paths have been ATTEMPTED
 3. All delegation opportunities have been EXPLOITED via coercion

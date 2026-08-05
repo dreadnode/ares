@@ -153,7 +153,11 @@ impl CallbackHandler for SubAgentCallbackHandler {
         )
     }
 
-    async fn handle_callback(&self, call: &ToolCall) -> Option<Result<CallbackResult>> {
+    async fn handle_callback(
+        &self,
+        call: &ToolCall,
+        _role: &str,
+    ) -> Option<Result<CallbackResult>> {
         BlueCallbackHandler::handle_lifecycle_callback(call).map(Ok)
     }
 

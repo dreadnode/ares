@@ -196,6 +196,27 @@ pub(crate) fn collect_crack_seed(state: &StateInner) -> (Vec<String>, Vec<String
 }
 
 impl Dispatcher {
+    #[instrument(
+        name = "automation.request_crack",
+        skip(self, hash),
+        fields(hash_type = %hash.hash_type, username = %hash.username, domain = %hash.domain),
+    )]
+    pub async fn request_crack(&self, hash: &ares_core::models::Hash) -> Result<Option<String>> {
+        let (known_usernames, known_passwords) = {
+            let state = self.state.read().await;
+            collect_crack_seed(&state)
+        };
+        let payload = json!({
+            "hash_type": hash.hash_type,
+            "hash_value": hash.hash_value,
+            "username": hash.username,
+            "domain": hash.domain,
+            "known_usernames": known_usernames,
+            "known_passwords": known_passwords,
+        });
+        self.throttled_submit("crack", "cracker", payload, 5).await
+    }
+
     /// Submit a recon task.
     ///
     /// Guards:

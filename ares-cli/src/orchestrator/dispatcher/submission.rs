@@ -18,8 +18,151 @@ use crate::orchestrator::throttling::ThrottleDecision;
 use ares_llm::LoopEndReason;
 
 use super::{Dispatcher, SubmissionOutcome};
+use crate::orchestrator::proposals::{
+    mediation_enabled, mediation_scope_is_all, task_type_is_vetoable, ProposalOutcome,
+};
+
+tokio::task_local! {
+    static ORCHESTRATOR_DIRECTED: bool;
+}
+
+pub async fn as_orchestrator_directed<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    ORCHESTRATOR_DIRECTED.scope(true, fut).await
+}
+
+fn is_orchestrator_directed() -> bool {
+    ORCHESTRATOR_DIRECTED.try_with(|v| *v).unwrap_or(false)
+}
+
+pub(crate) fn should_mediate(
+    caller_wants_mediation: bool,
+    mediation_on: bool,
+    target_role: &str,
+    orchestrator_directed: bool,
+    task_type: &str,
+    scope_is_all: bool,
+) -> bool {
+    caller_wants_mediation
+        && mediation_on
+        && target_role != "orchestrator"
+        && !orchestrator_directed
+        && (scope_is_all || task_type_is_vetoable(task_type))
+}
 
 impl Dispatcher {
+    pub async fn submit_approved(
+        &self,
+        task_type: &str,
+        target_role: &str,
+        payload: serde_json::Value,
+        priority: i32,
+    ) -> Result<SubmissionOutcome> {
+        if let Some(drop) = crate::orchestrator::deferred::payload_dropped_by_containment(
+            task_type,
+            &payload,
+            &self.state,
+        )
+        .await
+        {
+            if drop.deletes {
+                info!(
+                    task_type = %task_type,
+                    target_role = %target_role,
+                    reason = %drop.detail,
+                    "Suppressing approved work — containment invalidated it while it was parked"
+                );
+                self.deferred
+                    .record_blue_invalidation(task_type, target_role, drop.kind, drop.attribution)
+                    .await;
+                return Ok(SubmissionOutcome::Dropped);
+            }
+            self.deferred
+                .record_containment_retention(target_role)
+                .await;
+        }
+
+        let span = info_span!(
+            "automation.dispatch",
+            task_type = task_type,
+            target_role = target_role,
+            priority = priority,
+            "task.id" = Empty,
+            "automation.decision" = Empty,
+        );
+        self.throttled_submit_outcome_inner(
+            task_type,
+            target_role,
+            payload,
+            priority,
+            span.clone(),
+            false,
+        )
+        .instrument(span)
+        .await
+    }
+
+    async fn park_as_proposal(
+        &self,
+        task_type: &str,
+        target_role: &str,
+        payload: serde_json::Value,
+        priority: i32,
+        span: &tracing::Span,
+    ) -> (Option<SubmissionOutcome>, serde_json::Value) {
+        let task = DeferredTask {
+            priority,
+            enqueue_time: Utc::now().timestamp() as f64,
+            task_type: task_type.to_string(),
+            target_role: target_role.to_string(),
+            payload: payload.clone(),
+            source_agent: "automation".to_string(),
+        };
+        let outcome = match self.proposals.propose(task).await {
+            ProposalOutcome::Parked => {
+                span.record("automation.decision", "proposed");
+                debug!(
+                    task_type,
+                    target_role, "Task proposed for orchestrator review"
+                );
+                Some(SubmissionOutcome::Deferred)
+            }
+            ProposalOutcome::Duplicate => {
+                span.record("automation.decision", "proposal_duplicate");
+                Some(SubmissionOutcome::Deferred)
+            }
+            ProposalOutcome::PreviouslyRejected => {
+                span.record("automation.decision", "proposal_rejected");
+                debug!(
+                    task_type,
+                    target_role, "Task suppressed — orchestrator rejected this work"
+                );
+                Some(SubmissionOutcome::Dropped)
+            }
+            ProposalOutcome::Full => {
+                span.record("automation.decision", "proposal_pool_full");
+                warn!(
+                    task_type,
+                    target_role,
+                    "Proposal pool full — dispatching directly so the pool cap cannot stall red"
+                );
+                None
+            }
+            ProposalOutcome::ReviewerBehind => {
+                span.record("automation.decision", "proposal_reviewer_behind");
+                warn!(
+                    task_type,
+                    target_role,
+                    "Orchestrator is not ruling within the window — dispatching directly so review latency cannot stall red"
+                );
+                None
+            }
+        };
+        (outcome, payload)
+    }
+
     /// Submit a task with throttle checking. Returns the task_id if submitted,
     /// None if deferred or rejected.
     pub async fn throttled_submit(
@@ -57,9 +200,16 @@ impl Dispatcher {
             "task.id" = Empty,
             "automation.decision" = Empty,
         );
-        self.throttled_submit_outcome_inner(task_type, target_role, payload, priority, span.clone())
-            .instrument(span)
-            .await
+        self.throttled_submit_outcome_inner(
+            task_type,
+            target_role,
+            payload,
+            priority,
+            span.clone(),
+            true,
+        )
+        .instrument(span)
+        .await
     }
 
     async fn throttled_submit_outcome_inner(
@@ -69,7 +219,26 @@ impl Dispatcher {
         payload: serde_json::Value,
         priority: i32,
         span: tracing::Span,
+        mediate: bool,
     ) -> Result<SubmissionOutcome> {
+        let mut payload = payload;
+        if should_mediate(
+            mediate,
+            mediation_enabled(),
+            target_role,
+            is_orchestrator_directed(),
+            task_type,
+            mediation_scope_is_all(),
+        ) {
+            match self
+                .park_as_proposal(task_type, target_role, payload, priority, &span)
+                .await
+            {
+                (Some(outcome), _) => return Ok(outcome),
+                (None, returned) => payload = returned,
+            }
+        }
+
         // Rate cap: if this (task_type, target, principal) pattern ended
         // with `RequestAssistance` inside the assist-abandoned TTL, refuse
         // to redispatch. The pattern is usually doomed — missing tool
@@ -1285,5 +1454,82 @@ mod helper_tests {
             );
         }
         assert_eq!(m["summary"], "ok");
+    }
+}
+
+#[cfg(test)]
+mod mediation_gate_tests {
+    use super::*;
+
+    #[test]
+    fn mediation_off_leaves_every_dispatch_alone() {
+        assert!(!should_mediate(
+            true, false, "privesc", false, "exploit", false
+        ));
+        assert!(!should_mediate(
+            true, false, "lateral", false, "lateral", false
+        ));
+    }
+
+    #[test]
+    fn only_vetoable_work_is_mediated() {
+        for task_type in ["exploit", "lateral", "coercion", "acl_chain_step"] {
+            assert!(
+                should_mediate(true, true, "privesc", false, task_type, false),
+                "{task_type} is expensive or failure-prone and must be reviewable"
+            );
+        }
+        for task_type in [
+            "recon",
+            "crack",
+            "credential_access",
+            "acl_analysis",
+            "nmap",
+        ] {
+            assert!(
+                !should_mediate(true, true, "recon", false, task_type, false),
+                "{task_type} is routine — mediating it only adds latency"
+            );
+        }
+    }
+
+    #[test]
+    fn scope_all_restores_full_mediation() {
+        assert!(should_mediate(true, true, "recon", false, "recon", true));
+        assert!(should_mediate(true, true, "cracker", false, "crack", true));
+    }
+
+    #[test]
+    fn the_orchestrator_planning_task_is_never_mediated() {
+        assert!(!should_mediate(
+            true,
+            true,
+            "orchestrator",
+            false,
+            "orchestrator_plan",
+            true
+        ));
+    }
+
+    #[test]
+    fn orchestrator_directed_dispatch_bypasses_mediation() {
+        assert!(!should_mediate(
+            true, true, "privesc", true, "exploit", true
+        ));
+    }
+
+    #[test]
+    fn approved_release_is_never_re_mediated() {
+        assert!(!should_mediate(
+            false, true, "privesc", false, "exploit", true
+        ));
+    }
+
+    #[tokio::test]
+    async fn orchestrator_directed_flag_is_scoped_to_the_call() {
+        assert!(!is_orchestrator_directed());
+        let inside = as_orchestrator_directed(async { is_orchestrator_directed() }).await;
+        assert!(inside);
+        assert!(!is_orchestrator_directed());
     }
 }

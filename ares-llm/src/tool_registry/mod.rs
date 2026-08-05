@@ -11,6 +11,7 @@ mod coercion;
 mod cracker;
 mod credential_access;
 mod lateral;
+mod orchestrator_tools;
 mod privesc;
 pub mod provenance;
 mod recon;
@@ -23,6 +24,7 @@ use crate::ToolDefinition;
 /// Agent roles that can be assigned tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentRole {
+    Orchestrator,
     Recon,
     CredentialAccess,
     Cracker,
@@ -35,6 +37,7 @@ pub enum AgentRole {
 impl AgentRole {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Orchestrator => "orchestrator",
             Self::Recon => "recon",
             Self::CredentialAccess => "credential_access",
             Self::Cracker => "cracker",
@@ -47,6 +50,7 @@ impl AgentRole {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
+            "orchestrator" => Some(Self::Orchestrator),
             "recon" => Some(Self::Recon),
             "credential_access" => Some(Self::CredentialAccess),
             "cracker" | "crack" => Some(Self::Cracker),
@@ -77,25 +81,10 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     "record_compromised_host",
     "list_credentials",
     "get_operation_summary",
-];
-
-/// Removed callback names that are still trapped in-process so a hallucinated
-/// call receives a deterministic "tool removed" response instead of being
-/// dispatched to a worker.
-///
-/// Keep the `dispatch_*` entries: the loop routes callbacks by tool name, not
-/// by what a role was offered, so dropping them lets a hallucinated call submit
-/// a real task.
-const REMOVED_CALLBACK_TOOLS: &[&str] = &[
-    "record_credential",
-    "record_timeline_event",
-    "report_cracked_credential",
-    "complete_operation",
     "get_credential_summary",
     "get_hash_summary",
     "get_all_credentials",
     "get_all_hashes",
-    "get_hash_value",
     "get_pending_tasks",
     "get_agent_status",
     "dispatch_recon",
@@ -104,6 +93,17 @@ const REMOVED_CALLBACK_TOOLS: &[&str] = &[
     "dispatch_privesc_exploit",
     "dispatch_coercion",
     "dispatch_crack",
+    "get_proposed_work",
+    "approve_work",
+    "reject_work",
+    "complete_operation",
+];
+
+const REMOVED_CALLBACK_TOOLS: &[&str] = &[
+    "record_credential",
+    "record_timeline_event",
+    "report_cracked_credential",
+    "get_hash_value",
 ];
 
 /// Check if a tool name is a callback (handled in Rust, not dispatched).
@@ -291,7 +291,15 @@ fn callback_tool_definitions() -> Vec<ToolDefinition> {
 ///
 /// Returns role-specific tools plus universal callback and reporting tools.
 pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
+    if role == AgentRole::Orchestrator {
+        let mut tools = orchestrator_tools::tool_definitions();
+        tools.extend(callback_tool_definitions());
+        strip_secrets_from_all(&mut tools);
+        return tools;
+    }
+
     let mut tools = match role {
+        AgentRole::Orchestrator => unreachable!("handled above"),
         AgentRole::Recon => {
             let mut t = recon::tool_definitions();
             // Netexec/ldapsearch tools are available on recon workers — include
@@ -484,8 +492,11 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_role_is_gone_and_its_tools_stay_trapped() {
-        assert_eq!(AgentRole::parse("orchestrator"), None);
+    fn orchestrator_tools_route_in_process_for_every_role() {
+        assert_eq!(
+            AgentRole::parse("orchestrator"),
+            Some(AgentRole::Orchestrator)
+        );
         for name in [
             "dispatch_recon",
             "dispatch_credential_access",
@@ -499,9 +510,13 @@ mod tests {
         ] {
             assert!(
                 is_callback_tool(name),
-                "{name} must stay trapped in-process, or a hallucinated call reaches a worker"
+                "{name} must route in-process, or a hallucinated call reaches a worker"
             );
         }
+    }
+
+    #[test]
+    fn only_the_orchestrator_is_offered_dispatch_and_completion() {
         for role in [
             AgentRole::Recon,
             AgentRole::CredentialAccess,
@@ -511,15 +526,71 @@ mod tests {
             AgentRole::Lateral,
             AgentRole::Coercion,
         ] {
-            let names: Vec<String> = tools_for_role(role)
-                .iter()
-                .map(|t| t.name.clone())
-                .collect();
-            for name in &names {
+            for name in tools_for_role(role).iter().map(|t| t.name.clone()) {
                 assert!(
                     !name.starts_with("dispatch_") && name != "complete_operation",
                     "role {role:?} must not be offered orchestrator tool {name}"
                 );
+            }
+        }
+
+        let names: Vec<String> = tools_for_role(AgentRole::Orchestrator)
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        for expected in [
+            "dispatch_recon",
+            "dispatch_credential_access",
+            "dispatch_lateral_movement",
+            "dispatch_privesc_exploit",
+            "dispatch_coercion",
+            "dispatch_crack",
+            "complete_operation",
+            "get_pending_tasks",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "orchestrator must be offered {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn orchestrator_is_offered_no_executable_tool_and_no_secret_argument() {
+        for tool in tools_for_role(AgentRole::Orchestrator) {
+            assert!(
+                tool.name.starts_with("dispatch_")
+                    || tool.name.starts_with("get_")
+                    || matches!(
+                        tool.name.as_str(),
+                        "approve_work"
+                            | "reject_work"
+                            | "complete_operation"
+                            | "task_complete"
+                            | "request_assistance"
+                            | "report_finding"
+                            | "report_crack_failed"
+                            | "report_lateral_success"
+                            | "report_lateral_failed"
+                            | "record_compromised_host"
+                            | "list_credentials"
+                    ),
+                "orchestrator must not be offered executable tool {}",
+                tool.name
+            );
+
+            if let Some(props) = tool
+                .input_schema
+                .get("properties")
+                .and_then(|v| v.as_object())
+            {
+                for key in SECRET_SCHEMA_KEYS {
+                    assert!(
+                        !props.contains_key(*key),
+                        "orchestrator tool {} exposes secret argument {key}",
+                        tool.name
+                    );
+                }
             }
         }
     }

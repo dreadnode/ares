@@ -594,7 +594,11 @@ impl CallbackHandler for BlueCallbackHandler {
         BLUE_HANDLED_TOOLS.contains(&tool_name)
     }
 
-    async fn handle_callback(&self, call: &ToolCall) -> Option<Result<CallbackResult>> {
+    async fn handle_callback(
+        &self,
+        call: &ToolCall,
+        _role: &str,
+    ) -> Option<Result<CallbackResult>> {
         match call.name.as_str() {
             // Dispatch tools — run sub-agent loops
             "dispatch_triage" => Some(self.dispatch_triage(call).await),

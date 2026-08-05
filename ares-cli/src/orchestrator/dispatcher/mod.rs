@@ -4,7 +4,7 @@
 //! the throttler, submits or defers, and tracks active tasks. Convenience methods
 //! like `request_recon()` etc. build the correct payloads.
 
-mod submission;
+pub(crate) mod submission;
 pub(crate) mod task_builders;
 
 use std::collections::HashMap;
@@ -131,6 +131,7 @@ pub struct Dispatcher {
     /// fallback for the rare race the mutex didn't prevent (a still-
     /// running ntlmrelayx from a prior dispatch).
     pub relay_slot: Arc<Mutex<()>>,
+    pub proposals: Arc<crate::orchestrator::proposals::ProposalPool>,
     /// Set once the completion monitor decides the op is done (all forests
     /// dominated / max runtime). While true, `do_submit_outcome` drops every
     /// new red task so the swarm stops burning tokens on the exploit/ACL
@@ -176,6 +177,7 @@ impl Dispatcher {
             credential_inflight: CredentialInflight::new(3),
             relay_slot: Arc::new(Mutex::new(())),
             red_draining: Arc::new(AtomicBool::new(false)),
+            proposals: Arc::new(crate::orchestrator::proposals::ProposalPool::from_env()),
         }
     }
 

@@ -403,6 +403,70 @@ mod tests {
 
     #[cfg(feature = "blue")]
     #[test]
+    fn blueteam_report_weights_the_rate_and_shows_the_silent_tail() {
+        use crate::models::Evidence;
+        use crate::reports::blueteam::RedTeamCoverage;
+
+        let gen = BlueTeamReportGenerator::new().unwrap();
+        let mut red = crate::models::SharedRedTeamState::new("op-test-004".to_string());
+        let event = |technique: &str, ts: &str| {
+            serde_json::json!({
+                "id": format!("evt-{technique}-{ts}"),
+                "timestamp": ts,
+                "description": format!("red ran {technique}"),
+                "mitre_techniques": [technique],
+            })
+        };
+        red.all_timeline_events = vec![
+            event("T1046", "2026-07-28T21:28:00Z"),
+            event("T1046", "2026-07-28T21:29:00Z"),
+            event("T1046", "2026-07-28T21:30:00Z"),
+            event("T1003.006", "2026-07-28T21:53:14Z"),
+        ];
+
+        let mut blue = crate::models::SharedBlueTeamState::new("inv-test-004".to_string());
+        blue.identified_techniques = vec!["T1046".to_string(), "T1003.006".to_string()];
+        blue.evidence = vec![Evidence {
+            id: "ev-sweep-1".to_string(),
+            evidence_type: "technique".to_string(),
+            value: "T1046".to_string(),
+            source: "detection_sweep:detect_port_scan".to_string(),
+            timestamp: Some("2026-07-28T21:28:00Z".to_string()),
+            pyramid_level: 6,
+            mitre_techniques: vec!["T1046".to_string()],
+            confidence: 0.8,
+            metadata: HashMap::new(),
+            source_query_id: None,
+            validated: true,
+        }];
+
+        let input = BlueTeamReportInput {
+            operation_id: "op-test-004".to_string(),
+            coverage: Some(RedTeamCoverage::compute(&red, &[blue])),
+            ..Default::default()
+        };
+        let report = gen.generate(&input).unwrap();
+
+        assert!(
+            report.contains("| Detection rate | 75% (3/4) |"),
+            "the headline rate must weight each technique by red's action count: {report}"
+        );
+        assert!(
+            report.contains("| Technique coverage (set join) | 100% (2/2) |"),
+            "the set join must stay visible, and stay separate: {report}"
+        );
+        assert!(
+            report.contains("| Taken after blue's last detection | 1 |"),
+            "red actions past blue's last detection must be counted: {report}"
+        );
+        assert!(
+            report.contains("| T1003.006 | 1 | blue named it"),
+            "a technique blue named but never observed must say so: {report}"
+        );
+    }
+
+    #[cfg(feature = "blue")]
+    #[test]
     fn blueteam_investigation_report_renders() {
         use crate::models::{Evidence, SharedBlueTeamState, TimelineEvent};
 

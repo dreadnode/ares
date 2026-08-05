@@ -404,7 +404,16 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
 /// Record a timeline event for the investigation.
 ///
 /// Required: `investigation_id`, `description`, `timestamp`
-/// Optional: `mitre_techniques` (array), `confidence`, `source`, `evidence_ids` (array)
+/// Optional: `mitre_techniques` (array), `confidence`, `source`, `evidence_ids` (array),
+/// `extra_data_json` (string)
+///
+/// `extra_data_json` carries structured detail the report reads back. The
+/// deterministic sweep puts the span of log events its detection matched there
+/// (`first_event_at` / `last_event_at` / `event_count`); coverage scoring needs
+/// that span to know which red actions a detection actually observed, and the
+/// single `timestamp` cannot express it. It is not offered to the blue agent —
+/// an observed window is a property of the query result, not something to
+/// assert.
 pub async fn record_timeline_event(args: &Value) -> Result<ToolOutput> {
     let investigation_id = required_str(args, "investigation_id")?;
     let description = required_str(args, "description")?;
@@ -431,7 +440,7 @@ pub async fn record_timeline_event(args: &Value) -> Result<ToolOutput> {
 
     let event_id = Uuid::new_v4().to_string();
 
-    let event = serde_json::json!({
+    let mut event = serde_json::json!({
         "id": event_id,
         "timestamp": timestamp,
         "description": description,
@@ -440,6 +449,10 @@ pub async fn record_timeline_event(args: &Value) -> Result<ToolOutput> {
         "confidence": confidence,
         "source": source,
     });
+
+    if let Some(extra) = optional_str(args, "extra_data_json") {
+        event["extra_data_json"] = serde_json::Value::String(extra.to_string());
+    }
 
     let mut conn = match get_redis_connection().await {
         Ok(c) => c,

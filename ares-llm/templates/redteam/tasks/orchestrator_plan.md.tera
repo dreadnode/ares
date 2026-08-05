@@ -1,0 +1,29 @@
+# Coordination Turn: {{ task_id }}
+
+Direct the seven workers. Current operation state:
+
+- Domains: {% if domains %}{{ domains | join(sep=", ") }}{% else %}none discovered yet{% endif %}
+- Credentials held: {{ credentials }} ({{ admin_credentials }} admin)
+- Hashes held: {{ hashes }} ({{ uncracked_hashes }} uncracked)
+- Hosts known: {{ hosts }}
+- Domain admin achieved: {{ has_domain_admin }}
+- Tasks currently pending: {{ pending_tasks }}
+{% if undominated_forests %}
+- **Forests not yet dominated: {{ undominated_forests | join(sep=", ") }}**
+{% endif %}
+{% if unexploited_vulnerability_ids %}
+- Discovered vulnerabilities with no exploitation recorded:
+{% for vid in unexploited_vulnerability_ids %}  - `{{ vid }}`
+{% endfor %}{% endif %}
+
+## This turn
+
+1. `get_proposed_work()` — rule-proposed work awaiting your decision.
+2. `approve_work` what advances the operation. Bulk approval is normal.
+3. `reject_work` what is redundant or aimed at a dead end, with a reason.
+4. Dispatch anything the rules missed. Pass `vuln_id` values exactly as listed
+   above; never invent one.
+5. `task_complete` with what you directed and why.
+
+Work you neither approve nor reject is released automatically when its window
+expires — to stop something you must reject it.

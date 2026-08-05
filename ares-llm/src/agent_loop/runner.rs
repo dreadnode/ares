@@ -771,7 +771,7 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
                                 error_message: None,
                                 defer_status: true,
                             });
-                            let result = handle_callback(&c, Some(h.as_ref()))
+                            let result = handle_callback(&c, Some(h.as_ref()), &r)
                                 .instrument(cb_span.clone())
                                 .await;
                             let cb_err = result.as_ref().err().map(ToString::to_string);
@@ -868,7 +868,7 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
                         error_message: None,
                         defer_status: true,
                     });
-                    let cb_result = handle_callback(call, callback_handler.as_deref())
+                    let cb_result = handle_callback(call, callback_handler.as_deref(), role)
                         .instrument(cb_span.clone())
                         .await;
                     let cb_err = cb_result.as_ref().err().map(ToString::to_string);
@@ -950,7 +950,7 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
                     error_message: None,
                     defer_status: true,
                 });
-                let cb_result = handle_callback(call, callback_handler.as_deref())
+                let cb_result = handle_callback(call, callback_handler.as_deref(), role)
                     .instrument(cb_span.clone())
                     .await;
                 let cb_err = cb_result.as_ref().err().map(ToString::to_string);

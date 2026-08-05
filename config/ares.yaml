@@ -122,30 +122,22 @@ agents:
   orchestrator:
     model: "gpt-5.2"
     max_steps: 200
-    # Tools: OrchestratorTools, RedTeamReportingTools
-    # NOTE: Orchestrator NEVER executes tools directly - it dispatches to workers
     tools:
       # Dispatch to worker agents
       - dispatch_recon
       - dispatch_credential_access
-      - dispatch_crack_hash
-      - dispatch_acl_analysis
+      - dispatch_crack
       - dispatch_lateral_movement
       - dispatch_privesc_exploit
-      - start_coercion
-      # Workflow triggers
-      - trigger_credential_expansion
-      - queue_vulnerability_for_exploitation
+      - dispatch_coercion
       # State queries
       - get_pending_tasks
+      - get_agent_status
       - get_all_credentials
       - get_all_hashes
-      - get_exploitation_status
-      - get_agent_status
+      - get_credential_summary
+      - get_hash_summary
       - get_operation_summary
-      # Reporting
-      - broadcast_credential
-      - announce_domain_admin
       - complete_operation
 
   recon:

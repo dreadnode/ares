@@ -45,8 +45,7 @@
 {% if alert_summaries | length > 0 %}
 | Investigation | Alert | Severity | Evidence | Pyramid (analyst/all) | Status |
 |--------------|-------|----------|----------|-----------------------|--------|
-{% for alert in alert_summaries %}
-| {{ alert.investigation_id_short }}... | {{ alert.alert_name }} | {{ alert.severity }} | {{ alert.evidence_count }} | {{ alert.highest_analyst_pyramid_level }}/{{ alert.highest_pyramid_level }} | {{ alert.status_display }} |
+{% for alert in alert_summaries %}| {{ alert.investigation_id_short }}... | {{ alert.alert_name }} | {{ alert.severity }} | {{ alert.evidence_count }} | {{ alert.highest_analyst_pyramid_level }}/{{ alert.highest_pyramid_level }} | {{ alert.status_display }} |
 {% endfor %}
 {% else %}
 No investigations recorded.
@@ -57,11 +56,28 @@ No investigations recorded.
 ## Red Team Activity Coverage
 
 {% if coverage %}
-Measured against the red team operation's own record of what it executed.
+Measured against the red team operation's own record of what it executed. Every red
+timeline event is one action, and an action counts as detected only when a matching
+blue detection observed telemetry around the time it happened — so a technique red ran
+109 times weighs 109 times as much as one it ran once, and a detection that stopped
+before red did stops earning credit.
 
 | Measure | Value |
 |---------|-------|
 | Detection rate | {{ coverage.detection_rate_display }} |
+| Red actions | {{ coverage.action_count }} |
+| Detected while red was running them | {{ coverage.detected_action_count }} |
+| Taken after blue's last detection | {{ coverage.actions_after_last_detection }} |
+| Blue's last detection | {{ coverage.blue_last_detection_display }} |
+| Red's last action | {{ coverage.red_last_action_display }} |
+
+Technique coverage, the unweighted set join, is reported for continuity only: it asks
+whether blue ever named each technique, ignoring how often red ran it and when blue
+said so.
+
+| Measure | Value |
+|---------|-------|
+| Technique coverage (set join) | {{ coverage.technique_rate_display }} |
 | Techniques red executed | {{ coverage.red_technique_count }} |
 | Detected by blue | {{ coverage.detected_count }} |
 | Missed by blue | {{ coverage.missed_count }} |
@@ -69,10 +85,9 @@ Measured against the red team operation's own record of what it executed.
 ### Detected
 
 {% if coverage.detected | length > 0 %}
-| Red Technique | Matched By Blue |
-|---------------|-----------------|
-{% for d in coverage.detected %}
-| {{ d.id }} | {{ d.matched_by }} |
+| Red Technique | Red Actions | Detected | Matched By Blue |
+|---------------|-------------|----------|-----------------|
+{% for d in coverage.detected %}| {{ d.id }} | {{ d.executions }} | {{ d.detected_executions }} | {{ d.matched_by }} |
 {% endfor %}
 {% else %}
 None. Blue detected no technique the red team actually executed.
@@ -81,10 +96,11 @@ None. Blue detected no technique the red team actually executed.
 ### Missed
 
 {% if coverage.missed | length > 0 %}
-Red executed these and blue produced no matching detection:
+Red executed these and blue produced no detection covering them, heaviest first:
 
-{% for m in coverage.missed %}
-- {{ m }}
+| Red Technique | Red Actions | Why It Scored Zero |
+|---------------|-------------|--------------------|
+{% for m in coverage.missed %}| {{ m.id }} | {{ m.executions }} | {{ m.reason }} |
 {% endfor %}
 {% else %}
 None — every technique red executed was detected.
@@ -100,6 +116,22 @@ Either false positives, or activity red did not record. Not counted toward the d
 {% endfor %}
 {% else %}
 None.
+{% endif %}
+
+{% if coverage.untimed_technique_claims | length > 0 %}
+### Named Without Timestamped Evidence
+
+Blue named these techniques but recorded nothing timestamped behind them, so they
+cannot show that blue saw red running them. Excluded from the detection rate:
+
+{% for t in coverage.untimed_technique_claims %}
+- {{ t }}
+{% endfor %}
+{% endif %}
+
+{% if coverage.unattributed_action_count > 0 %}
+{{ coverage.unattributed_action_count }} red timeline event(s) carried no MITRE technique
+and were scored on neither side of the rate.
 {% endif %}
 {% else %}
 **Not measured.** The red team operation state was unavailable, so blue's detections
@@ -126,8 +158,7 @@ No tactics identified.
 {% if techniques | length > 0 %}
 | ID | Name | Tactic |
 |----|------|--------|
-{% for tech in techniques %}
-| {{ tech.id }} | {{ tech.name }} | {{ tech.tactic }} |
+{% for tech in techniques %}| {{ tech.id }} | {{ tech.name }} | {{ tech.tactic }} |
 {% endfor %}
 {% else %}
 No techniques identified.
@@ -139,8 +170,7 @@ No techniques identified.
 
 | Level | Category | Analyst | Baseline Sweep | Total | Adversary Pain |
 |-------|----------|---------|----------------|-------|----------------|
-{% for entry in pyramid_entries %}
-| {{ entry.level }} | {{ entry.category }} | {{ entry.analyst_count }} | {{ entry.sweep_count }} | {{ entry.count }} | {{ entry.pain }} |
+{% for entry in pyramid_entries %}| {{ entry.level }} | {{ entry.category }} | {{ entry.analyst_count }} | {{ entry.sweep_count }} | {{ entry.count }} | {{ entry.pain }} |
 {% endfor %}
 
 {% if sweep_evidence_count > 0 %}
@@ -174,8 +204,7 @@ The TTP rows above are baseline-sweep detections, not analyst findings.
 
 | ID | Type | Value | Techniques | Confidence |
 |----|------|-------|------------|------------|
-{% for ev in level_group.evidence %}
-| {{ ev.id_short }}... | {{ ev.type }} | `{{ ev.value }}` | {{ ev.techniques_display }} | {{ ev.confidence_display }} |
+{% for ev in level_group.evidence %}| {{ ev.id_short }}... | {{ ev.type }} | `{{ ev.value }}` | {{ ev.techniques_display }} | {{ ev.confidence_display }} |
 {% endfor %}
 
 {% endif %}
@@ -192,8 +221,7 @@ No evidence collected.
 {% if timeline | length > 0 %}
 | Time (UTC) | Event | Techniques | Confidence |
 |------------|-------|------------|------------|
-{% for event in timeline %}
-| {{ event.timestamp }} | {{ event.description_short }} | {{ event.mitre_display }} | {{ event.confidence_display }} |
+{% for event in timeline %}| {{ event.timestamp }} | {{ event.description_short }} | {{ event.mitre_display }} | {{ event.confidence_display }} |
 {% endfor %}
 {% else %}
 No timeline events recorded.

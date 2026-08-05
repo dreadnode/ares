@@ -1343,6 +1343,7 @@ async fn record_fired(investigation_id: &str, f: &FiredDetection) -> Vec<String>
                 "mitre_techniques": [f.mitre_id],
                 "source": SWEEP_TIMELINE_SOURCE,
                 "confidence": confidence,
+                "extra_data_json": observed_window_json(f),
             }),
         ),
     ];
@@ -1354,6 +1355,29 @@ async fn record_fired(investigation_id: &str, f: &FiredDetection) -> Vec<String>
         }
     }
     rejected
+}
+
+/// The span of log events this detection matched, for the timeline event's
+/// structured payload.
+///
+/// The report scores coverage per red action, so it has to know which actions a
+/// detection observed. The timeline event's single `timestamp` is the first
+/// matched event and says nothing about the rest: without the span, a detection
+/// that matched 44 events over 20 minutes looks like an instant, and every red
+/// action after the first scores as undetected. `None` when the detection
+/// carries no event times — the ticket correlations report orphaned principals
+/// rather than matched log lines.
+fn observed_window_json(f: &FiredDetection) -> Option<String> {
+    let first = f.first_event_at?;
+    let last = f.last_event_at.unwrap_or(first);
+    Some(
+        json!({
+            "first_event_at": first.to_rfc3339(),
+            "last_event_at": last.max(first).to_rfc3339(),
+            "event_count": f.event_count,
+        })
+        .to_string(),
+    )
 }
 
 /// Render a detection's observed event window and hosts for the timeline
@@ -1540,6 +1564,38 @@ mod tests {
     #[test]
     fn scope_suffix_empty_without_times_or_hosts() {
         assert_eq!(detection_scope_suffix(&fired(None, None, &[])), "");
+    }
+
+    #[test]
+    fn observed_window_carries_the_whole_matched_span() {
+        let f = fired(
+            Some("2026-07-26T21:41:13Z"),
+            Some("2026-07-26T21:55:02Z"),
+            &[],
+        );
+        let w: serde_json::Value =
+            serde_json::from_str(&observed_window_json(&f).expect("window")).expect("valid json");
+
+        assert_eq!(w["first_event_at"], "2026-07-26T21:41:13+00:00");
+        assert_eq!(w["last_event_at"], "2026-07-26T21:55:02+00:00");
+        assert_eq!(w["event_count"], 3);
+    }
+
+    #[test]
+    fn observed_window_collapses_to_the_first_event_without_a_last() {
+        let f = fired(Some("2026-07-26T21:41:13Z"), None, &[]);
+        let w: serde_json::Value =
+            serde_json::from_str(&observed_window_json(&f).expect("window")).expect("valid json");
+
+        assert_eq!(w["last_event_at"], "2026-07-26T21:41:13+00:00");
+    }
+
+    #[test]
+    fn a_detection_with_no_event_times_records_no_window() {
+        // The ticket correlations report orphaned principals, not matched log
+        // lines. An invented window would credit blue for observing a span it
+        // never queried.
+        assert_eq!(observed_window_json(&fired(None, None, &[])), None);
     }
 
     #[test]
@@ -2476,8 +2532,6 @@ mod tests {
 
     #[test]
     fn detections_predating_the_operation_are_not_attributable() {
-        // The op-20260728-000334 regression: a 13-minute operation harvested a
-        // 2h lookback and credited five prior-operation detections to itself.
         let start = op_start("2026-07-28T00:03:34+00:00");
         assert!(!attributable(
             &detection_at(Some("2026-07-27T23:04:33+00:00")),

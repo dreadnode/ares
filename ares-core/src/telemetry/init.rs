@@ -129,8 +129,9 @@ pub fn shutdown_telemetry(guard: &mut TelemetryGuard) {
 
 /// Attempt to build an OTLP span exporter + tracer provider. Returns `None` if
 /// no OTLP endpoint is configured (neither `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
-/// nor `OTEL_EXPORTER_OTLP_ENDPOINT`). A blank endpoint warns before returning;
-/// an absent one is silent.
+/// nor `OTEL_EXPORTER_OTLP_ENDPOINT`). Every return path says why: a run that
+/// exports no spans is indistinguishable from a healthy one at the collector,
+/// so the reason has to be on stderr or the empty Tempo pane is undiagnosable.
 fn try_init_otel_provider(service_name: &str) -> Option<SdkTracerProvider> {
     // The OTel SDK reads OTEL_EXPORTER_OTLP_* env vars automatically.
     // We check presence and validity so we can skip provider creation entirely
@@ -153,7 +154,13 @@ fn try_init_otel_provider(service_name: &str) -> Option<SdkTracerProvider> {
             return None;
         }
         Some(v) => v,
-        None => return None,
+        None => {
+            eprintln!(
+                "OTEL endpoint is not set: traces are disabled and Tempo will be empty for \
+                 this run. Set OTEL_EXPORTER_OTLP_ENDPOINT to an absolute URL to export spans."
+            );
+            return None;
+        }
     };
 
     // Reject non-absolute URLs early (e.g. un-substituted template placeholders)
