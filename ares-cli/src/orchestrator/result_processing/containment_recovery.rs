@@ -10,12 +10,20 @@
 //! a `task_target_ip` for isolation, a Kerberos-hitting technique for
 //! krbtgt rotation, a certificate-based technique for cert revocation).
 //!
-//! False positives are cheaper than false negatives here because
+//! False positives are cheaper than false negatives for the host, realm and
+//! certificate signals because
 //! [`SharedState::publish_credential_revoked`] / `_host_isolated` /
 //! `_krbtgt_rotated` / `_certificate_revoked` are idempotent per identity
 //! key — a duplicate emit is a no-op — and the downstream queue filter
 //! treats an observation as advisory (skip the affected work-item, don't
 //! crash the op). Under-firing means the demo never adapts to blue.
+//!
+//! Credential revocation is the exception: it hides the credential from the
+//! LLM for the rest of the operation with no operator rollback, so a false
+//! positive costs red an access it still holds. The weak-marker path is
+//! therefore gated to reject-strings whose provenance actually implicates
+//! the principal — see `is_attributable_reject_technique` and
+//! `reject_is_same_realm`.
 
 use serde_json::Value;
 
@@ -148,6 +156,39 @@ fn is_benign_reject_technique(technique: &str) -> bool {
     t.contains("spray") || t.contains("brute")
 }
 
+/// Whether the technique behind a weak credential-reject is known well enough
+/// to attribute the rejection to the acting principal.
+///
+/// An unnamed technique cannot clear [`is_benign_reject_technique`] — the empty
+/// string contains neither `spray` nor `brute` — so an unpopulated `technique`
+/// param used to sail through the benign-technique exemption and let ordinary
+/// spray misses revoke a working credential. Unknown provenance now fails
+/// closed: no technique, no inference.
+fn is_attributable_reject_technique(technique: &str) -> bool {
+    !technique.trim().is_empty() && !is_benign_reject_technique(technique)
+}
+
+/// Whether a credential-reject observed on this task can be blamed on the
+/// credential rather than on the realm boundary it was fired across.
+///
+/// Recon fans authenticated enumeration across every discovered host with
+/// whatever principal it holds, so a credential from one realm routinely gets
+/// pointed at hosts in another. The rejection that comes back is the expected
+/// answer for a foreign principal, not evidence the account died in its own
+/// realm. Only a same-realm rejection carries that meaning.
+///
+/// Returns `true` when the target realm is unknown: absence of a realm is not
+/// evidence of a mismatch, and [`is_attributable_reject_technique`] still has
+/// to pass before anything is inferred.
+fn reject_is_same_realm(cred_key: &str, task_domain: Option<&str>) -> bool {
+    let Some(target) = task_domain.map(str::trim).filter(|d| !d.is_empty()) else {
+        return true;
+    };
+    cred_key
+        .split_once('@')
+        .is_none_or(|(_, cred_domain)| cred_domain.trim().eq_ignore_ascii_case(target))
+}
+
 /// Inspect a completed task and return any containment signals it surfaces.
 ///
 /// - `cred_key`: `user@domain` for the credential the task was dispatched
@@ -185,15 +226,18 @@ pub(crate) fn classify_containment_signals(
     //
     //    Two paths with different confidence. `strong_revoked` is the KDC
     //    explicitly declaring the client principal revoked under a
-    //    password-backed technique — unambiguous, published on first sight.
-    //    `weak_revoked` is a generic auth-reject string; it's genuine when an
-    //    auth-*using* technique is suddenly refused, but benign when a
-    //    spray/brute technique emits it by design, so those techniques are
-    //    gated out and the caller additionally requires corroboration (see
+    //    password-backed technique — unambiguous, published on first sight,
+    //    and true about the principal regardless of what it was aimed at.
+    //    `weak_revoked` is a generic auth-reject string, which only means the
+    //    account died when the technique is known and auth-*using*
+    //    (`is_attributable_reject_technique`) and the target sits in the
+    //    credential's own realm (`reject_is_same_realm`). The caller then
+    //    additionally requires corroboration (see
     //    CREDENTIAL_REVOKE_MIN_OBSERVATIONS) before acting.
     if let Some(key) = cred_key {
         let strong_revoked = client_revoked && !is_certificate_backed_technique(tech);
-        let weak_revoked = !is_benign_reject_technique(tech)
+        let weak_revoked = is_attributable_reject_technique(tech)
+            && reject_is_same_realm(key, task_domain)
             && any_text_contains_any(result, CREDENTIAL_REJECT_MARKERS);
         if strong_revoked || weak_revoked {
             if let Some((username, domain)) = key.split_once('@') {
@@ -355,6 +399,101 @@ mod tests {
         assert!(!s
             .iter()
             .any(|sig| matches!(sig, ContainmentSignal::CredentialRevoked { .. })));
+    }
+
+    #[test]
+    fn cross_realm_logon_failure_does_not_revoke() {
+        let result = out("[-] contoso.local\\alice:P@ssw0rd! STATUS_LOGON_FAILURE");
+        let s = classify_containment_signals(
+            &result,
+            Some("nxc_smb"),
+            Some("alice@contoso.local"),
+            Some("fabrikam.local"),
+            Some("192.168.58.20"),
+        );
+        assert!(!s
+            .iter()
+            .any(|sig| matches!(sig, ContainmentSignal::CredentialRevoked { .. })));
+    }
+
+    #[test]
+    fn child_realm_logon_failure_does_not_revoke_parent_credential() {
+        let result = out("STATUS_LOGON_FAILURE");
+        let s = classify_containment_signals(
+            &result,
+            Some("nxc_smb"),
+            Some("alice@child.contoso.local"),
+            Some("contoso.local"),
+            Some("192.168.58.240"),
+        );
+        assert!(!s
+            .iter()
+            .any(|sig| matches!(sig, ContainmentSignal::CredentialRevoked { .. })));
+    }
+
+    #[test]
+    fn unknown_technique_logon_failure_does_not_revoke() {
+        for tech in [None, Some(""), Some("   ")] {
+            let s = classify_containment_signals(
+                &out("STATUS_LOGON_FAILURE"),
+                tech,
+                Some("alice@contoso.local"),
+                Some("contoso.local"),
+                Some("192.168.58.10"),
+            );
+            assert!(
+                !s.iter()
+                    .any(|sig| matches!(sig, ContainmentSignal::CredentialRevoked { .. })),
+                "technique {tech:?} must not produce a weak revocation"
+            );
+        }
+    }
+
+    #[test]
+    fn kdc_client_revoked_survives_both_new_gates() {
+        let s = classify_containment_signals(
+            &out("KDC_ERR_CLIENT_REVOKED"),
+            None,
+            Some("alice@contoso.local"),
+            Some("fabrikam.local"),
+            Some("192.168.58.20"),
+        );
+        assert!(s.iter().any(
+            |sig| matches!(sig, ContainmentSignal::CredentialRevoked { username, domain, .. }
+                if username == "alice" && domain == "contoso.local")
+        ));
+    }
+
+    #[test]
+    fn same_realm_logon_failure_still_revokes() {
+        let s = classify_containment_signals(
+            &out("STATUS_LOGON_FAILURE"),
+            Some("nxc_smb"),
+            Some("alice@CONTOSO.LOCAL"),
+            Some("contoso.local"),
+            Some("192.168.58.10"),
+        );
+        assert!(s
+            .iter()
+            .any(|sig| matches!(sig, ContainmentSignal::CredentialRevoked { .. })));
+    }
+
+    #[test]
+    fn unknown_target_realm_still_revokes_under_known_technique() {
+        for domain in [None, Some("")] {
+            let s = classify_containment_signals(
+                &out("STATUS_LOGON_FAILURE"),
+                Some("nxc_smb"),
+                Some("alice@contoso.local"),
+                domain,
+                Some("192.168.58.10"),
+            );
+            assert!(
+                s.iter()
+                    .any(|sig| matches!(sig, ContainmentSignal::CredentialRevoked { .. })),
+                "target realm {domain:?} is unknown, not mismatched"
+            );
+        }
     }
 
     #[test]
