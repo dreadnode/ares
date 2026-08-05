@@ -352,6 +352,13 @@ pub async fn ldap_search(args: &Value) -> Result<ToolOutput> {
     build_ldap_search(args)?.execute().await
 }
 
+/// Simple paged results control. Active Directory caps an unpaged search at
+/// `MaxPageSize` (1000 by default) and returns `Size limit exceeded` instead
+/// of the rest, so a roster or ACL sweep of any real domain silently returns a
+/// prefix of the directory. The impacket branches of these same tools already
+/// page via `SimplePagedResultsControl`; the `ldapsearch` branches did not.
+const LDAP_PAGED_RESULTS: &[&str] = &["-E", "pr=1000/noprompt"];
+
 /// Build the `ldapsearch` invocation for [`ldap_search`].
 ///
 /// Exposed so the resolver-side Bug B contract test can verify the
@@ -381,7 +388,8 @@ pub fn build_ldap_search(args: &Value) -> Result<CommandBuilder> {
 
     let mut cmd = CommandBuilder::new("ldapsearch")
         .flag_visible("-H", &uri)
-        .timeout_secs(120);
+        .timeout_secs(120)
+        .args(LDAP_PAGED_RESULTS.iter().copied());
 
     if let Some(ccache) = ticket_path {
         // Kerberos GSSAPI bind via cached ticket — preferred over simple
@@ -883,6 +891,7 @@ pub fn build_ldap_acl_enumeration(args: &Value) -> Result<CommandBuilder> {
             .timeout_secs(300)
             .flag("-b", &base_dn)
             .args(["-E", "1.2.840.113556.1.4.801=::MAMCAQQ="])
+            .args(LDAP_PAGED_RESULTS.iter().copied())
             .arg(ACL_ENUM_FILTER)
             .args(ACL_ENUM_ATTRIBUTES.iter().copied()));
     }
@@ -962,6 +971,7 @@ for item in resp:
         // Request DACL only via SD_FLAGS control (0x04 = DACL)
         // BER: SEQUENCE { INTEGER 4 } = 30 03 02 01 04 → base64 MAMCAQQ=
         .args(["-E", "1.2.840.113556.1.4.801=::MAMCAQQ="])
+        .args(LDAP_PAGED_RESULTS.iter().copied())
         .arg(ACL_ENUM_FILTER)
         .args(ACL_ENUM_ATTRIBUTES.iter().copied()))
 }
@@ -1604,6 +1614,61 @@ mod tests {
             .position(|a| a == "-w")
             .expect("password must reach -w for ldap_acl_enumeration");
         assert_eq!(args_vec.get(w_idx + 1).map(String::as_str), Some("P@ss"));
+    }
+
+    fn assert_pages(args: &[String]) {
+        let idx = args
+            .iter()
+            .position(|a| a == "pr=1000/noprompt")
+            .unwrap_or_else(|| panic!("paged results control missing from {args:?}"));
+        assert_eq!(args.get(idx - 1).map(String::as_str), Some("-E"));
+    }
+
+    #[test]
+    fn ldapsearch_branches_page_so_the_directory_is_not_truncated_at_maxpagesize() {
+        let bindings = [
+            json!({
+                "target": "192.168.58.10",
+                "domain": "contoso.local",
+                "username": "alice",
+                "password": "P@ssw0rd!",
+            }),
+            json!({
+                "target": "dc01.contoso.local",
+                "domain": "contoso.local",
+                "ticket_path": "/tmp/ares-tickets/z.ccache",
+            }),
+            json!({
+                "target": "192.168.58.10",
+                "domain": "contoso.local",
+            }),
+        ];
+        for args in &bindings {
+            assert_pages(super::build_ldap_search(args).unwrap().args_for_test());
+        }
+        for args in &bindings[..2] {
+            assert_pages(
+                super::build_ldap_acl_enumeration(args)
+                    .unwrap()
+                    .args_for_test(),
+            );
+        }
+    }
+
+    #[test]
+    fn ldap_acl_enumeration_hash_branch_pages_via_impacket() {
+        let args = json!({
+            "target": "192.168.58.10",
+            "domain": "contoso.local",
+            "username": "alice",
+            "hash": "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890",
+        });
+        let script = super::build_ldap_acl_enumeration(&args)
+            .unwrap()
+            .args_for_test()
+            .join(" ");
+        assert!(script.contains("SimplePagedResultsControl(size=1000)"));
+        assert!(script.contains("sizeLimit=0"));
     }
 
     #[test]

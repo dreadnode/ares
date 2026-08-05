@@ -9,17 +9,106 @@ use serde_json::{json, Value};
 
 // ── Well-known SID prefixes ────────────────────────────────────────────────
 
-/// Map well-known SIDs to friendly names.
+/// Map well-known SIDs to friendly names: the universal SIDs, the
+/// `S-1-5-32-<rid>` BUILTIN aliases, and the domain-relative
+/// `S-1-5-21-<domain>-<rid>` principals every AD install creates.
 pub(super) fn well_known_sid(sid: &str) -> Option<&'static str> {
+    if let Some(name) = universal_sid(sid) {
+        return Some(name);
+    }
+    if let Some(rid) = sid.strip_prefix("S-1-5-32-") {
+        return builtin_alias_sid(rid);
+    }
+    domain_relative_sid(sid)
+}
+
+fn universal_sid(sid: &str) -> Option<&'static str> {
     match sid {
         "S-1-0-0" => Some("Nobody"),
         "S-1-1-0" => Some("Everyone"),
+        "S-1-3-0" => Some("CREATOR OWNER"),
+        "S-1-3-1" => Some("CREATOR GROUP"),
+        "S-1-3-4" => Some("OWNER RIGHTS"),
+        "S-1-5-4" => Some("INTERACTIVE"),
+        "S-1-5-6" => Some("SERVICE"),
         "S-1-5-7" => Some("ANONYMOUS LOGON"),
+        "S-1-5-9" => Some("ENTERPRISE DOMAIN CONTROLLERS"),
         "S-1-5-10" => Some("SELF"),
         "S-1-5-11" => Some("Authenticated Users"),
+        "S-1-5-15" => Some("This Organization"),
         "S-1-5-18" => Some("SYSTEM"),
-        "S-1-5-32-544" => Some("BUILTIN\\Administrators"),
-        "S-1-5-32-545" => Some("BUILTIN\\Users"),
+        "S-1-5-19" => Some("LOCAL SERVICE"),
+        "S-1-5-20" => Some("NETWORK SERVICE"),
+        _ => None,
+    }
+}
+
+fn builtin_alias_sid(rid: &str) -> Option<&'static str> {
+    match rid {
+        "544" => Some("BUILTIN\\Administrators"),
+        "545" => Some("BUILTIN\\Users"),
+        "546" => Some("BUILTIN\\Guests"),
+        "547" => Some("BUILTIN\\Power Users"),
+        "548" => Some("BUILTIN\\Account Operators"),
+        "549" => Some("BUILTIN\\Server Operators"),
+        "550" => Some("BUILTIN\\Print Operators"),
+        "551" => Some("BUILTIN\\Backup Operators"),
+        "552" => Some("BUILTIN\\Replicator"),
+        "554" => Some("BUILTIN\\Pre-Windows 2000 Compatible Access"),
+        "555" => Some("BUILTIN\\Remote Desktop Users"),
+        "556" => Some("BUILTIN\\Network Configuration Operators"),
+        "557" => Some("BUILTIN\\Incoming Forest Trust Builders"),
+        "558" => Some("BUILTIN\\Performance Monitor Users"),
+        "559" => Some("BUILTIN\\Performance Log Users"),
+        "560" => Some("BUILTIN\\Windows Authorization Access Group"),
+        "561" => Some("BUILTIN\\Terminal Server License Servers"),
+        "562" => Some("BUILTIN\\Distributed COM Users"),
+        "568" => Some("BUILTIN\\IIS_IUSRS"),
+        "569" => Some("BUILTIN\\Cryptographic Operators"),
+        "573" => Some("BUILTIN\\Event Log Readers"),
+        "574" => Some("BUILTIN\\Certificate Service DCOM Access"),
+        "578" => Some("BUILTIN\\Hyper-V Administrators"),
+        "579" => Some("BUILTIN\\Access Control Assistance Operators"),
+        "580" => Some("BUILTIN\\Remote Management Users"),
+        _ => None,
+    }
+}
+
+fn domain_relative_sid(sid: &str) -> Option<&'static str> {
+    let rest = sid.strip_prefix("S-1-5-21-")?;
+    let mut parts = rest.split('-');
+    for _ in 0..3 {
+        let sub = parts.next()?;
+        if sub.is_empty() || !sub.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+    }
+    let rid = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    match rid {
+        "498" => Some("Enterprise Read-only Domain Controllers"),
+        "500" => Some("Administrator"),
+        "501" => Some("Guest"),
+        "502" => Some("krbtgt"),
+        "512" => Some("Domain Admins"),
+        "513" => Some("Domain Users"),
+        "514" => Some("Domain Guests"),
+        "515" => Some("Domain Computers"),
+        "516" => Some("Domain Controllers"),
+        "517" => Some("Cert Publishers"),
+        "518" => Some("Schema Admins"),
+        "519" => Some("Enterprise Admins"),
+        "520" => Some("Group Policy Creator Owners"),
+        "521" => Some("Read-only Domain Controllers"),
+        "522" => Some("Cloneable Domain Controllers"),
+        "525" => Some("Protected Users"),
+        "526" => Some("Key Admins"),
+        "527" => Some("Enterprise Key Admins"),
+        "553" => Some("RAS and IAS Servers"),
+        "571" => Some("Allowed RODC Password Replication Group"),
+        "572" => Some("Denied RODC Password Replication Group"),
         _ => None,
     }
 }
@@ -30,6 +119,7 @@ pub(super) fn well_known_sid(sid: &str) -> Option<&'static str> {
 /// sources filter identically.
 pub(super) fn is_unactionable_acl_source(source_name: &str) -> bool {
     let lower = source_name.to_lowercase();
+    let lower = lower.strip_prefix("builtin\\").unwrap_or(&lower);
     matches!(
         source_name,
         "SYSTEM"
@@ -39,7 +129,7 @@ pub(super) fn is_unactionable_acl_source(source_name: &str) -> bool {
             | "Nobody"
             | "ANONYMOUS LOGON"
     ) || matches!(
-        lower.as_str(),
+        lower,
         "administrators"
             | "domain admins"
             | "enterprise admins"
@@ -1672,6 +1762,138 @@ nTSecurityDescriptor:: {b64}
         assert!(parse_sd_allowed_trustees(&sd_with_ace(0, &sid_bytes(2000))).is_empty());
         let sd = sd_with_ace(READ_PROPERTY_MASK, &sid_bytes(2000));
         assert_eq!(parse_sd_allowed_trustees(&sd).len(), 1);
+    }
+
+    const TEST_DOMAIN_SID: &str = "S-1-5-21-1111111111-2222222222-3333333333";
+
+    fn principal_sid_bytes(rid: u32) -> Vec<u8> {
+        let mut b = vec![0x01u8, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05];
+        for sub in [21u32, 1111111111, 2222222222, 3333333333, rid] {
+            b.extend_from_slice(&sub.to_le_bytes());
+        }
+        b
+    }
+
+    fn acl_output_granting(rid: u32) -> String {
+        let sd = encode_sd(&sd_with_ace(GENERIC_ALL, &principal_sid_bytes(rid)));
+        format!(
+            "\
+dn: CN=alice,CN=Users,DC=contoso,DC=local
+sAMAccountName: alice
+objectClass: user
+nTSecurityDescriptor:: {sd}
+"
+        )
+    }
+
+    #[test]
+    fn well_known_sid_resolves_domain_relative_rids() {
+        for (rid, name) in [
+            (512, "Domain Admins"),
+            (519, "Enterprise Admins"),
+            (516, "Domain Controllers"),
+            (502, "krbtgt"),
+            (526, "Key Admins"),
+        ] {
+            assert_eq!(
+                well_known_sid(&format!("{TEST_DOMAIN_SID}-{rid}")),
+                Some(name)
+            );
+        }
+    }
+
+    #[test]
+    fn well_known_sid_rejects_sids_that_are_not_domain_principals() {
+        // Too few sub-authorities to be `S-1-5-21-<a>-<b>-<c>-<rid>`.
+        assert_eq!(well_known_sid("S-1-5-21-1-2-512"), None);
+        assert_eq!(well_known_sid(&format!("{TEST_DOMAIN_SID}-512-1")), None);
+        assert_eq!(well_known_sid("S-1-5-21-a-b-c-512"), None);
+        // A user RID is domain-specific and must stay unresolved.
+        assert_eq!(well_known_sid(&format!("{TEST_DOMAIN_SID}-1104")), None);
+    }
+
+    #[test]
+    fn well_known_sid_resolves_builtin_aliases() {
+        assert_eq!(
+            well_known_sid("S-1-5-32-544"),
+            Some("BUILTIN\\Administrators")
+        );
+        assert_eq!(
+            well_known_sid("S-1-5-32-548"),
+            Some("BUILTIN\\Account Operators")
+        );
+        assert_eq!(
+            well_known_sid("S-1-5-32-551"),
+            Some("BUILTIN\\Backup Operators")
+        );
+        assert_eq!(well_known_sid("S-1-5-32-99999"), None);
+    }
+
+    #[test]
+    fn is_unactionable_acl_source_ignores_the_builtin_prefix() {
+        assert!(is_unactionable_acl_source("BUILTIN\\Administrators"));
+        assert!(is_unactionable_acl_source("BUILTIN\\Account Operators"));
+        assert!(is_unactionable_acl_source("Account Operators"));
+        // Operator groups that ARE an escalation primitive must stay publishable.
+        assert!(!is_unactionable_acl_source("BUILTIN\\Backup Operators"));
+        assert!(!is_unactionable_acl_source("BUILTIN\\Server Operators"));
+    }
+
+    #[test]
+    fn unresolved_privileged_trustee_is_filtered_not_published_as_a_raw_sid() {
+        for rid in [512, 519, 516] {
+            let vulns = parse_acl_enumeration(
+                &acl_output_granting(rid),
+                &serde_json::json!({"domain": "contoso.local"}),
+            );
+            assert!(
+                vulns.is_empty(),
+                "RID {rid} is not an escalation primitive, got: {vulns:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_actionable_trustee_renders_its_name_not_the_sid() {
+        let vulns = parse_acl_enumeration(
+            &acl_output_granting(553),
+            &serde_json::json!({"domain": "contoso.local"}),
+        );
+        assert_eq!(vulns.len(), 1, "got: {vulns:?}");
+        assert_eq!(vulns[0]["source"], "RAS and IAS Servers");
+        assert_eq!(
+            vulns[0]["details"]["description"],
+            "RAS and IAS Servers has genericall on alice (User)"
+        );
+        assert_eq!(
+            vulns[0]["details"]["trustee_sid"],
+            format!("{TEST_DOMAIN_SID}-553")
+        );
+        assert_eq!(
+            vulns[0]["vuln_id"],
+            "acl_genericall_ras_and_ias_servers_alice"
+        );
+    }
+
+    #[test]
+    fn a_directory_resolved_name_still_wins_over_the_rid_table() {
+        let sd = encode_sd(&sd_with_ace(GENERIC_ALL, &principal_sid_bytes(553)));
+        let output = format!(
+            "\
+dn: CN=svc_ras,CN=Users,DC=contoso,DC=local
+sAMAccountName: svc_ras
+objectClass: group
+objectSid: {TEST_DOMAIN_SID}-553
+
+dn: CN=alice,CN=Users,DC=contoso,DC=local
+sAMAccountName: alice
+objectClass: user
+nTSecurityDescriptor:: {sd}
+"
+        );
+        let vulns = parse_acl_enumeration(&output, &serde_json::json!({"domain": "contoso.local"}));
+        assert_eq!(vulns.len(), 1, "got: {vulns:?}");
+        assert_eq!(vulns[0]["source"], "svc_ras");
     }
 
     #[test]
