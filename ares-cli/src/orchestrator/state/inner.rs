@@ -259,6 +259,14 @@ pub struct StateInner {
     /// target, which is the one thing that can make the retry succeed.
     pub forge_wedged: HashMap<String, crate::orchestrator::automation::trust::WedgedForge>,
 
+    /// Trust forges parked because the dump came back with no target krbtgt,
+    /// keyed by the `trust_follow` dedup key. The forge itself succeeded, so
+    /// re-running it with the same trust material repeats the same empty dump
+    /// — but a *different* trust key (an AES256 upgrade, a re-extracted key, a
+    /// rotation) is exactly what can turn it into a real DCSync, and nothing
+    /// else in the tick can act on that.
+    pub forge_empty_dump: HashMap<String, crate::orchestrator::automation::trust::EmptyDumpForge>,
+
     /// Whether a blue team is running alongside red in this operation,
     /// resolved once at orchestrator startup from `ARES_BLUE_ENABLED`.
     ///
@@ -394,6 +402,7 @@ impl StateInner {
             forge_ntlm_fallback_attempts: HashMap::new(),
             forge_in_flight: HashMap::new(),
             forge_wedged: HashMap::new(),
+            forge_empty_dump: HashMap::new(),
             mssql_link_pivot_attempts: HashMap::new(),
             containment_reject_counts: HashMap::new(),
             krbtgt_transient_counts: HashMap::new(),

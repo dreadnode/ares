@@ -86,6 +86,86 @@ fn sweep_rearmable_forge_wedges(state: &mut StateInner) -> Vec<String> {
     rearmed
 }
 
+/// A forge that ran to completion but dumped no target krbtgt.
+#[derive(Debug, Clone)]
+pub struct EmptyDumpForge {
+    pub source_domain: String,
+    pub target_domain: String,
+    pub trust_account: String,
+    /// Fingerprint of the trust material the empty dump was produced with.
+    pub material: String,
+    pub attempts: u32,
+}
+
+/// How many times an empty-dump forge may be re-armed by fresh trust material
+/// before the pivot is treated as genuinely closed (SID filtering).
+const MAX_EMPTY_DUMP_FORGE_ATTEMPTS: u32 = 3;
+
+/// Fingerprint the trust material currently in state for `(account, domain)`.
+///
+/// Two forges that would send byte-identical `ticketer` input share a
+/// fingerprint, so a re-arm fires on a genuinely new key and never on a
+/// re-observation of the same one.
+fn trust_material_fingerprint(
+    hashes: &[ares_core::models::Hash],
+    trust_account: &str,
+    source_domain: &str,
+) -> Option<String> {
+    let account_l = trust_account.to_lowercase();
+    let domain_l = source_domain.to_lowercase();
+    hashes
+        .iter()
+        .filter(|h| {
+            h.username.to_lowercase() == account_l
+                && (h.domain.is_empty() || h.domain.to_lowercase() == domain_l)
+                && !h.hash_value.is_empty()
+        })
+        .map(|h| {
+            format!(
+                "{}:{}",
+                h.hash_value.to_lowercase(),
+                h.aes_key.as_deref().unwrap_or("").to_lowercase()
+            )
+        })
+        .max()
+}
+
+/// Re-arm empty-dump forges whose trust material has since changed.
+///
+/// The forge produced a valid inter-realm TGS and the DCSync still returned
+/// nothing. Against a SID-filtered forest that is permanent, which is why the
+/// dedup mark is held. But the identical symptom is produced by a trust key
+/// that was stale, RC4-only against an AES-only KDC, or extracted before the
+/// AES256 variant upserted — and in every one of those cases a later
+/// extraction lands *different* material that would succeed. Comparing against
+/// the fingerprint that failed re-arms on new material and only on new
+/// material, so a genuinely filtered trust still converges to locked.
+fn sweep_rearmable_empty_dump_forges(state: &mut StateInner) -> Vec<(String, EmptyDumpForge)> {
+    let keys: Vec<String> = state
+        .forge_empty_dump
+        .iter()
+        .filter(|(_, e)| e.attempts < MAX_EMPTY_DUMP_FORGE_ATTEMPTS)
+        .filter(|(_, e)| {
+            trust_material_fingerprint(&state.hashes, &e.trust_account, &e.source_domain)
+                .is_some_and(|current| current != e.material)
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    let mut rearmed = Vec::with_capacity(keys.len());
+    for key in keys {
+        if let Some(entry) = state.forge_empty_dump.remove(&key) {
+            let next = EmptyDumpForge {
+                attempts: entry.attempts + 1,
+                ..entry
+            };
+            state.forge_empty_dump.insert(key.clone(), next.clone());
+            state.unmark_processed(DEDUP_TRUST_FOLLOW, &key);
+            rearmed.push((key, next));
+        }
+    }
+    rearmed
+}
+
 fn sweep_stale_forge_in_flight(state: &mut StateInner) -> Vec<String> {
     let stale: Vec<String> = state
         .forge_in_flight
@@ -675,10 +755,11 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
         // mark if the spawn never actually runs the tool. Without this sweep,
         // a single dropped spawn kills the cross-forest pivot for the rest of
         // the op even though the trust key sits in state ready to use.
-        let (stale, rearmed) = {
+        let (stale, rearmed, redumped) = {
             let mut state = dispatcher.state.write().await;
             let rearmed = sweep_rearmable_forge_wedges(&mut state);
-            (sweep_stale_forge_in_flight(&mut state), rearmed)
+            let redumped = sweep_rearmable_empty_dump_forges(&mut state);
+            (sweep_stale_forge_in_flight(&mut state), rearmed, redumped)
         };
         for key in rearmed {
             let _ = dispatcher
@@ -688,6 +769,20 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             info!(
                 dedup_key = %key,
                 "Re-armed trust forge — recon now resolves a different target DC than the one that failed"
+            );
+        }
+        for (key, entry) in redumped {
+            let _ = dispatcher
+                .state
+                .unpersist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
+                .await;
+            info!(
+                dedup_key = %key,
+                source_domain = %entry.source_domain,
+                target_domain = %entry.target_domain,
+                trust_account = %entry.trust_account,
+                attempts = entry.attempts,
+                "Re-armed trust forge — a different trust key landed since the dump that returned no target krbtgt"
             );
         }
         for key in stale {
@@ -2026,6 +2121,35 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 "forge_inter_realm_and_dump completed but no target krbtgt observed — locking dedup, waking fallbacks (vuln NOT marked exploited; only target krbtgt capture proves compromise)"
                             );
                             let _ = vuln_id_bg; // intentionally unused — see comment above
+
+                            // Park the material this empty dump was produced
+                            // with so `sweep_rearmable_empty_dump_forges` can
+                            // re-arm if a later extraction lands a different
+                            // trust key. Without this the lock is permanent
+                            // even when the key that would have worked arrives
+                            // seconds later.
+                            {
+                                let mut state = dispatcher_bg.state.write().await;
+                                let material = format!(
+                                    "{}:{}",
+                                    trust_key_bg.to_lowercase(),
+                                    aes_key_bg.as_deref().unwrap_or("").to_lowercase()
+                                );
+                                let attempts = state
+                                    .forge_empty_dump
+                                    .get(&dedup_key_bg)
+                                    .map_or(0, |e| e.attempts);
+                                state.forge_empty_dump.insert(
+                                    dedup_key_bg.clone(),
+                                    EmptyDumpForge {
+                                        source_domain: source_domain_bg.clone(),
+                                        target_domain: target_domain_bg.clone(),
+                                        trust_account: trust_account_bg.clone(),
+                                        material,
+                                        attempts,
+                                    },
+                                );
+                            }
 
                             // Dump-phase failure (SID filtering missed by
                             // is_filtered_inter_forest_trust, DRSUAPI denial
@@ -3872,6 +3996,137 @@ mod tests {
             "dedup must be unmarked so the next tick retries against the real DC"
         );
         assert!(s.forge_wedged.is_empty());
+    }
+
+    // --- sweep_rearmable_empty_dump_forges ------------------------------
+
+    fn trust_hash(
+        account: &str,
+        domain: &str,
+        ntlm: &str,
+        aes: Option<&str>,
+    ) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: String::new(),
+            username: account.into(),
+            hash_value: ntlm.into(),
+            hash_type: "ntlm".into(),
+            domain: domain.into(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: aes.map(str::to_string),
+            is_previous: false,
+            source_host: None,
+            is_trust_key: true,
+            trust_pair_label: None,
+        }
+    }
+
+    fn park_empty_dump(s: &mut StateInner, key: &str, material: &str, attempts: u32) {
+        s.mark_processed(DEDUP_TRUST_FOLLOW, key.to_string());
+        s.forge_empty_dump.insert(
+            key.to_string(),
+            EmptyDumpForge {
+                source_domain: "contoso.local".into(),
+                target_domain: "fabrikam.local".into(),
+                trust_account: "FABRIKAM$".into(),
+                material: material.into(),
+                attempts,
+            },
+        );
+    }
+
+    #[test]
+    fn empty_dump_forge_stays_locked_when_the_trust_material_is_unchanged() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:fabrikam.local:FABRIKAM$";
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "aabb", None));
+        park_empty_dump(&mut s, key, "aabb:", 0);
+
+        assert!(sweep_rearmable_empty_dump_forges(&mut s).is_empty());
+        assert!(
+            s.is_processed(DEDUP_TRUST_FOLLOW, key),
+            "re-forging with identical material repeats the identical empty dump"
+        );
+    }
+
+    #[test]
+    fn empty_dump_forge_rearms_when_an_aes_key_lands_for_the_same_trust() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:fabrikam.local:FABRIKAM$";
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "aabb", None));
+        park_empty_dump(&mut s, key, "aabb:", 0);
+
+        s.hashes.push(trust_hash(
+            "FABRIKAM$",
+            "contoso.local",
+            "aabb",
+            Some("ccdd"),
+        ));
+
+        let rearmed = sweep_rearmable_empty_dump_forges(&mut s);
+        assert_eq!(rearmed.len(), 1);
+        assert_eq!(rearmed[0].0, key);
+        assert!(
+            !s.is_processed(DEDUP_TRUST_FOLLOW, key),
+            "an AES256 upgrade is exactly what turns the empty dump into a real DCSync"
+        );
+        assert_eq!(s.forge_empty_dump[key].attempts, 1);
+    }
+
+    #[test]
+    fn empty_dump_forge_rearms_when_a_rotated_trust_key_lands() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:fabrikam.local:FABRIKAM$";
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "aabb", None));
+        park_empty_dump(&mut s, key, "aabb:", 0);
+
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "eeff", None));
+
+        assert_eq!(sweep_rearmable_empty_dump_forges(&mut s).len(), 1);
+        assert!(!s.is_processed(DEDUP_TRUST_FOLLOW, key));
+    }
+
+    #[test]
+    fn empty_dump_forge_converges_to_locked_after_the_attempt_cap() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:fabrikam.local:FABRIKAM$";
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "aabb", None));
+        park_empty_dump(&mut s, key, "aabb:", MAX_EMPTY_DUMP_FORGE_ATTEMPTS);
+
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "eeff", None));
+
+        assert!(
+            sweep_rearmable_empty_dump_forges(&mut s).is_empty(),
+            "a genuinely SID-filtered trust must stop re-arming, not churn forever"
+        );
+        assert!(s.is_processed(DEDUP_TRUST_FOLLOW, key));
+    }
+
+    #[test]
+    fn empty_dump_forge_ignores_material_belonging_to_another_trust() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:fabrikam.local:FABRIKAM$";
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "aabb", None));
+        park_empty_dump(&mut s, key, "aabb:", 0);
+
+        s.hashes
+            .push(trust_hash("OTHER$", "contoso.local", "eeff", Some("9999")));
+
+        assert!(
+            sweep_rearmable_empty_dump_forges(&mut s).is_empty(),
+            "an unrelated trust key must not re-arm this forge"
+        );
     }
 
     #[test]
