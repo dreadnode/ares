@@ -586,8 +586,15 @@ fn collect_trust_follow_work_from_vulns(state: &StateInner) -> Vec<TrustFollowWo
         let target_lower = target_domain.to_lowercase();
         let trust_lower = trust_account.to_lowercase();
 
-        // Prefer current keys over `_history0`/`_prev` rows — mirrors the
-        // hash-iteration sort at the auto_trust_follow call site.
+        // Prefer confirmed trust material, then current keys over
+        // `_history0`/`_prev` rows — mirrors the hash-iteration sort at the
+        // auto_trust_follow call site.
+        //
+        // Ranking on `is_previous` alone left the choice to iteration order
+        // whenever two same-named rows were both current, which is exactly what
+        // a computer-object takeover produces: `certipy_shadow` on `FABRIKAM$`
+        // yields that account's NT hash, not the inter-realm trust key. Forging
+        // with it fails KRB_AP_ERR_BAD_INTEGRITY every time.
         let Some(hash) = state
             .hashes
             .iter()
@@ -597,7 +604,7 @@ fn collect_trust_follow_work_from_vulns(state: &StateInner) -> Vec<TrustFollowWo
                     && !h.hash_value.is_empty()
                     && (h.domain.is_empty() || h.domain.eq_ignore_ascii_case(source_domain))
             })
-            .min_by_key(|h| h.is_previous as u8)
+            .min_by_key(|h| (!h.is_trust_key as u8, h.is_previous as u8))
             .cloned()
         else {
             continue;
@@ -1125,10 +1132,37 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             // ensures we forge with the up-to-date trust key by default and
             // only fall back to a history key if the current one's dedup
             // already cleared (operator retry path).
+            //
+            // `is_trust_key` outranks both. A machine account named `<LABEL>$`
+            // is not automatically the inter-realm trust key: shadow-credential
+            // and ADCS takeovers of the *computer object* yield that account's
+            // NT hash, which shares the name but is a different secret. Forging
+            // with one is guaranteed KRB_AP_ERR_BAD_INTEGRITY — one cross-forest
+            // run burned 26 dispatches and 125 retries on exactly that row. The
+            // secretsdump parser stamps `is_trust_key` on real forging material,
+            // so prefer it and drop the impostors below.
             let mut hashes_sorted: Vec<&ares_core::models::Hash> = state.hashes.iter().collect();
-            hashes_sorted.sort_by_key(|h| h.is_previous as u8);
+            hashes_sorted.sort_by_key(|h| (!h.is_trust_key as u8, h.is_previous as u8));
 
-            let items = hashes_sorted
+            // Accounts we hold confirmed trust material for, keyed as the work
+            // items are: `(source_domain_lower, username_lower)`. Only used to
+            // reject same-named non-trust rows, so an account with no stamped
+            // row anywhere still falls through to the old name-shape behaviour
+            // (older ops and LSA-secret rows predate the flag).
+            let trust_stamped: HashSet<(String, String)> = state
+                .hashes
+                .iter()
+                .filter(|h| h.is_trust_key)
+                .map(|h| (h.domain.to_lowercase(), h.username.to_lowercase()))
+                .collect();
+
+            // One dispatch per trust, not one per matching row. `dedup_key`
+            // lowercases the account, so `FABRIKAM$` and `fabrikam$` collapse to the
+            // same trust — but both rows survive collection and the dedup mark
+            // is only stamped at dispatch, so without this the tick fires the
+            // forge twice. The sort above already put the best row first.
+            let mut seen: HashSet<String> = HashSet::new();
+            let items: Vec<TrustFollowWork> = hashes_sorted
                 .into_iter()
                 .filter_map(|hash| {
                     if !hash.username.ends_with('$') {
@@ -1161,6 +1195,17 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     // to a known FQDN rather than guessing.
                     let source_domain = canonicalize_domain_label(&source_domain_raw, &state)?;
                     let source_lower = source_domain.to_lowercase();
+
+                    // Same name, different secret — a computer-object takeover
+                    // of `<LABEL>$` is not the inter-realm trust key. Reject it
+                    // only when a stamped trust row for that account exists, so
+                    // unstamped-but-genuine material still gets its chance.
+                    if !hash.is_trust_key
+                        && trust_stamped
+                            .contains(&(hash.domain.to_lowercase(), hash.username.to_lowercase()))
+                    {
+                        return None;
+                    }
 
                     // Resolve target FQDN in three tiers:
                     //   1. Explicit TrustInfo from prior LDAP trust enum.
@@ -1229,6 +1274,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         target_domain_sid,
                     })
                 })
+                .filter(|i: &TrustFollowWork| seen.insert(i.dedup_key.clone()))
                 .collect();
 
             items
@@ -3981,6 +4027,81 @@ mod tests {
         let work = collect_trust_follow_work_from_vulns(&s);
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].hash.id, "h-current");
+    }
+
+    #[test]
+    fn vuln_driven_prefers_trust_key_over_same_named_computer_account() {
+        let mut s = StateInner::new("op".into());
+
+        let mut impostor = make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:11111111",
+        );
+        impostor.id = "h-shadow".into();
+        impostor.source = "certipy_shadow".into();
+        impostor.is_trust_key = false;
+        impostor.trust_pair_label = None;
+
+        let mut trust_key = make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:22222222",
+        );
+        trust_key.id = "h-trustkey".into();
+        trust_key.source = "secretsdump".into();
+        trust_key.is_trust_key = true;
+
+        // Impostor first: ranking on `is_previous` alone would take it, since
+        // both rows are current.
+        s.hashes.push(impostor);
+        s.hashes.push(trust_key);
+
+        let v = forest_trust_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+
+        let work = collect_trust_follow_work_from_vulns(&s);
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].hash.id, "h-trustkey",
+            "a computer-object takeover shares the name but is not the inter-realm key — \
+             forging with it is a guaranteed KRB_AP_ERR_BAD_INTEGRITY"
+        );
+    }
+
+    #[test]
+    fn vuln_driven_still_forges_when_no_row_is_stamped() {
+        let mut s = StateInner::new("op".into());
+        let mut unstamped = make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:33333333",
+        );
+        unstamped.id = "h-unstamped".into();
+        unstamped.is_trust_key = false;
+        s.hashes.push(unstamped);
+
+        let v = forest_trust_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+
+        let work = collect_trust_follow_work_from_vulns(&s);
+        assert_eq!(
+            work.len(),
+            1,
+            "older ops and LSA-secret rows predate the flag — an unstamped row is \
+             still the only candidate and must not be dropped"
+        );
+        assert_eq!(work[0].hash.id, "h-unstamped");
     }
 
     #[test]
