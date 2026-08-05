@@ -63,6 +63,18 @@ pub(crate) fn format_number(n: u64) -> String {
     result
 }
 
+pub(crate) fn format_model_cost_line(item: &ares_core::token_usage::ModelCostBreakdown) -> String {
+    format!(
+        "  - {}: {} tokens (${:.4}) \u{2014} in {}  cached {}  out {}",
+        item.model,
+        format_number(item.total_tokens),
+        item.cost,
+        format_number(item.input_tokens),
+        format_number(item.cache_read_input_tokens),
+        format_number(item.output_tokens)
+    )
+}
+
 /// Scan Redis keys matching a pattern using cursor iteration.
 #[cfg(feature = "blue")]
 pub(crate) async fn scan_redis_keys(
@@ -119,6 +131,39 @@ pub(crate) fn compute_duration_str(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn breakdown(
+        model: &str,
+        input: u64,
+        cached: u64,
+        output: u64,
+        cost: f64,
+    ) -> ares_core::token_usage::ModelCostBreakdown {
+        ares_core::token_usage::ModelCostBreakdown {
+            model: model.to_string(),
+            input_tokens: input,
+            cache_read_input_tokens: cached,
+            output_tokens: output,
+            total_tokens: input + cached + output,
+            cost,
+        }
+    }
+
+    #[test]
+    fn model_cost_line_splits_input_cache_and_output() {
+        assert_eq!(
+            format_model_cost_line(&breakdown("gpt-5", 412_930, 5_923_508, 627_265, 7.0647)),
+            "  - gpt-5: 6,963,703 tokens ($7.0647) \u{2014} in 412,930  cached 5,923,508  out 627,265"
+        );
+    }
+
+    #[test]
+    fn model_cost_line_exposes_a_cache_heavy_low_output_mix() {
+        assert_eq!(
+            format_model_cost_line(&breakdown("gpt-5.2", 61_000, 2_508_240, 32_977, 0.9113)),
+            "  - gpt-5.2: 2,602,217 tokens ($0.9113) \u{2014} in 61,000  cached 2,508,240  out 32,977"
+        );
+    }
 
     #[test]
     fn format_duration_seconds_only() {

@@ -5,7 +5,7 @@ use ares_core::models::SharedRedTeamState;
 use ares_core::state::RedisStateReader;
 
 use crate::redis_conn::{connect_redis, resolve_operation_id};
-use crate::util::{format_duration, format_number};
+use crate::util::{format_duration, format_model_cost_line, format_number};
 
 fn finalizing_note(state: &SharedRedTeamState) -> Option<String> {
     if state.completed_at.is_some() || state.red_completed_at.is_none() {
@@ -271,10 +271,7 @@ pub(crate) async fn ops_runtime(
                 // Per-model breakdown for multi-model operations
                 if breakdown.len() > 1 {
                     for item in &breakdown {
-                        println!(
-                            "  - {}: {} tokens (${:.4})",
-                            item.model, item.total_tokens, item.cost
-                        );
+                        println!("{}", format_model_cost_line(item));
                     }
                 }
 
