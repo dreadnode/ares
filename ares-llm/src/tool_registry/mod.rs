@@ -121,6 +121,7 @@ pub fn is_callback_tool(name: &str) -> bool {
 /// Keep this in lock-step with `ares-cli/src/worker/credential_resolver.rs::CREDENTIAL_KEYS`.
 pub const SECRET_SCHEMA_KEYS: &[&str] = &[
     "password",
+    "new_password",
     "hash",
     "nt_hash",
     "ntlm_hash",

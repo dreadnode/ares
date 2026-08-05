@@ -48,6 +48,7 @@ use crate::orchestrator::recovery::{
 /// from the LLM.
 pub const CREDENTIAL_KEYS: &[&str] = &[
     "password",
+    "new_password",
     "hash",
     "nt_hash",
     "ntlm_hash",
@@ -108,6 +109,36 @@ pub async fn resolve_credentials(
     // state has nothing, we never want a `[HASH]` or `<password>` literal to
     // reach the dispatch layer.
     strip_placeholder_credentials(args_obj);
+
+    // A password reset needs a value to write, and the model is not allowed to
+    // author one. `new_password` is off the tool schema; whatever reaches here
+    // is either absent or something the model invented anyway, so it is
+    // overwritten unconditionally with a generated value.
+    //
+    // The reset is also refused outright unless teardown could put the account
+    // back. A reset is the one mutation with no inverse derivable from its own
+    // forward call — bloodyAD cannot read the old password, and by construction
+    // `auto_dacl_abuse` only resets targets whose material state does not hold.
+    // Gating on the lab baseline here, before dispatch, is what makes "every
+    // operation restores what it changed" true by construction rather than by
+    // remembering to run something afterwards.
+    if tool_name == "bloodyad_set_password" {
+        if let Some(detail) = unrestorable_reset_detail(args_obj) {
+            warn!(
+                tool = %tool_name,
+                "Refusing password reset: no provisioned password to restore the account to"
+            );
+            args_obj.insert(
+                ares_tools::credentials::UNRESOLVED_PRINCIPAL_KEY.to_string(),
+                Value::String(detail),
+            );
+            return Ok(None);
+        }
+        args_obj.insert(
+            "new_password".to_string(),
+            Value::String(generate_reset_password()),
+        );
+    }
 
     let reader = RedisStateReader::new(op_id.to_string());
 
@@ -452,6 +483,62 @@ fn guard_unauthenticated_principal(
 
 /// Remove any credential-shaped argument whose value is empty, null, or a
 /// placeholder literal (e.g. `[HASH]`, `<password>`, `N/A`, `unknown`).
+/// Why a pending password reset cannot be undone, or `None` when teardown holds
+/// the account's provisioned password and the reset is safe to perform.
+///
+/// Returned text reaches the agent verbatim through `validate_arguments`, so it
+/// names the account and the remedy rather than just refusing.
+fn unrestorable_reset_detail(args: &Map<String, Value>) -> Option<String> {
+    let arg = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("").trim();
+    let target = arg("target_user");
+    if target.is_empty() {
+        return Some("bloodyad_set_password requires target_user".into());
+    }
+    let sam = target
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(target)
+        .split('@')
+        .next()
+        .unwrap_or(target);
+    let domain = arg("domain");
+
+    if crate::orchestrator::cleanup::baseline::provisioned_password(domain, sam).is_some() {
+        return None;
+    }
+    Some(format!(
+        "refusing to reset {sam}@{domain}: the range's provisioned password for this account \
+         is unknown, so teardown could not restore it and the account would stay broken after \
+         the operation. Take this principal with shadow credentials (pywhisker / certipy_shadow) \
+         instead — that path is reversible and yields an NT hash."
+    ))
+}
+
+/// Build the value a `bloodyad_set_password` dispatch writes to the target.
+///
+/// Random rather than derived: nothing downstream may reconstruct this string
+/// without observing a tool's output, which is the point. It satisfies the
+/// default AD complexity policy (upper, lower, digit, symbol, 16 chars) so a
+/// reset does not fail on `unwillingToPerform` for a policy reason.
+fn generate_reset_password() -> String {
+    use rand::RngExt;
+
+    const LOWER: &[u8] = b"abcdefghijkmnopqrstuvwxyz";
+    const UPPER: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ";
+    const DIGIT: &[u8] = b"23456789";
+    const SYMBOL: &[u8] = b"!@#$%^&*-_=+";
+
+    let mut rng = rand::rng();
+    let mut pick = |set: &[u8]| set[rng.random_range(0..set.len())] as char;
+
+    let mut out: Vec<char> = vec![pick(UPPER), pick(LOWER), pick(DIGIT), pick(SYMBOL)];
+    let all: Vec<u8> = [LOWER, UPPER, DIGIT, SYMBOL].concat();
+    while out.len() < 16 {
+        out.push(pick(&all));
+    }
+    out.into_iter().collect()
+}
+
 fn strip_placeholder_credentials(args: &mut Map<String, Value>) {
     let mut to_remove = Vec::new();
     for key in CREDENTIAL_KEYS {
@@ -1811,6 +1898,72 @@ mod tests {
     fn placeholder_str_empty_is_placeholder() {
         assert!(is_placeholder_str(""));
         assert!(is_placeholder_str("   "));
+    }
+
+    /// No lab baseline is present in the test environment, so every reset is
+    /// unrestorable — and must be refused rather than performed. This is the
+    /// default posture: an unconfigured deployment cannot break an account.
+    #[test]
+    fn a_reset_with_no_provisioned_password_is_refused() {
+        let args = json!({ "target_user": "alice", "domain": "contoso.local" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let detail = unrestorable_reset_detail(&args).expect("reset must be refused");
+        assert!(detail.contains("alice@contoso.local"), "{detail}");
+        assert!(
+            detail.contains("shadow credentials"),
+            "the refusal must point at the reversible alternative: {detail}"
+        );
+    }
+
+    /// The refusal names the account, so decorated principals must reduce to a
+    /// SAM name rather than being refused for the wrong reason.
+    #[test]
+    fn a_reset_refusal_reduces_a_decorated_principal_to_its_sam_name() {
+        for spelling in ["CONTOSO\\alice", "alice@contoso.local", "alice"] {
+            let args = json!({ "target_user": spelling, "domain": "contoso.local" })
+                .as_object()
+                .unwrap()
+                .clone();
+            let detail = unrestorable_reset_detail(&args).expect("reset must be refused");
+            assert!(
+                detail.contains("alice@contoso.local"),
+                "{spelling}: {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reset_without_a_target_user_is_refused() {
+        let args = json!({ "domain": "contoso.local" })
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(unrestorable_reset_detail(&args).is_some());
+    }
+
+    /// The generated value must satisfy default AD complexity, or the reset
+    /// fails on policy and the refusal gate above was pointless.
+    #[test]
+    fn the_generated_reset_password_meets_default_complexity() {
+        for _ in 0..64 {
+            let pw = generate_reset_password();
+            assert_eq!(pw.chars().count(), 16, "{pw}");
+            assert!(pw.chars().any(|c| c.is_ascii_uppercase()), "{pw}");
+            assert!(pw.chars().any(|c| c.is_ascii_lowercase()), "{pw}");
+            assert!(pw.chars().any(|c| c.is_ascii_digit()), "{pw}");
+            assert!(pw.chars().any(|c| !c.is_ascii_alphanumeric()), "{pw}");
+        }
+    }
+
+    /// Two dispatches must not share a password — a reused value would let one
+    /// account's reset silently authenticate as another.
+    #[test]
+    fn generated_reset_passwords_are_not_reused() {
+        let a = generate_reset_password();
+        let b = generate_reset_password();
+        assert_ne!(a, b);
     }
 
     #[test]

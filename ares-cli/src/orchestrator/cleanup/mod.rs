@@ -18,6 +18,7 @@
 //! unrecoverable the moment the *next* operation starts. Reverting at
 //! shutdown is the only point where the record still exists.
 
+pub mod baseline;
 pub mod capture;
 pub mod dispatcher;
 pub mod engine;

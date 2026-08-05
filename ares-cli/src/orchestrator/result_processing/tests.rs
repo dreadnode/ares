@@ -3738,13 +3738,25 @@ const TIMELINE_SRC: &str = include_str!("timeline.rs");
 fn every_credential_publish_path_routes_through_the_shared_helper() {
     for (name, src) in [
         ("mod.rs", RESULT_PROCESSING_SRC),
-        ("acl_grants.rs", ACL_GRANTS_SRC),
         ("discovery_polling.rs", DISCOVERY_POLLING_SRC),
     ] {
         assert!(
             src.contains("publish_credential_credited("),
             "{name} stopped routing credential publishes through the shared helper"
         );
+    }
+
+    // acl_grants.rs is not on the positive list: it publishes no credentials at
+    // all. `bloodyad_set_password` is the only credential a DACL takeover could
+    // mint, and bloodyAD never echoes the value it wrote — the password existed
+    // solely as a tool *argument*, which is model-authored input rather than
+    // parsed output. The negative guards below still apply, so a future edit
+    // cannot quietly reopen that route.
+    for (name, src) in [
+        ("mod.rs", RESULT_PROCESSING_SRC),
+        ("acl_grants.rs", ACL_GRANTS_SRC),
+        ("discovery_polling.rs", DISCOVERY_POLLING_SRC),
+    ] {
         assert!(
             !src.contains(".publish_credential("),
             "{name} publishes a credential directly — that path emits no timeline \
@@ -3756,6 +3768,21 @@ fn every_credential_publish_path_routes_through_the_shared_helper() {
              publish must stay welded together in publish_credential_credited"
         );
     }
+}
+
+/// The reset path must not come back by copying `new_password` out of the tool
+/// call. bloodyAD confirms only *that* the password changed, never *to what*.
+///
+/// Matches the argument *read*, not the bare word — the fixture in
+/// `acl_grants.rs` passes `new_password` on purpose, to prove that a confirmed
+/// reset carrying one still yields no credential.
+#[test]
+fn acl_grants_never_reads_a_credential_out_of_tool_arguments() {
+    assert!(
+        !ACL_GRANTS_SRC.contains(r#"arg("new_password")"#),
+        "acl_grants.rs reads new_password out of the tool arguments again — that is \
+         model-authored input, not parsed tool output, and it lands in state.credentials"
+    );
 }
 
 #[test]

@@ -16,26 +16,24 @@
 //! edge, so `acl_graph::build_edges`, `auto_dacl_abuse`, and
 //! `auto_shadow_credentials` consume it with no special-casing.
 //!
-//! `bloodyad_set_password` gets the same treatment for the other half of the
-//! problem. It resets a target user's password to a value *we* chose, so the
-//! account is ours the moment the tool prints its success line — but nothing
-//! recorded that, and every consumer keys on `state.credentials`. The next
-//! chain step authenticates as the principal the previous step took over, so
-//! without the reset credential a ForceChangePassword / GenericAll-on-user
-//! edge produced a real takeover that the operation then threw away.
+//! `bloodyad_set_password` deliberately publishes nothing. A reset only yields
+//! a credential if something states what the password now is, and bloodyAD's
+//! stdout is a bare `Password changed successfully!` — it never echoes the
+//! value. The only place that string existed was the `new_password` argument,
+//! which is model-authored input, not tool output. Credentials enter state from
+//! parsed tool output or not at all, so a reset that no parser can attest to is
+//! a reset that credits nothing.
 //!
-//! Both passes run on every completed task regardless of the agent's own
-//! success verdict: the outcome is credited off the tool's stdout, never off
-//! the LLM's self-assessment.
+//! This pass runs on every completed task regardless of the agent's own success
+//! verdict: the outcome is credited off the tool's stdout, never off the LLM's
+//! self-assessment.
 
 use std::sync::Arc;
 
 use serde_json::Value;
 use tracing::{debug, info};
 
-use super::timeline::publish_credential_credited;
 use crate::orchestrator::dispatcher::Dispatcher;
-use crate::orchestrator::output_extraction::{is_valid_credential, make_credential};
 
 /// One ACL right acquired by a confirmed DACL write.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,82 +298,6 @@ pub(crate) async fn publish_granted_acl_edges(payload: &Value, dispatcher: &Arc<
             Ok(false) => debug!(vuln_id = %vuln_id, "Acquired ACL edge already known"),
             Err(e) => {
                 tracing::warn!(err = %e, vuln_id = %vuln_id, "Failed to publish acquired ACL edge")
-            }
-        }
-    }
-}
-
-/// True when bloodyAD's own stdout confirms the reset landed.
-///
-/// `bloodyAD set password` emits exactly one success line, `Password changed
-/// successfully!`; the `[+]` prefix is bloodyAD's log formatter, so the match
-/// is deliberately prefix-agnostic. Everything else — above all the LDAP
-/// `unwilling to perform` / `unicodePwd` rejections this primitive routinely
-/// hits on a signing-enforced DC — is treated as "no credential". A phantom
-/// credential here is worse than none: it would satisfy the destructive-ACL
-/// guard in `auto_dacl_abuse` and retire the edge without ever taking the
-/// account.
-fn output_confirms_password_reset(output: &str) -> bool {
-    output
-        .to_lowercase()
-        .contains("password changed successfully")
-}
-
-/// Extract the credential each confirmed password reset in `payload` minted.
-///
-/// The password is the `new_password` the tool was called with rather than
-/// anything parsed out of stdout — we chose that value, so on a confirmed
-/// reset it is authoritative.
-pub(crate) fn extract_reset_credentials(payload: &Value) -> Vec<ares_core::models::Credential> {
-    let Some(entries) = payload.get("tool_outputs").and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-
-    let mut creds = Vec::new();
-    for entry in entries {
-        if entry.get("name").and_then(|v| v.as_str()) != Some("bloodyad_set_password") {
-            continue;
-        }
-        let Some(args) = entry.get("arguments") else {
-            continue;
-        };
-        let output = entry.get("output").and_then(|v| v.as_str()).unwrap_or("");
-        if !output_confirms_password_reset(output) {
-            continue;
-        }
-
-        let arg = |key: &str| args.get(key).and_then(|v| v.as_str()).unwrap_or("").trim();
-        let username = principal_name(arg("target_user"));
-        let password = arg("new_password");
-        if !is_valid_credential(&username, password) {
-            continue;
-        }
-        creds.push(make_credential(
-            &username,
-            password,
-            arg("domain"),
-            "bloodyad_set_password",
-        ));
-    }
-    creds
-}
-
-/// Publish the credential every confirmed password reset in `payload` minted.
-///
-/// Idempotent: `publish_credential` dedups on `(domain, user, password)`, so a
-/// replayed task result is a no-op.
-pub(crate) async fn publish_reset_credentials(payload: &Value, dispatcher: &Arc<Dispatcher>) {
-    for cred in extract_reset_credentials(payload) {
-        let (username, domain) = (cred.username.clone(), cred.domain.clone());
-        match publish_credential_credited(dispatcher, cred).await {
-            Ok(true) => info!(
-                username = %username,
-                domain = %domain,
-                "Password reset confirmed — target credential published for follow-on chain steps"
-            ),
-            Ok(false) => debug!(username = %username, "Reset credential already known"),
-            Err(e) => {
-                tracing::warn!(err = %e, username = %username, "Failed to publish reset credential")
             }
         }
     }
@@ -686,8 +608,12 @@ mod tests {
         tool_entry("bloodyad_set_password", arguments, output)
     }
 
+    /// bloodyAD never echoes the password it set, so a confirmed reset has no
+    /// parsed source for the one field that would make it a credential. The
+    /// `new_password` argument is model-authored input; reading it back would
+    /// launder LLM text into `state.credentials` behind a real success line.
     #[test]
-    fn extract_publishes_the_credential_a_confirmed_reset_minted() {
+    fn a_confirmed_reset_publishes_no_credential() {
         let payload = json!({
             "tool_outputs": [reset_entry(
                 json!({
@@ -701,116 +627,7 @@ mod tests {
             )]
         });
 
-        let creds = extract_reset_credentials(&payload);
-        assert_eq!(creds.len(), 1);
-        assert_eq!(creds[0].username, "bob");
-        assert_eq!(creds[0].password, "P@ssw0rd!");
-        assert_eq!(creds[0].domain, "contoso.local");
-        assert_eq!(creds[0].source, "bloodyad_set_password");
-        assert!(!creds[0].is_admin);
-    }
-
-    #[test]
-    fn extract_matches_the_success_line_without_its_log_prefix() {
-        let payload = json!({
-            "tool_outputs": [reset_entry(
-                json!({
-                    "domain": "contoso.local",
-                    "target_user": "bob",
-                    "new_password": "P@ssw0rd!",
-                }),
-                "Password changed successfully!",
-            )]
-        });
-        assert_eq!(extract_reset_credentials(&payload).len(), 1);
-    }
-
-    #[test]
-    fn extract_ignores_a_reset_the_dc_rejected() {
-        for output in [
-            "[-] unicodePwd modify rejected: LDAP server is unwilling to perform",
-            "[-] ldap3.core.exceptions.LDAPInsufficientAccessRightsResult: 00002098",
-            "I will now change the password for bob",
-            "",
-        ] {
-            let payload = json!({
-                "tool_outputs": [reset_entry(
-                    json!({
-                        "domain": "contoso.local",
-                        "target_user": "bob",
-                        "new_password": "P@ssw0rd!",
-                    }),
-                    output,
-                )]
-            });
-            assert!(
-                extract_reset_credentials(&payload).is_empty(),
-                "{output} must not be credited as a reset"
-            );
-        }
-    }
-
-    #[test]
-    fn extract_reduces_the_reset_target_to_a_sam_account_name() {
-        let payload = json!({
-            "tool_outputs": [
-                reset_entry(
-                    json!({
-                        "domain": "contoso.local",
-                        "target_user": "CONTOSO\\bob",
-                        "new_password": "P@ssw0rd!",
-                    }),
-                    "[+] Password changed successfully!",
-                ),
-                reset_entry(
-                    json!({
-                        "domain": "contoso.local",
-                        "target_user": "CN=carol,CN=Users,DC=contoso,DC=local",
-                        "new_password": "P@ssw0rd!",
-                    }),
-                    "[+] Password changed successfully!",
-                ),
-            ]
-        });
-        let creds = extract_reset_credentials(&payload);
-        assert_eq!(creds.len(), 2);
-        assert_eq!(creds[0].username, "bob");
-        assert_eq!(creds[1].username, "carol");
-    }
-
-    #[test]
-    fn extract_skips_a_reset_missing_its_target_or_password() {
-        let payload = json!({
-            "tool_outputs": [
-                reset_entry(
-                    json!({ "domain": "contoso.local", "new_password": "P@ssw0rd!" }),
-                    "[+] Password changed successfully!",
-                ),
-                reset_entry(
-                    json!({ "domain": "contoso.local", "target_user": "bob" }),
-                    "[+] Password changed successfully!",
-                ),
-            ]
-        });
-        assert!(extract_reset_credentials(&payload).is_empty());
-        assert!(extract_reset_credentials(&json!({})).is_empty());
-        assert!(extract_reset_credentials(&json!({ "tool_outputs": ["plain string"] })).is_empty());
-    }
-
-    #[test]
-    fn extract_ignores_password_resets_by_other_tools() {
-        let payload = json!({
-            "tool_outputs": [tool_entry(
-                "bloodyad_add_genericall",
-                json!({
-                    "domain": "contoso.local",
-                    "target_user": "bob",
-                    "new_password": "P@ssw0rd!",
-                }),
-                "[+] Password changed successfully!",
-            )]
-        });
-        assert!(extract_reset_credentials(&payload).is_empty());
+        assert!(extract_granted_acl_edges(&payload).is_empty());
     }
 
     #[test]

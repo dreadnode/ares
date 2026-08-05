@@ -13,6 +13,7 @@ use crate::executor::CommandBuilder;
 /// somehow survives upstream stripping.
 pub const CREDENTIAL_KEYS: &[&str] = &[
     "password",
+    "new_password",
     "hash",
     "hashes",
     "nt_hash",

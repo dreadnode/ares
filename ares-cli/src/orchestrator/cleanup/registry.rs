@@ -239,6 +239,50 @@ fn add_computer_plan(record: &MutationRecord) -> UndoPlan {
     }
 }
 
+/// Restore a reset account to the password the range provisioned it with.
+///
+/// The forward call's `new_password` is never journaled (it is a
+/// `CREDENTIAL_KEYS` member and gets stripped), and it would be the wrong value
+/// to replay anyway — the goal is the *pre-op* password, which only the range's
+/// own lab config knows. With `ARES_LAB_BASELINE_CONFIG` pointed at it the
+/// reset becomes `Clean`: re-dispatch the same tool with the provisioned value
+/// and the account is exactly as the range built it.
+///
+/// Without that config there is still no inverse, so the mutation keeps its old
+/// `Impossible` class and teardown reports it for a manual restore.
+fn set_password_plan(record: &MutationRecord) -> UndoPlan {
+    let a = &record.args;
+    let Some(target) = astr(a, "target_user") else {
+        return UndoPlan::manual(
+            Reversibility::Impossible,
+            "password reset with no journaled target_user — cannot identify the account to restore",
+        );
+    };
+    let domain = astr(a, "domain").or(record.domain.as_deref()).unwrap_or("");
+    let sam = target.rsplit(['\\', '/']).next().unwrap_or(target);
+    let sam = sam.split('@').next().unwrap_or(sam);
+
+    match super::baseline::provisioned_password(domain, sam) {
+        Some(original) => UndoPlan {
+            class: Reversibility::Clean,
+            inverse: Some((
+                "bloodyad_set_password".into(),
+                with_override(a, "new_password", &original),
+            )),
+            validate: None,
+            note: format!("restore {sam}'s range-provisioned password"),
+        },
+        None => UndoPlan::manual(
+            Reversibility::Impossible,
+            format!(
+                "original plaintext for {sam}@{domain} is unknown — set {} to the range's lab \
+                 config to make this restorable",
+                super::baseline::BASELINE_CONFIG_ENV
+            ),
+        ),
+    }
+}
+
 /// Build the inverse plan for a journaled mutation.
 pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
     let a = &record.args;
@@ -359,11 +403,7 @@ pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
         ),
         "certipy_ca" => certipy_ca_plan(a),
         "nopac" => nopac_plan(record),
-        // ── IMPOSSIBLE ───────────────────────────────────────────────
-        "bloodyad_set_password" => UndoPlan::manual(
-            Reversibility::Impossible,
-            "original plaintext is unknowable — optional lab-reset to a baseline password",
-        ),
+        "bloodyad_set_password" => set_password_plan(record),
 
         _ => UndoPlan::manual(
             Reversibility::Unsupported,
@@ -643,9 +683,27 @@ mod tests {
         assert!(del_argv.iter().any(|a| a == "-delete"));
     }
 
+    /// With no lab config configured there is still nothing to restore *to*,
+    /// so the mutation keeps the class it had before baseline lookup existed.
     #[test]
-    fn password_reset_is_impossible_with_no_inverse() {
-        let p = undo_plan(&rec("bloodyad_set_password", json!({ "target": "alice" })));
+    fn password_reset_is_impossible_without_a_lab_baseline() {
+        let p = undo_plan(&rec(
+            "bloodyad_set_password",
+            json!({ "target_user": "alice", "domain": "contoso.local" }),
+        ));
+        assert_eq!(p.class, Reversibility::Impossible);
+        assert!(p.inverse.is_none());
+        assert!(p.note.contains(super::super::baseline::BASELINE_CONFIG_ENV));
+    }
+
+    /// A reset the journal cannot attribute to an account names nothing to
+    /// restore — it must not fall through to some other record's target.
+    #[test]
+    fn password_reset_without_a_target_user_is_impossible() {
+        let p = undo_plan(&rec(
+            "bloodyad_set_password",
+            json!({ "domain": "contoso.local" }),
+        ));
         assert_eq!(p.class, Reversibility::Impossible);
         assert!(p.inverse.is_none());
     }

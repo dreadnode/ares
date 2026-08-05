@@ -251,7 +251,6 @@ pub async fn process_completed_task(
 
     if let Some(ref payload) = result.result {
         acl_grants::publish_granted_acl_edges(payload, dispatcher).await;
-        acl_grants::publish_reset_credentials(payload, dispatcher).await;
     }
 
     // Domain SID extraction: scan raw text for S-1-5-21-... patterns (from secretsdump).

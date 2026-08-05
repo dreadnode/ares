@@ -462,6 +462,56 @@ tasks:
         vars:
           EC2_NAME: '{{.EC2_NAME}}'
 
+      - task: deploy:lab-config
+        vars:
+          EC2_NAME: '{{.EC2_NAME}}'
+
+  deploy:lab-config:
+    desc: "Push the range's provisioned passwords to EC2 so teardown can restore reset accounts (usage: task ec2:deploy:lab-config [EC2_NAME=kali-ares] [LAB_CONFIG=/path/to/GOAD/data/config.json])"
+    silent: true
+    vars:
+      LAB_CONFIG: '{{.LAB_CONFIG | default (printf "%s/dreadnode/DreadOps/apps/DreadGOAD/ad/GOAD/data/config.json" (env "HOME"))}}'
+      LAB_CONFIG_REMOTE: '/etc/ares/lab-config.json'
+    cmds:
+      - |
+        {{.AWS_PROFILE_EXPORT}}
+        export AWS_REGION="{{.AWS_REGION}}"
+        . .taskfiles/ec2/scripts/run-ssm.sh
+
+        if [ ! -f "{{.LAB_CONFIG}}" ]; then
+          echo -e "{{.WARN}} No lab config at {{.LAB_CONFIG}} — skipping."
+          echo -e "{{.WARN}} Password resets will be REFUSED on this box (nothing to restore to)."
+          echo -e "{{.WARN}} Pass LAB_CONFIG=/path/to/GOAD/data/config.json to enable them."
+          exit 0
+        fi
+
+        INSTANCE_ID=$(resolve_instance_id "{{.EC2_NAME}}") || exit 1
+
+        BLOB=$(python3 -c '
+        import base64, json, sys
+        d = json.load(open(sys.argv[1]))
+        out = {"lab": {"domains": {}}}
+        for dom, body in d.get("lab", {}).get("domains", {}).items():
+            users = {u: {"password": v["password"]}
+                     for u, v in (body.get("users") or {}).items() if v.get("password")}
+            if users:
+                out["lab"]["domains"][dom] = {"users": users}
+        if not out["lab"]["domains"]:
+            sys.exit("no provisioned user passwords found")
+        print(base64.b64encode(json.dumps(out, separators=(",", ":")).encode()).decode())
+        ' "{{.LAB_CONFIG}}") || exit 1
+
+        echo -e "{{.INFO}} Installing lab baseline on $INSTANCE_ID ({{.LAB_CONFIG_REMOTE}})..."
+
+        PAYLOAD="set -e; mkdir -p /etc/ares; umask 077; "
+        PAYLOAD+="printf %s '$BLOB' | base64 -d > {{.LAB_CONFIG_REMOTE}}; "
+        PAYLOAD+="chown root:root {{.LAB_CONFIG_REMOTE}}; chmod 600 {{.LAB_CONFIG_REMOTE}}; "
+        PAYLOAD+="python3 -c \"import json;d=json.load(open('{{.LAB_CONFIG_REMOTE}}'))['lab']['domains'];print('restorable accounts:',sum(len(v['users']) for v in d.values()),'across',len(d),'domains')\""
+
+        run_ssm_cmd "$INSTANCE_ID" "$PAYLOAD" 30 || exit 1
+
+        echo -e "{{.SUCCESS}} Lab baseline installed — password resets are restorable at teardown"
+
   deploy:config:
     desc: "Push config.yaml to EC2 via S3 staging (usage: task ec2:deploy:config [EC2_NAME=ares-tools] [ARES_CONFIG=./config/ares.yaml])"
     silent: true
