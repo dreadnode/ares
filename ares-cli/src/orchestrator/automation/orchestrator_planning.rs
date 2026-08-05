@@ -6,9 +6,11 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
+use crate::orchestrator::proposals::mediation_enabled;
 
 const DEFAULT_INTERVAL_SECS: u64 = 180;
 const DEFAULT_WARMUP_SECS: u64 = 120;
+const REVIEWS_PER_WINDOW: u64 = 3;
 
 fn secs_from_env(key: &str, default: u64) -> u64 {
     std::env::var(key)
@@ -16,6 +18,13 @@ fn secs_from_env(key: &str, default: u64) -> u64 {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|v| *v > 0)
         .unwrap_or(default)
+}
+
+fn effective_interval_secs(configured: u64, window_secs: u64, mediation_on: bool) -> u64 {
+    if !mediation_on {
+        return configured;
+    }
+    configured.min((window_secs / REVIEWS_PER_WINDOW).max(1))
 }
 
 fn planner_enabled() -> bool {
@@ -37,17 +46,28 @@ pub async fn auto_orchestrator_planning(
         return;
     }
 
-    let interval_secs = secs_from_env(
+    let configured_interval_secs = secs_from_env(
         "ARES_ORCHESTRATOR_PLANNER_INTERVAL_SECS",
         DEFAULT_INTERVAL_SECS,
     );
     let warmup_secs = secs_from_env("ARES_ORCHESTRATOR_PLANNER_WARMUP_SECS", DEFAULT_WARMUP_SECS);
+    let window_secs = dispatcher.proposals.window().as_secs();
+    let mediation_on = mediation_enabled();
+    let interval_secs =
+        effective_interval_secs(configured_interval_secs, window_secs, mediation_on);
 
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let start = Instant::now();
-    info!(interval_secs, warmup_secs, "Orchestrator planner started");
+    info!(
+        interval_secs,
+        configured_interval_secs,
+        warmup_secs,
+        window_secs,
+        mediation_on,
+        "Orchestrator planner started"
+    );
 
     loop {
         tokio::select! {
@@ -164,5 +184,46 @@ mod tests {
         }
 
         std::env::remove_var(key);
+    }
+
+    #[test]
+    fn without_mediation_the_configured_interval_is_untouched() {
+        assert_eq!(
+            effective_interval_secs(DEFAULT_INTERVAL_SECS, 180, false),
+            DEFAULT_INTERVAL_SECS,
+            "a planner-only opt-in must not pay for a review cadence it has nothing to review"
+        );
+    }
+
+    #[test]
+    fn mediation_forces_review_cadence_strictly_inside_the_release_window() {
+        let window_secs = 180;
+        let interval = effective_interval_secs(DEFAULT_INTERVAL_SECS, window_secs, true);
+
+        assert!(
+            interval < window_secs,
+            "a review tick no faster than the window means work auto-releases before it is ever \
+             reviewed, so mediation buys latency and no veto"
+        );
+        assert_eq!(interval, 60);
+    }
+
+    #[test]
+    fn a_faster_configured_interval_is_left_alone() {
+        assert_eq!(
+            effective_interval_secs(15, 180, true),
+            15,
+            "the cap is a ceiling on review latency, not a floor"
+        );
+    }
+
+    #[test]
+    fn the_interval_never_collapses_to_zero() {
+        assert_eq!(
+            effective_interval_secs(180, 1, true),
+            1,
+            "tokio::time::interval panics on a zero period, so a sub-REVIEWS_PER_WINDOW window \
+             must still yield a tickable duration"
+        );
     }
 }

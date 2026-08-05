@@ -148,6 +148,15 @@ Guards: single-flight (one planning task at a time, via
 so the first turn sees post-recon state. Opt-in: `ARES_ORCHESTRATOR_PLANNER=1`
 enables it, and the rules are the only scheduler otherwise.
 
+The planning turn is also what rules on parked proposals, so when mediation is
+on the planner tick is capped at a third of the auto-release window
+(`effective_interval_secs`) — at the defaults, 180s becomes 60s. Without that
+cap the two intervals are both 180s, and since a parked proposal no longer
+wakes the planner, work parked shortly after a tick expires before the next one
+reviews it. An explicitly configured interval already below the cap is left
+alone; a planner running without mediation keeps its configured interval, since
+it has no proposals to review.
+
 ### Mediation: automations as the orchestrator's instruments
 
 Off by default; `ARES_ORCHESTRATOR_MEDIATION=1` turns it on and makes the
