@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use tokio::sync::{watch, Notify, RwLock};
+use tokio::sync::{watch, RwLock};
 use tracing::{debug, info, warn};
 
 use super::deferred::DeferredTask;
@@ -24,17 +24,18 @@ pub(crate) fn mediation_scope_is_all() -> bool {
 }
 const DEFAULT_CAPACITY: usize = 200;
 const DEFAULT_REJECTION_TTL_SECS: u64 = 600;
+const DEFAULT_DISPATCH_TTL_SECS: u64 = 600;
 const SWEEP_INTERVAL_SECS: u64 = 5;
 
 const BEHIND_THRESHOLD: u32 = 2;
 
 pub fn mediation_enabled() -> bool {
     match std::env::var("ARES_ORCHESTRATOR_MEDIATION") {
-        Ok(v) => !matches!(
+        Ok(v) => matches!(
             v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
+            "1" | "true" | "on" | "yes"
         ),
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 
@@ -73,6 +74,7 @@ struct PoolInner {
     proposals: Vec<Proposal>,
     signatures: HashSet<String>,
     rejected: HashMap<String, Instant>,
+    dispatched: HashMap<String, Instant>,
     next_id: u64,
     consecutive_expiries: u32,
 }
@@ -82,28 +84,30 @@ pub struct ProposalPool {
     window: Duration,
     capacity: usize,
     rejection_ttl: Duration,
-    arrival: Notify,
+    dispatch_ttl: Duration,
 }
 
 impl ProposalPool {
-    pub fn new(window: Duration, capacity: usize, rejection_ttl: Duration) -> Self {
+    pub fn new(
+        window: Duration,
+        capacity: usize,
+        rejection_ttl: Duration,
+        dispatch_ttl: Duration,
+    ) -> Self {
         Self {
             inner: RwLock::new(PoolInner {
                 proposals: Vec::new(),
                 signatures: HashSet::new(),
                 rejected: HashMap::new(),
+                dispatched: HashMap::new(),
                 next_id: 1,
                 consecutive_expiries: 0,
             }),
             window,
             capacity,
             rejection_ttl,
-            arrival: Notify::new(),
+            dispatch_ttl,
         }
-    }
-
-    pub async fn wait_for_arrival(&self) {
-        self.arrival.notified().await
     }
 
     pub fn from_env() -> Self {
@@ -116,6 +120,10 @@ impl ProposalPool {
             Duration::from_secs(secs_from_env(
                 "ARES_ORCHESTRATOR_MEDIATION_REJECTION_TTL_SECS",
                 DEFAULT_REJECTION_TTL_SECS,
+            )),
+            Duration::from_secs(secs_from_env(
+                "ARES_ORCHESTRATOR_MEDIATION_DISPATCH_TTL_SECS",
+                DEFAULT_DISPATCH_TTL_SECS,
             )),
         )
     }
@@ -136,16 +144,22 @@ impl ProposalPool {
             .rejected
             .retain(|_, at| at.elapsed() < self.rejection_ttl);
 
+        inner
+            .dispatched
+            .retain(|_, at| at.elapsed() < self.dispatch_ttl);
+
         if inner.rejected.contains_key(&signature) {
             return ProposalOutcome::PreviouslyRejected;
         }
-        if inner.signatures.contains(&signature) {
+        if inner.signatures.contains(&signature) || inner.dispatched.contains_key(&signature) {
             return ProposalOutcome::Duplicate;
         }
         if inner.proposals.len() >= self.capacity {
+            inner.dispatched.insert(signature, Instant::now());
             return ProposalOutcome::Full;
         }
         if inner.consecutive_expiries >= BEHIND_THRESHOLD {
+            inner.dispatched.insert(signature, Instant::now());
             return ProposalOutcome::ReviewerBehind;
         }
 
@@ -157,8 +171,6 @@ impl ProposalPool {
             task,
             proposed_at: Instant::now(),
         });
-        drop(inner);
-        self.arrival.notify_one();
         ProposalOutcome::Parked
     }
 
@@ -181,7 +193,9 @@ impl ProposalPool {
             match inner.proposals.iter().position(|p| &p.id == id) {
                 Some(idx) => {
                     let p = inner.proposals.remove(idx);
-                    inner.signatures.remove(&p.task.signature());
+                    let signature = p.task.signature();
+                    inner.signatures.remove(&signature);
+                    inner.dispatched.insert(signature, Instant::now());
                     inner.consecutive_expiries = 0;
                     approved.push(p.task);
                 }
@@ -212,6 +226,7 @@ impl ProposalPool {
                 let p = inner.proposals.remove(i);
                 let signature = p.task.signature();
                 inner.signatures.remove(&signature);
+                inner.dispatched.insert(signature, Instant::now());
                 expired.push(p.task);
             } else {
                 i += 1;
@@ -341,7 +356,12 @@ mod tests {
     }
 
     fn pool() -> ProposalPool {
-        ProposalPool::new(Duration::from_secs(60), 10, Duration::from_secs(600))
+        ProposalPool::new(
+            Duration::from_secs(60),
+            10,
+            Duration::from_secs(600),
+            Duration::from_secs(600),
+        )
     }
 
     #[test]
@@ -486,7 +506,12 @@ mod tests {
 
     #[tokio::test]
     async fn rejection_expires_after_the_ttl() {
-        let p = ProposalPool::new(Duration::from_secs(60), 10, Duration::from_millis(1));
+        let p = ProposalPool::new(
+            Duration::from_secs(60),
+            10,
+            Duration::from_millis(1),
+            Duration::from_secs(600),
+        );
         p.propose(task("recon", "recon", "192.168.58.10", 1)).await;
         let id = p.list(10).await[0]["id"].as_str().unwrap().to_string();
         p.reject(&id).await;
@@ -501,9 +526,14 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_expiry_stops_parking_so_review_latency_cannot_stall_red() {
-        let p = ProposalPool::new(Duration::from_millis(1), 10, Duration::from_secs(600));
-        for _ in 0..BEHIND_THRESHOLD {
-            p.propose(task("exploit", "privesc", "192.168.58.10", 1))
+        let p = ProposalPool::new(
+            Duration::from_millis(1),
+            10,
+            Duration::from_secs(600),
+            Duration::from_secs(600),
+        );
+        for i in 0..BEHIND_THRESHOLD {
+            p.propose(task("exploit", "privesc", &format!("192.168.58.2{i}"), 1))
                 .await;
             tokio::time::sleep(Duration::from_millis(5)).await;
             assert_eq!(p.take_expired().await.len(), 1);
@@ -517,9 +547,14 @@ mod tests {
 
     #[tokio::test]
     async fn parking_resumes_once_the_backlog_drains() {
-        let p = ProposalPool::new(Duration::from_millis(1), 10, Duration::from_secs(600));
-        for _ in 0..BEHIND_THRESHOLD {
-            p.propose(task("exploit", "privesc", "192.168.58.10", 1))
+        let p = ProposalPool::new(
+            Duration::from_millis(1),
+            10,
+            Duration::from_secs(600),
+            Duration::from_secs(600),
+        );
+        for i in 0..BEHIND_THRESHOLD {
+            p.propose(task("exploit", "privesc", &format!("192.168.58.2{i}"), 1))
                 .await;
             tokio::time::sleep(Duration::from_millis(5)).await;
             p.take_expired().await;
@@ -541,7 +576,12 @@ mod tests {
 
     #[tokio::test]
     async fn ruling_on_work_clears_the_behind_counter() {
-        let p = ProposalPool::new(Duration::from_millis(1), 10, Duration::from_secs(600));
+        let p = ProposalPool::new(
+            Duration::from_millis(1),
+            10,
+            Duration::from_secs(600),
+            Duration::from_secs(600),
+        );
         p.propose(task("exploit", "privesc", "192.168.58.10", 1))
             .await;
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -565,7 +605,12 @@ mod tests {
 
     #[tokio::test]
     async fn unreviewed_work_expires_for_auto_release() {
-        let p = ProposalPool::new(Duration::from_millis(1), 10, Duration::from_secs(600));
+        let p = ProposalPool::new(
+            Duration::from_millis(1),
+            10,
+            Duration::from_secs(600),
+            Duration::from_secs(600),
+        );
         p.propose(task("recon", "recon", "192.168.58.10", 1)).await;
 
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -584,11 +629,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signature_frees_after_release() {
-        let p = ProposalPool::new(Duration::from_millis(1), 10, Duration::from_secs(600));
+    async fn auto_released_work_is_not_reproposed_within_the_cooldown() {
+        let p = ProposalPool::new(
+            Duration::from_millis(1),
+            10,
+            Duration::from_secs(600),
+            Duration::from_secs(600),
+        );
+        p.propose(task("recon", "recon", "192.168.58.10", 1)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(p.take_expired().await.len(), 1);
+
+        assert_eq!(
+            p.propose(task("recon", "recon", "192.168.58.10", 1)).await,
+            ProposalOutcome::Duplicate,
+            "auto-release must not free the signature, or every automation tick redispatches the same work"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_cooldown_expires_so_work_can_be_retried_later() {
+        let p = ProposalPool::new(
+            Duration::from_millis(1),
+            10,
+            Duration::from_secs(600),
+            Duration::from_millis(5),
+        );
         p.propose(task("recon", "recon", "192.168.58.10", 1)).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         p.take_expired().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
         assert_eq!(
             p.propose(task("recon", "recon", "192.168.58.10", 1)).await,
@@ -597,8 +667,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fail_open_dispatch_also_holds_the_cooldown() {
+        let p = ProposalPool::new(
+            Duration::from_millis(1),
+            10,
+            Duration::from_secs(600),
+            Duration::from_secs(600),
+        );
+        for i in 0..BEHIND_THRESHOLD {
+            p.propose(task("exploit", "privesc", &format!("192.168.58.2{i}"), 1))
+                .await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            p.take_expired().await;
+        }
+        assert_eq!(
+            p.propose(task("exploit", "privesc", "192.168.58.10", 1))
+                .await,
+            ProposalOutcome::ReviewerBehind
+        );
+        assert_eq!(
+            p.propose(task("exploit", "privesc", "192.168.58.10", 1))
+                .await,
+            ProposalOutcome::Duplicate,
+            "a fail-open dispatch must be remembered, or the behind state becomes an unbounded redispatch loop"
+        );
+    }
+
+    #[tokio::test]
     async fn capacity_is_bounded() {
-        let p = ProposalPool::new(Duration::from_secs(60), 2, Duration::from_secs(600));
+        let p = ProposalPool::new(
+            Duration::from_secs(60),
+            2,
+            Duration::from_secs(600),
+            Duration::from_secs(600),
+        );
         p.propose(task("recon", "recon", "192.168.58.10", 1)).await;
         p.propose(task("recon", "recon", "192.168.58.11", 1)).await;
         assert_eq!(
@@ -617,31 +719,12 @@ mod tests {
         assert_eq!(listed[0]["priority"], 1);
     }
 
-    #[tokio::test]
-    async fn a_parked_proposal_wakes_the_planner() {
-        let p = Arc::new(pool());
-        let waiter = p.clone();
-        let woken = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(2), waiter.wait_for_arrival())
-                .await
-                .is_ok()
-        });
-
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        p.propose(task("recon", "recon", "192.168.58.10", 1)).await;
-
-        assert!(
-            woken.await.unwrap(),
-            "parking work must wake the planner, or the 60s window expires before it reviews anything"
-        );
-    }
-
     #[test]
-    fn mediation_defaults_on_so_the_orchestrator_directs_by_default() {
+    fn mediation_defaults_off_so_it_cannot_ship_enabled_by_accident() {
         std::env::remove_var("ARES_ORCHESTRATOR_MEDIATION");
         assert!(
-            mediation_enabled(),
-            "the orchestrator must direct work by default, or the rules are the team lead"
+            !mediation_enabled(),
+            "mediation must be opt-in, or an unreviewed pool silently gates every exploit"
         );
         for off in ["0", "false", "off", "no", "OFF", " No "] {
             std::env::set_var("ARES_ORCHESTRATOR_MEDIATION", off);

@@ -20,11 +20,11 @@ fn secs_from_env(key: &str, default: u64) -> u64 {
 
 fn planner_enabled() -> bool {
     match std::env::var("ARES_ORCHESTRATOR_PLANNER") {
-        Ok(v) => !matches!(
+        Ok(v) => matches!(
             v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
+            "1" | "true" | "on" | "yes"
         ),
-        Err(_) => true,
+        Err(_) => false,
     }
 }
 
@@ -52,7 +52,6 @@ pub async fn auto_orchestrator_planning(
     loop {
         tokio::select! {
             _ = interval.tick() => {},
-            _ = dispatcher.proposals.wait_for_arrival() => {},
             _ = shutdown.changed() => break,
         }
         if *shutdown.borrow() {
@@ -146,10 +145,13 @@ mod tests {
     }
 
     #[test]
-    fn planner_defaults_on_and_respects_falsey_values() {
+    fn planner_defaults_off_and_respects_falsey_values() {
         let key = "ARES_ORCHESTRATOR_PLANNER";
         std::env::remove_var(key);
-        assert!(planner_enabled(), "planner must default to enabled");
+        assert!(
+            !planner_enabled(),
+            "planner must be opt-in, or a gpt-5.2 planning turn fires on every op by default"
+        );
 
         for falsey in ["0", "false", "off", "no", "FALSE", " Off "] {
             std::env::set_var(key, falsey);

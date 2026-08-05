@@ -145,15 +145,16 @@ outcome**, and the prompt says so.
 
 Guards: single-flight (one planning task at a time, via
 `tracker.count_for_role`), skipped while red is draining, and a warm-up delay
-so the first turn sees post-recon state. `ARES_ORCHESTRATOR_PLANNER=0` disables
-it and leaves the rules as the only scheduler.
+so the first turn sees post-recon state. Opt-in: `ARES_ORCHESTRATOR_PLANNER=1`
+enables it, and the rules are the only scheduler otherwise.
 
 ### Mediation: automations as the orchestrator's instruments
 
-On by default; `ARES_ORCHESTRATOR_MEDIATION=0` turns it off and leaves the
-deterministic rules as the only scheduler. This default is what makes the
+Off by default; `ARES_ORCHESTRATOR_MEDIATION=1` turns it on and makes the
 orchestrator the decision-maker rather than a supervisor over an
-already-scheduled system.
+already-scheduled system. It is opt-in because an orchestrator that does not
+rule within the window turns every proposal into a delayed auto-release, which
+costs latency and buys no veto.
 
 With mediation on, dispatch of *vetoable* work does not run immediately. It is
 parked in a **proposal pool** (`orchestrator/proposals.rs`) and the orchestrator
@@ -210,11 +211,12 @@ the same work can be proposed again later.
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `ARES_ORCHESTRATOR_MEDIATION` | on | Route automation dispatch through the orchestrator |
+| `ARES_ORCHESTRATOR_MEDIATION` | off | Route automation dispatch through the orchestrator |
 | `ARES_ORCHESTRATOR_MEDIATION_SCOPE` | vetoable | `all` mediates every task type instead |
 | `ARES_ORCHESTRATOR_MEDIATION_WINDOW_SECS` | 180 | How long work waits before auto-release |
 | `ARES_ORCHESTRATOR_MEDIATION_CAPACITY` | 200 | Pool cap before fall-through |
 | `ARES_ORCHESTRATOR_MEDIATION_REJECTION_TTL_SECS` | 600 | Rejection cooldown |
+| `ARES_ORCHESTRATOR_MEDIATION_DISPATCH_TTL_SECS` | 600 | Cooldown before dispatched work may be re-proposed |
 
 **Privilege boundary**: `dispatch_*` and `complete_operation` are offered to the
 orchestrator alone, but the agent loop routes callbacks by *tool name* for every
