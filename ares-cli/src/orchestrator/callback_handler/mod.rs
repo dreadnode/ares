@@ -150,7 +150,7 @@ impl CallbackHandler for OrchestratorCallbackHandler {
         }
     }
 
-    async fn on_token_usage(&self, usage: &ares_llm::TokenUsage, model: &str) {
+    async fn on_token_usage(&self, usage: &ares_llm::TokenUsage, model: &str, role: &str) {
         if usage.input_tokens == 0 && usage.output_tokens == 0 {
             return;
         }
@@ -164,6 +164,7 @@ impl CallbackHandler for OrchestratorCallbackHandler {
                 usage.cache_read_input_tokens.into(),
                 usage.output_tokens.into(),
                 model,
+                role,
             )
             .await
             {

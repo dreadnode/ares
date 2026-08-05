@@ -125,10 +125,11 @@ pub trait CallbackHandler: Send + Sync {
         false
     }
 
-    /// Called after each LLM API response with the incremental token usage.
+    /// Called after each LLM API response with the incremental token usage,
+    /// the model that served it, and the role that made the call.
     /// Default implementation is a no-op. Override this to record per-call
     /// token usage (e.g. persist to Redis so CLI shows live cost data).
-    async fn on_token_usage(&self, _usage: &TokenUsage, _model: &str) {}
+    async fn on_token_usage(&self, _usage: &TokenUsage, _model: &str, _role: &str) {}
 }
 
 /// Outcome of running the agent loop.

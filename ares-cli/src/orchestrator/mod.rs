@@ -25,7 +25,7 @@ mod deferred;
 mod dispatcher;
 mod diversity;
 pub(crate) mod exploitation;
-mod llm_runner;
+pub(crate) mod llm_runner;
 mod monitoring;
 pub(crate) mod output_extraction;
 pub(crate) mod proposals;

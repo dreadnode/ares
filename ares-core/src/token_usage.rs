@@ -15,9 +15,17 @@
 //! | `model:{base64(name)}:input_tokens` | Per-model uncached input tokens |
 //! | `model:{base64(name)}:cache_read_input_tokens` | Per-model cached input tokens |
 //! | `model:{base64(name)}:output_tokens` | Per-model output tokens |
+//! | `role:{role}:input_tokens` | Per-role uncached input tokens |
+//! | `role:{role}:cache_read_input_tokens` | Per-role cached input tokens |
+//! | `role:{role}:output_tokens` | Per-role output tokens |
+//! | `role:{role}:model` | Model that role ran on (last-writer-wins) |
 //!
 //! Model names are URL-safe base64-encoded to avoid `:` / `/` collisions in
-//! Redis HASH field names.
+//! Redis HASH field names. Role names are fixed identifiers, so they are
+//! stored verbatim to keep `HGETALL` output readable.
+//!
+//! Role fields are additive: operations that predate them read back with an
+//! empty `roles` map rather than a table of zeros.
 
 use std::collections::HashMap;
 
@@ -27,6 +35,9 @@ use redis::AsyncCommands;
 
 /// Redis HASH field prefix for per-model counters.
 const MODEL_PREFIX: &str = "model";
+
+/// Redis HASH field prefix for per-role counters.
+const ROLE_PREFIX: &str = "role";
 
 /// Token usage counters for a single LLM call.
 ///
@@ -56,6 +67,8 @@ pub struct OperationTokenUsage {
     pub model: String,
     /// Per-model breakdown.
     pub models: HashMap<String, ModelTokenUsage>,
+    /// Per-role breakdown. Empty for operations that predate role tracking.
+    pub roles: HashMap<String, RoleTokenUsage>,
 }
 
 /// Per-model token counters.
@@ -64,6 +77,16 @@ pub struct ModelTokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_input_tokens: u64,
+}
+
+/// Per-role token counters, with the model that role ran on.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RoleTokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    /// Last model this role wrote under; empty if never recorded.
+    pub model: String,
 }
 
 /// Per-model pricing in USD per million tokens:
@@ -167,11 +190,62 @@ pub fn estimate_usage_cost(
     }
 }
 
+/// Cost breakdown for a single role.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RoleCostBreakdown {
+    pub role: String,
+    pub model: String,
+    pub input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    /// `None` when the role's model is unknown or unpriced.
+    pub cost: Option<f64>,
+}
+
+/// Estimate per-role cost, sorted by descending spend then role name.
+///
+/// Roles with an unrecorded or unpriced model report `cost: None` and keep
+/// their token counts.
+pub fn estimate_role_costs(usage: &OperationTokenUsage) -> Vec<RoleCostBreakdown> {
+    let mut out: Vec<RoleCostBreakdown> = usage
+        .roles
+        .iter()
+        .map(|(role, u)| {
+            let cost = lookup_model_cost(&u.model).map(|(input, cached, output)| {
+                (u.input_tokens as f64 * input
+                    + u.cache_read_input_tokens as f64 * cached
+                    + u.output_tokens as f64 * output)
+                    / 1_000_000.0
+            });
+            RoleCostBreakdown {
+                role: role.clone(),
+                model: u.model.clone(),
+                input_tokens: u.input_tokens,
+                cache_read_input_tokens: u.cache_read_input_tokens,
+                output_tokens: u.output_tokens,
+                total_tokens: u.input_tokens + u.cache_read_input_tokens + u.output_tokens,
+                cost,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.cost
+            .unwrap_or(0.0)
+            .total_cmp(&a.cost.unwrap_or(0.0))
+            .then_with(|| a.role.cmp(&b.role))
+    });
+    out
+}
+
 /// Look up per-token pricing for a model.
 ///
 /// Returns `(input_rate, cached_input_rate, output_rate)` per million tokens.
 fn lookup_model_cost(model: &str) -> Option<(f64, f64, f64)> {
-    let model_lower = model.to_lowercase();
+    let model_lower = model.trim().to_lowercase();
+    if model_lower.is_empty() {
+        return None;
+    }
     for &(name, input, cached, output) in MODEL_COSTS {
         if name == model_lower {
             return Some((input, cached, output));
@@ -204,6 +278,7 @@ pub async fn increment_blue_token_usage(
     cache_read_input_tokens: u64,
     output_tokens: u64,
     model: &str,
+    role: &str,
 ) -> Result<(), redis::RedisError> {
     let key = blue_token_usage_key(investigation_id);
     increment_usage_hash(
@@ -213,6 +288,7 @@ pub async fn increment_blue_token_usage(
         cache_read_input_tokens,
         output_tokens,
         model,
+        role,
     )
     .await
 }
@@ -234,6 +310,25 @@ pub async fn get_blue_token_usage(
 fn model_field(model: &str, token_type: &str) -> String {
     let encoded = URL_SAFE.encode(model.as_bytes());
     format!("{MODEL_PREFIX}:{encoded}:{token_type}")
+}
+
+/// Encode a per-role HASH field name: `role:{role_name}:{token_type}`.
+fn role_field(role: &str, token_type: &str) -> String {
+    format!("{ROLE_PREFIX}:{role}:{token_type}")
+}
+
+/// Decode a per-role HASH field back to `(role_name, token_type)`.
+fn parse_role_field(field: &str) -> Option<(String, String)> {
+    let rest = field
+        .strip_prefix(ROLE_PREFIX)
+        .and_then(|s| s.strip_prefix(':'))?;
+    let colon_pos = rest.rfind(':')?;
+    let role_name = &rest[..colon_pos];
+    let token_type = &rest[colon_pos + 1..];
+    if role_name.is_empty() {
+        return None;
+    }
+    Some((role_name.to_string(), token_type.to_string()))
 }
 
 /// Decode a per-model HASH field back to `(model_name, token_type)`.
@@ -261,6 +356,7 @@ pub async fn increment_token_usage(
     cache_read_input_tokens: u64,
     output_tokens: u64,
     model: &str,
+    role: &str,
 ) -> Result<(), redis::RedisError> {
     let key = token_usage_key(operation_id);
     increment_usage_hash(
@@ -270,6 +366,7 @@ pub async fn increment_token_usage(
         cache_read_input_tokens,
         output_tokens,
         model,
+        role,
     )
     .await
 }
@@ -281,6 +378,7 @@ async fn increment_usage_hash(
     cache_read_input_tokens: u64,
     output_tokens: u64,
     model: &str,
+    role: &str,
 ) -> Result<(), redis::RedisError> {
     let input_i64 = i64::try_from(input_tokens).map_err(|_| {
         redis::RedisError::from((
@@ -332,6 +430,27 @@ async fn increment_usage_hash(
             .arg(output_i64);
     }
 
+    if !role.is_empty() {
+        pipe.cmd("HINCRBY")
+            .arg(key)
+            .arg(role_field(role, "input_tokens"))
+            .arg(input_i64);
+        pipe.cmd("HINCRBY")
+            .arg(key)
+            .arg(role_field(role, "cache_read_input_tokens"))
+            .arg(cached_i64);
+        pipe.cmd("HINCRBY")
+            .arg(key)
+            .arg(role_field(role, "output_tokens"))
+            .arg(output_i64);
+        if !model.is_empty() {
+            pipe.cmd("HSET")
+                .arg(key)
+                .arg(role_field(role, "model"))
+                .arg(model);
+        }
+    }
+
     pipe.query_async::<()>(conn).await?;
     Ok(())
 }
@@ -379,18 +498,126 @@ async fn read_usage_hash(
         }
     }
 
+    let mut roles: HashMap<String, RoleTokenUsage> = HashMap::new();
+    for (field, value) in &data {
+        if let Some((role_name, token_type)) = parse_role_field(field) {
+            let entry = roles.entry(role_name).or_default();
+            match token_type.as_str() {
+                "model" => entry.model = value.clone(),
+                "input_tokens" => entry.input_tokens = value.parse().unwrap_or(0),
+                "cache_read_input_tokens" => {
+                    entry.cache_read_input_tokens = value.parse().unwrap_or(0)
+                }
+                "output_tokens" => entry.output_tokens = value.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+    }
+
     Ok(Some(OperationTokenUsage {
         input_tokens,
         cache_read_input_tokens,
         output_tokens,
         model,
         models,
+        roles,
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usage_with_roles(roles: &[(&str, &str, u64, u64, u64)]) -> OperationTokenUsage {
+        let mut usage = OperationTokenUsage::default();
+        for (role, model, input, cached, output) in roles {
+            usage.roles.insert(
+                (*role).to_string(),
+                RoleTokenUsage {
+                    input_tokens: *input,
+                    cache_read_input_tokens: *cached,
+                    output_tokens: *output,
+                    model: (*model).to_string(),
+                },
+            );
+        }
+        usage
+    }
+
+    #[test]
+    fn an_empty_model_name_is_never_priced() {
+        assert!(
+            lookup_model_cost("").is_none(),
+            "the substring fallback matches every entry on an empty name, \
+             which would price unrecorded models as the first table row"
+        );
+        assert!(lookup_model_cost("   ").is_none());
+    }
+
+    #[test]
+    fn role_field_roundtrip() {
+        let field = role_field("credential_access", "input_tokens");
+        assert_eq!(field, "role:credential_access:input_tokens");
+        let (role, token_type) = parse_role_field(&field).unwrap();
+        assert_eq!(role, "credential_access");
+        assert_eq!(token_type, "input_tokens");
+    }
+
+    #[test]
+    fn role_and_model_fields_do_not_capture_each_other() {
+        let model = model_field("gpt-5.2", "output_tokens");
+        assert!(parse_role_field(&model).is_none());
+
+        let role = role_field("acl", "output_tokens");
+        assert!(parse_model_field(&role).is_none());
+
+        for plain in ["input_tokens", "output_tokens", "model"] {
+            assert!(parse_role_field(plain).is_none(), "{plain}");
+        }
+    }
+
+    #[test]
+    fn roles_sharing_one_model_are_costed_apart() {
+        let usage = usage_with_roles(&[
+            ("acl", "gpt-5.2", 50_000, 2_000_000, 30_000),
+            ("privesc", "gpt-5.2", 11_000, 508_240, 2_977),
+        ]);
+        let costs = estimate_role_costs(&usage);
+
+        assert_eq!(costs.len(), 2, "both roles must survive sharing a model");
+        assert_eq!(costs[0].role, "acl", "highest spender leads");
+        assert_eq!(costs[1].role, "privesc");
+
+        let acl = costs[0].cost.unwrap();
+        let privesc = costs[1].cost.unwrap();
+        assert!(acl > privesc, "acl {acl} should exceed privesc {privesc}");
+        assert_eq!(costs[0].total_tokens, 2_080_000);
+    }
+
+    #[test]
+    fn a_role_with_an_unknown_model_keeps_its_tokens() {
+        let costs = estimate_role_costs(&usage_with_roles(&[("acl", "not-a-real-model", 1, 2, 3)]));
+        assert_eq!(costs.len(), 1);
+        assert!(costs[0].cost.is_none(), "unpriced model must not fabricate");
+        assert_eq!(costs[0].total_tokens, 6, "tokens still reported");
+    }
+
+    #[test]
+    fn a_role_with_no_recorded_model_is_still_listed() {
+        let costs = estimate_role_costs(&usage_with_roles(&[("acl", "", 10, 20, 30)]));
+        assert_eq!(costs.len(), 1);
+        assert!(costs[0].cost.is_none());
+        assert_eq!(costs[0].total_tokens, 60);
+    }
+
+    #[test]
+    fn operations_predating_role_tracking_report_no_roles() {
+        let costs = estimate_role_costs(&OperationTokenUsage::default());
+        assert!(
+            costs.is_empty(),
+            "absent role fields must not render as a table of zeros"
+        );
+    }
 
     #[test]
     fn model_field_roundtrip() {
@@ -441,6 +668,7 @@ mod tests {
                     output_tokens: 500_000,
                 },
             )]),
+            roles: HashMap::new(),
         };
 
         let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
@@ -478,6 +706,7 @@ mod tests {
                     },
                 ),
             ]),
+            roles: HashMap::new(),
         };
 
         let (total, breakdown, _) = estimate_usage_cost(&usage);
@@ -505,6 +734,7 @@ mod tests {
                     output_tokens: 50,
                 },
             )]),
+            roles: HashMap::new(),
         };
 
         let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
@@ -588,6 +818,7 @@ mod tests {
                     output_tokens: 500_000,
                 },
             )]),
+            roles: HashMap::new(),
         };
         let (_, breakdown, _) = estimate_usage_cost(&usage);
         assert_eq!(breakdown[0].total_tokens, 1_000_000);
@@ -757,6 +988,7 @@ mod tests {
                     },
                 ),
             ]),
+            roles: HashMap::new(),
         };
         let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
         assert!(total.is_some());
@@ -790,6 +1022,7 @@ mod tests {
                     },
                 ),
             ]),
+            roles: HashMap::new(),
         };
         let (_, breakdown, _) = estimate_usage_cost(&usage);
         assert_eq!(breakdown.len(), 2);
@@ -844,6 +1077,7 @@ mod tests {
                     output_tokens: 5000,
                 },
             )]),
+            roles: HashMap::new(),
         };
         let json = serde_json::to_value(&usage).unwrap();
         assert_eq!(json["input_tokens"], 10000);
@@ -867,6 +1101,7 @@ mod tests {
                     output_tokens: 0,
                 },
             )]),
+            roles: HashMap::new(),
         };
         let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
         assert_eq!(total.expect("total should be set"), 0.0);
@@ -890,6 +1125,7 @@ mod tests {
             output_tokens: 50,
             model: "gpt-4o".to_string(),
             models: HashMap::new(),
+            roles: HashMap::new(),
         };
         let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
         assert!(total.is_none());
@@ -912,6 +1148,7 @@ mod tests {
                     output_tokens: 500,
                 },
             )]),
+            roles: HashMap::new(),
         };
         let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
         assert!(total.is_none());
@@ -934,6 +1171,7 @@ mod tests {
                     output_tokens: 500_000,
                 },
             )]),
+            roles: HashMap::new(),
         };
         let (total, breakdown, unpriced) = estimate_usage_cost(&usage);
         let cost = total.expect("total should be set");

@@ -63,6 +63,28 @@ pub(crate) fn format_number(n: u64) -> String {
     result
 }
 
+pub(crate) fn format_role_cost_line(item: &ares_core::token_usage::RoleCostBreakdown) -> String {
+    let cost = match item.cost {
+        Some(c) => format!("${c:.4}"),
+        None => "cost unavailable".to_string(),
+    };
+    let model = if item.model.is_empty() {
+        "model unrecorded".to_string()
+    } else {
+        item.model.clone()
+    };
+    format!(
+        "  - {} [{}]: {} tokens ({}) \u{2014} in {}  cached {}  out {}",
+        item.role,
+        model,
+        format_number(item.total_tokens),
+        cost,
+        format_number(item.input_tokens),
+        format_number(item.cache_read_input_tokens),
+        format_number(item.output_tokens)
+    )
+}
+
 pub(crate) fn format_model_cost_line(item: &ares_core::token_usage::ModelCostBreakdown) -> String {
     format!(
         "  - {}: {} tokens (${:.4}) \u{2014} in {}  cached {}  out {}",
@@ -147,6 +169,43 @@ mod tests {
             total_tokens: input + cached + output,
             cost,
         }
+    }
+
+    fn role_breakdown(
+        role: &str,
+        model: &str,
+        cost: Option<f64>,
+    ) -> ares_core::token_usage::RoleCostBreakdown {
+        ares_core::token_usage::RoleCostBreakdown {
+            role: role.to_string(),
+            model: model.to_string(),
+            input_tokens: 50_000,
+            cache_read_input_tokens: 2_000_000,
+            output_tokens: 30_000,
+            total_tokens: 2_080_000,
+            cost,
+        }
+    }
+
+    #[test]
+    fn role_cost_line_names_the_role_and_its_model() {
+        assert_eq!(
+            format_role_cost_line(&role_breakdown("acl", "gpt-5.2", Some(0.8375))),
+            "  - acl [gpt-5.2]: 2,080,000 tokens ($0.8375) \u{2014} in 50,000  cached 2,000,000  out 30,000"
+        );
+    }
+
+    #[test]
+    fn role_cost_line_says_so_when_the_price_is_unknown() {
+        let line = format_role_cost_line(&role_breakdown("acl", "mystery-model", None));
+        assert!(line.contains("cost unavailable"), "{line}");
+        assert!(line.contains("2,080,000 tokens"), "{line}");
+    }
+
+    #[test]
+    fn role_cost_line_flags_a_missing_model() {
+        let line = format_role_cost_line(&role_breakdown("acl", "", None));
+        assert!(line.contains("model unrecorded"), "{line}");
     }
 
     #[test]

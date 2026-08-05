@@ -161,7 +161,7 @@ impl CallbackHandler for SubAgentCallbackHandler {
         BlueCallbackHandler::handle_lifecycle_callback(call).map(Ok)
     }
 
-    async fn on_token_usage(&self, usage: &TokenUsage, model: &str) {
+    async fn on_token_usage(&self, usage: &TokenUsage, model: &str, role: &str) {
         if usage.input_tokens == 0 && usage.output_tokens == 0 {
             return;
         }
@@ -174,6 +174,7 @@ impl CallbackHandler for SubAgentCallbackHandler {
                     usage.cache_read_input_tokens.into(),
                     usage.output_tokens.into(),
                     model,
+                    role,
                 )
                 .await
                 {

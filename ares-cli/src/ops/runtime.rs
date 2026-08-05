@@ -5,7 +5,7 @@ use ares_core::models::SharedRedTeamState;
 use ares_core::state::RedisStateReader;
 
 use crate::redis_conn::{connect_redis, resolve_operation_id};
-use crate::util::{format_duration, format_model_cost_line, format_number};
+use crate::util::{format_duration, format_model_cost_line, format_number, format_role_cost_line};
 
 fn finalizing_note(state: &SharedRedTeamState) -> Option<String> {
     if state.completed_at.is_some() || state.red_completed_at.is_none() {
@@ -277,6 +277,14 @@ pub(crate) async fn ops_runtime(
 
                 if !unpriced.is_empty() {
                     println!("Unpriced models: {}", unpriced.join(", "));
+                }
+
+                let roles = ares_core::token_usage::estimate_role_costs(&usage);
+                if !roles.is_empty() {
+                    println!("By role:");
+                    for item in &roles {
+                        println!("{}", format_role_cost_line(item));
+                    }
                 }
             }
         }

@@ -433,7 +433,9 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
 
         // Report incremental token usage to callback handler (persists to Redis)
         if let Some(ref handler) = callback_handler {
-            handler.on_token_usage(&response.usage, &config.model).await;
+            handler
+                .on_token_usage(&response.usage, &config.model, role)
+                .await;
         }
 
         // Handle based on stop reason

@@ -17,6 +17,15 @@ use super::types::{TaskMessage, TaskResult};
 
 const TASK_STATUS_PREFIX: &str = "ares:task_status";
 
+/// Resolve the role a task ran as, mirroring `Dispatcher::do_submit_outcome`.
+/// Empty when unresolvable, which suppresses the role counters.
+fn resolve_task_role(task: &TaskMessage) -> String {
+    ares_llm::tool_registry::AgentRole::parse(&task.target_agent)
+        .or_else(|| crate::orchestrator::llm_runner::role_for_task_type(&task.task_type))
+        .map(|r| r.as_str().to_string())
+        .unwrap_or_default()
+}
+
 /// Process a single task: set status, run agent, publish result.
 pub async fn process_task(
     conn: &mut redis::aio::ConnectionManager,
@@ -72,6 +81,7 @@ pub async fn process_task(
         if usage.total_tokens > 0 {
             if let Some(ref op_id) = config.operation_id {
                 let model = usage.model.as_deref().unwrap_or("");
+                let role = resolve_task_role(task);
                 if let Err(e) = token_usage::increment_token_usage(
                     conn,
                     op_id,
@@ -79,6 +89,7 @@ pub async fn process_task(
                     usage.cache_read_input_tokens,
                     usage.output_tokens,
                     model,
+                    &role,
                 )
                 .await
                 {
