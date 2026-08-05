@@ -13,6 +13,21 @@ use ares_llm::ToolCall;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
+/// Principals whose secrets land in state but which can never complete an
+/// LDAP bind, so `certipy_find` must not be dispatched as them.
+///
+/// `krbtgt` is the load-bearing case: it is permanently disabled, its NTLM
+/// hash and AES key enter state on every successful DCSync, and the
+/// newest-first tier ordering pushes that fresh row to the FRONT of the
+/// candidate list. Each CA host then burns a certipy_find that the worker's
+/// credential resolver refuses before dispatch. `Guest` is disabled by default
+/// in AD and fails the same way.
+fn is_non_logon_principal(username: &str) -> bool {
+    let u = username.trim().to_ascii_lowercase();
+    let bare = u.split_once('@').map_or(u.as_str(), |(user, _)| user);
+    matches!(bare, "krbtgt" | "guest")
+}
+
 /// Extract domain from an ADCS host's FQDN.
 /// e.g. "srv01.fabrikam.local" -> "fabrikam.local"
 fn extract_domain_from_fqdn(fqdn: &str) -> Option<String> {
@@ -194,6 +209,7 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
                 .filter(|c| {
                     !c.password.is_empty()
                         && c.domain.to_lowercase() == domain_lower
+                        && !is_non_logon_principal(&c.username)
                         && !state.is_delegation_account(&c.username)
                         && !state.is_principal_quarantined(&c.username, &c.domain)
                 })
@@ -202,6 +218,7 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
                     !c.password.is_empty()
                         && cd != domain_lower
                         && state.forest_root_of(&cd) == target_forest
+                        && !is_non_logon_principal(&c.username)
                         && !state.is_delegation_account(&c.username)
                         && !state.is_principal_quarantined(&c.username, &c.domain)
                 }))
@@ -220,6 +237,7 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
                     let pred_any_same = |h: &&ares_core::models::Hash| {
                         h.hash_type.eq_ignore_ascii_case("ntlm")
                             && (h.domain.to_lowercase() == domain_lower || h.domain.is_empty())
+                            && !is_non_logon_principal(&h.username)
                             && !state.is_delegation_account(&h.username)
                     };
                     let same_forest = |h: &&ares_core::models::Hash| -> bool {
@@ -234,6 +252,7 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
                     let pred_any_xdom = |h: &&ares_core::models::Hash| {
                         h.hash_type.eq_ignore_ascii_case("ntlm")
                             && same_forest(h)
+                            && !is_non_logon_principal(&h.username)
                             && !state.is_delegation_account(&h.username)
                     };
 
@@ -631,6 +650,91 @@ mod tests {
         assert_eq!(work[0].host_ip, "192.168.58.50");
         assert_eq!(work[0].domain, "contoso.local");
         assert_eq!(work[0].credential.username, "admin");
+    }
+
+    fn make_hash(username: &str, domain: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("h-{username}"),
+            username: username.into(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee:abcdef0123456789".into(),
+            hash_type: "ntlm".into(),
+            domain: domain.into(),
+            cracked_password: None,
+            source: "test".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    /// A DC in `domain` reachable over LDAP, nothing else in state.
+    fn state_with_ldap_dc(domain: &str, ip: &str) -> StateInner {
+        let mut state = StateInner::new("test-op".into());
+        let mut dc = make_host(ip, &format!("dc01.{domain}"), true);
+        dc.services.push("389/tcp ldap".into());
+        state.hosts.push(dc);
+        state.domains.push(domain.into());
+        state
+    }
+
+    #[test]
+    fn collect_never_selects_krbtgt_as_the_enumeration_principal() {
+        let mut state = state_with_ldap_dc("contoso.local", "192.168.58.10");
+        state.hashes.push(make_hash("krbtgt", "contoso.local"));
+
+        assert!(
+            collect_adcs_work(&state).is_empty(),
+            "krbtgt is permanently disabled — certipy_find can never bind as it"
+        );
+    }
+
+    #[test]
+    fn collect_never_selects_guest_as_the_enumeration_principal() {
+        let mut state = state_with_ldap_dc("contoso.local", "192.168.58.10");
+        state.hashes.push(make_hash("Guest", "contoso.local"));
+
+        assert!(collect_adcs_work(&state).is_empty());
+    }
+
+    #[test]
+    fn collect_skips_krbtgt_but_still_uses_a_usable_principal_behind_it() {
+        let mut state = state_with_ldap_dc("contoso.local", "192.168.58.10");
+        state.hashes.push(make_hash("alice", "contoso.local"));
+        // Newest-first ordering puts the freshly-DCSynced krbtgt row in front.
+        state.hashes.push(make_hash("krbtgt", "contoso.local"));
+
+        let work = collect_adcs_work(&state);
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].credential.username, "alice",
+            "krbtgt must be skipped over, not block the CA host entirely"
+        );
+    }
+
+    #[test]
+    fn collect_never_selects_a_krbtgt_cleartext_credential() {
+        let mut state = state_with_ldap_dc("contoso.local", "192.168.58.10");
+        state
+            .credentials
+            .push(make_credential("krbtgt", "P@ssw0rd!", "contoso.local")); // pragma: allowlist secret
+
+        assert!(collect_adcs_work(&state).is_empty());
+    }
+
+    #[test]
+    fn non_logon_principal_matches_case_and_upn_forms() {
+        assert!(is_non_logon_principal("krbtgt"));
+        assert!(is_non_logon_principal("KRBTGT"));
+        assert!(is_non_logon_principal(" krbtgt@contoso.local "));
+        assert!(is_non_logon_principal("Guest"));
+        assert!(!is_non_logon_principal("alice"));
+        assert!(!is_non_logon_principal("krbtgt_svc"));
+        assert!(!is_non_logon_principal("guestuser"));
     }
 
     #[test]
