@@ -28,6 +28,38 @@ fn is_non_logon_principal(username: &str) -> bool {
     matches!(bare, "krbtgt" | "guest")
 }
 
+/// Whether a zero-vulnerability `certipy_find` result came back without the
+/// tool ever completing an authenticated bind.
+///
+/// `vulns_found == 0` is produced by two very different outcomes: the CA was
+/// enumerated and genuinely holds no vulnerable template, or the bind never
+/// succeeded so nothing was enumerated at all. Only the first justifies
+/// locking the dedup key for the rest of the operation — the second locks a CA
+/// host against every credential that lands later, which is how the ADCS route
+/// into a foreign forest stays closed after one forged-ticket attempt.
+///
+/// certipy exits 0 either way and the worker reports no transport error, so
+/// the raw output is the only thing separating them. `invalidCredentials
+/// (data 52e)` is the LDAP bind rejection documented in
+/// `ares-tools/src/privesc/adcs.rs`; the `KDC_ERR_` family covers the Kerberos
+/// path a forged inter-realm ticket fails on. A successful enumeration always
+/// prints the `CA Name` line `parse_certipy_find` keys on, so seeing one
+/// vetoes the retry no matter what else is in the output.
+fn find_result_is_unauthenticated(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    if lower.contains("ca name") {
+        return false;
+    }
+    [
+        "invalidcredentials",
+        "data 52e",
+        "kdc_err_",
+        "status_logon_failure",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
 /// Extract domain from an ADCS host's FQDN.
 /// e.g. "srv01.fabrikam.local" -> "fabrikam.local"
 fn extract_domain_from_fqdn(fqdn: &str) -> Option<String> {
@@ -523,10 +555,34 @@ pub async fn auto_adcs_enumeration(
                             "Deterministic certipy_find completed"
                         );
                         // No vulns + no transport error → genuine "nothing
-                        // vulnerable here". Keep dedup locked. The exec
+                        // vulnerable here", PROVIDED the bind actually
+                        // succeeded. Keep dedup locked only then. The exec
                         // path may also emit an error if creds were
                         // missing — in which case clear dedup to allow a
                         // later credential to retry.
+                        if exec.error.is_none()
+                            && vulns_found == 0
+                            && find_result_is_unauthenticated(&exec.output)
+                        {
+                            warn!(
+                                task_id = %task_id_bg,
+                                ca_host = %host_ip_bg,
+                                "Deterministic certipy_find enumerated nothing because the bind never authenticated — clearing dedup so a later credential can retry this CA"
+                            );
+                            dispatcher_bg
+                                .state
+                                .write()
+                                .await
+                                .unmark_processed(DEDUP_ADCS_SERVERS, &dedup_key_bg);
+                            let _ = dispatcher_bg
+                                .state
+                                .unpersist_dedup(
+                                    &dispatcher_bg.queue,
+                                    DEDUP_ADCS_SERVERS,
+                                    &dedup_key_bg,
+                                )
+                                .await;
+                        }
                         if let Some(err) = exec.error {
                             warn!(
                                 task_id = %task_id_bg,
@@ -1094,5 +1150,71 @@ mod tests {
         });
         assert!(selected.is_some());
         assert_eq!(selected.unwrap().domain, "fabrikam.local");
+    }
+
+    // --- find_result_is_unauthenticated ---------------------------------
+
+    #[test]
+    fn enumerated_ca_with_no_vulnerable_template_stays_locked() {
+        let output = "Certificate Authorities\n                      CA Name                             : CONTOSO-CA\n                      DNS Name                            : ca01.contoso.local\n                      [*] No vulnerable certificate templates found";
+        assert!(
+            !find_result_is_unauthenticated(output),
+            "the bind worked and the CA was read — locking dedup is correct here"
+        );
+    }
+
+    #[test]
+    fn ldap_bind_rejection_is_not_treated_as_a_clean_enumeration() {
+        let output = "[-] Got error while trying to authenticate: \
+                      invalidCredentials (data 52e, v4563)";
+        assert!(find_result_is_unauthenticated(output));
+    }
+
+    #[test]
+    fn kerberos_failure_from_a_forged_cross_forest_ticket_is_retryable() {
+        for output in [
+            "[-] Kerberos SessionError: KDC_ERR_S_PRINCIPAL_UNKNOWN",
+            "[-] KDC_ERR_WRONG_REALM",
+            "[-] KDC_ERR_PREAUTH_FAILED",
+        ] {
+            assert!(
+                find_result_is_unauthenticated(output),
+                "unexpectedly locked on: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn smb_logon_failure_is_retryable() {
+        assert!(find_result_is_unauthenticated(
+            "[-] SMB SessionError: STATUS_LOGON_FAILURE"
+        ));
+    }
+
+    #[test]
+    fn a_ca_name_vetoes_the_retry_even_alongside_an_auth_error() {
+        let output =
+            "CA Name : CONTOSO-CA\n[-] Got error: KDC_ERR_PREAUTH_FAILED on a later template";
+        assert!(
+            !find_result_is_unauthenticated(output),
+            "the CA was enumerated, so 0 vulns is a real answer"
+        );
+    }
+
+    #[test]
+    fn a_host_that_simply_runs_no_adcs_stays_locked() {
+        assert!(
+            !find_result_is_unauthenticated(
+                "[*] Finding certificate templates\n[*] Got 0 templates"
+            ),
+            "no auth-failure marker means the bind was fine and this host just has no CA"
+        );
+    }
+
+    #[test]
+    fn auth_failure_markers_are_case_insensitive() {
+        assert!(find_result_is_unauthenticated(
+            "InvalidCredentials (DATA 52E)"
+        ));
     }
 }
