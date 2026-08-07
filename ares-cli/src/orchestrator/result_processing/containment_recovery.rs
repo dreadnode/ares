@@ -146,6 +146,42 @@ pub(crate) const KDC_CLIENT_REVOKED_MARKER: &str = "KDC_ERR_CLIENT_REVOKED";
 /// bypasses this and revokes on first sight.
 pub(crate) const CREDENTIAL_REVOKE_MIN_OBSERVATIONS: u32 = 2;
 
+/// Minimum number of `KRB_AP_ERR_MODIFIED` observations for the same realm
+/// before the driver believes that realm's krbtgt actually rotated.
+///
+/// A rotation observation is realm-wide, not work-item-wide: it skips *every*
+/// Kerberos-shaped `credential_access` task in the realm for the rest of the
+/// operation. One flaky ticket exchange therefore costs red the realm's entire
+/// roasting surface, which is how an operation loses a domain it can otherwise
+/// reach. Corroboration keeps a single mismatch from spending that much.
+pub(crate) const KRBTGT_ROTATION_MIN_OBSERVATIONS: u32 = 2;
+
+/// Whether a `KRB_AP_ERR_MODIFIED` under this technique says anything about the
+/// realm's krbtgt.
+///
+/// It usually does not. The KDC returns it whenever a ticket cannot be
+/// decrypted by the service it was presented to, so red produces it itself in
+/// two routine ways. Certificate-backed enrollment is the load-bearing case:
+/// `certipy auth` PKINIT intermittently fails the AS exchange with this exact
+/// string (~50% per attempt on some AES-only KDCs — see the retry loop in
+/// `ares_tools::privesc::adcs`), so an ESC chain that ultimately *succeeds*
+/// still leaves the marker in its output. Forging with a stale or wrong trust
+/// key is the other: an inter-realm TGT that the target KDC cannot decrypt is
+/// indistinguishable, on this string alone, from one whose key was rotated.
+///
+/// Unknown provenance fails closed, matching
+/// [`is_attributable_reject_technique`]: no technique, no inference.
+fn is_attributable_key_mismatch_technique(technique: &str) -> bool {
+    let t = technique.to_lowercase();
+    !t.trim().is_empty()
+        && !is_certificate_backed_technique(&t)
+        && !t.contains("ticketer")
+        && !t.contains("trust")
+        && !t.contains("forge")
+        && !t.contains("inter_realm")
+        && !t.contains("interrealm")
+}
+
 /// Techniques that emit credential-reject strings as a normal part of their
 /// operation rather than as evidence the acting account was disabled.
 /// `password_spray` logs `STATUS_LOGON_FAILURE` on every wrong guess by design,
@@ -252,9 +288,20 @@ pub(crate) fn classify_containment_signals(
         }
     }
 
-    // 3. KRB_AP_ERR_MODIFIED → krbtgt likely rotated. Fires on the realm the
+    // 3. KRB_AP_ERR_MODIFIED → krbtgt possibly rotated. Fires on the realm the
     //    task was targeting, or on the cred's realm when task_domain is empty.
-    if any_text_contains(result, "KRB_AP_ERR_MODIFIED") {
+    //
+    //    Gated the same way the weak credential-reject path is, and for the same
+    //    reason: the marker is only evidence when red did not manufacture it.
+    //    `is_attributable_key_mismatch_technique` drops the self-inflicted
+    //    sources, `reject_is_same_realm` drops tickets fired across a realm
+    //    boundary (where a mismatch is the expected answer, not a rotation), and
+    //    the caller requires KRBTGT_ROTATION_MIN_OBSERVATIONS corroboration
+    //    before acting.
+    if any_text_contains(result, "KRB_AP_ERR_MODIFIED")
+        && is_attributable_key_mismatch_technique(tech)
+        && cred_key.is_none_or(|k| reject_is_same_realm(k, task_domain))
+    {
         let realm = task_domain
             .filter(|d| !d.is_empty())
             .map(str::to_string)
@@ -566,6 +613,72 @@ mod tests {
             |sig| matches!(sig, ContainmentSignal::KrbtgtRotated { domain, .. }
                 if domain == "contoso.local")
         ));
+    }
+
+    fn rotates(technique: &str, cred: Option<&str>, task_domain: Option<&str>) -> bool {
+        classify_containment_signals(
+            &out("KRB_AP_ERR_MODIFIED — decrypt integrity check failed"),
+            Some(technique),
+            cred,
+            task_domain,
+            Some("192.168.58.240"),
+        )
+        .iter()
+        .any(|sig| matches!(sig, ContainmentSignal::KrbtgtRotated { .. }))
+    }
+
+    #[test]
+    fn certipy_pkinit_flake_does_not_rotate_the_realm() {
+        for tech in [
+            "certipy_auth",
+            "certipy_esc1_full_chain",
+            "adcs_esc1",
+            "pkinit",
+        ] {
+            assert!(
+                !rotates(tech, Some("alice@contoso.local"), Some("contoso.local")),
+                "{tech}: certipy PKINIT emits KRB_AP_ERR_MODIFIED as a ~50% transient \
+                 flake and retries it internally — it is not evidence of a rotation"
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_trust_key_forge_does_not_rotate_the_realm() {
+        for tech in ["ticketer", "trust_ticket_forge", "inter_realm_forge"] {
+            assert!(
+                !rotates(tech, Some("alice@contoso.local"), Some("fabrikam.local")),
+                "{tech}: a forged inter-realm TGT the target KDC cannot decrypt is \
+                 indistinguishable from a rotated key on this string alone"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_realm_key_mismatch_does_not_rotate_the_target_realm() {
+        assert!(
+            !rotates(
+                "secretsdump",
+                Some("alice@contoso.local"),
+                Some("fabrikam.local")
+            ),
+            "a ticket fired across a realm boundary is expected to fail to decrypt"
+        );
+        assert!(rotates(
+            "secretsdump",
+            Some("alice@contoso.local"),
+            Some("contoso.local")
+        ));
+    }
+
+    #[test]
+    fn unknown_technique_does_not_rotate_the_realm() {
+        assert!(!rotates(
+            "",
+            Some("alice@contoso.local"),
+            Some("contoso.local")
+        ));
+        assert!(!rotates("   ", None, Some("contoso.local")));
     }
 
     #[test]

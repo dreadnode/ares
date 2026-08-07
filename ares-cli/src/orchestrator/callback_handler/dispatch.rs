@@ -1,5 +1,5 @@
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use ares_llm::provider::ToolCall;
 use ares_llm::CallbackResult;
@@ -207,11 +207,6 @@ impl OrchestratorCallbackHandler {
     }
 
     pub(super) async fn dispatch_exploit(&self, call: &ToolCall) -> Result<CallbackResult> {
-        let dispatcher = self
-            .dispatcher
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Dispatcher not configured"))?;
-
         let vuln_id = call.arguments["vuln_id"].as_str().unwrap_or("");
         let priority = call.arguments["priority"].as_i64().unwrap_or(3) as i32;
 
@@ -227,6 +222,29 @@ impl OrchestratorCallbackHandler {
                  invent one."
             )));
         };
+
+        // The deterministic exploitation workflow abandons a vuln at
+        // MAX_EXPLOIT_FAILURES; this tool bypassed that cap entirely, so the
+        // planner could re-propose the same dead vuln every turn. One vuln was
+        // dispatched 16 times in op-20260806-030246.
+        if self.state.is_exploit_abandoned(vuln_id).await {
+            debug!(
+                vuln_id = vuln_id,
+                "Refusing orchestrator exploit dispatch — vuln abandoned at max failures"
+            );
+            return Ok(CallbackResult::Continue(format!(
+                "Refused: {vuln_id} has already failed {} times and is abandoned for this \
+                 operation. Re-dispatching it will fail the same way. Pick a different \
+                 vuln_id, or unlock this path first (crack a hash, capture a credential \
+                 for the target domain, or resolve the missing enumeration data).",
+                crate::orchestrator::state::MAX_EXPLOIT_FAILURES
+            )));
+        }
+
+        let dispatcher = self
+            .dispatcher
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Dispatcher not configured"))?;
 
         let task_id = dispatcher.request_exploit(&vuln, priority).await?;
         info!(vuln_id = vuln_id, "Dispatched exploit task");

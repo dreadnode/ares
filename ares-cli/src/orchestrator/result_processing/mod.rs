@@ -633,10 +633,35 @@ pub async fn process_completed_task(
                         .await;
                 }
                 ContainmentSignal::KrbtgtRotated { domain, source } => {
-                    dispatcher
-                        .state
-                        .publish_krbtgt_rotated(&domain, &source)
-                        .await;
+                    // Realm-wide blast radius: publishing skips every
+                    // Kerberos-shaped credential_access task in the realm for
+                    // the rest of the op, so a lone mismatch must corroborate
+                    // before it spends that. Blue's own rotations do not come
+                    // through here — they arrive as OpStateEvents and are
+                    // applied in `state::replay` — so this gate cannot mask a
+                    // real containment action.
+                    let publish = {
+                        let mut state = dispatcher.state.write().await;
+                        let count = state
+                            .containment_krbtgt_mismatch_counts
+                            .entry(domain.to_lowercase())
+                            .or_insert(0);
+                        *count += 1;
+                        *count >= containment_recovery::KRBTGT_ROTATION_MIN_OBSERVATIONS
+                    };
+                    if publish {
+                        dispatcher
+                            .state
+                            .publish_krbtgt_rotated(&domain, &source)
+                            .await;
+                    } else {
+                        info!(
+                            domain = %domain,
+                            source = %source,
+                            "containment: single Kerberos key mismatch below rotation \
+                             threshold — deferring (needs corroboration)"
+                        );
+                    }
                 }
                 ContainmentSignal::CertificateRevoked { serial, ca, source } => {
                     dispatcher

@@ -161,7 +161,17 @@ run_ssm_cmd() {
 			--command-id "$cmd_id" \
 			--instance-id "$instance_id" \
 			--query "StatusDetails" --output text 2>/dev/null)
-		printf '\033[0;31m[ERROR]\033[0m SSM command failed (status: %s, details: %s)\n' "$status" "$details" >&2
+		case "$status" in
+		Failed | Cancelled | TimedOut)
+			printf '\033[0;31m[ERROR]\033[0m SSM command failed (status: %s, details: %s)\n' "$status" "$details" >&2
+			;;
+		*)
+			printf '\033[0;31m[ERROR]\033[0m Gave up polling after %ss — SSM command %s is still %s on %s. The payload is STILL RUNNING; this is a local poll-budget expiry, not a command failure.\n' \
+				"$timeout" "$cmd_id" "$status" "$instance_id" >&2
+			printf '\033[0;31m[ERROR]\033[0m Recovery: raise the run_ssm_cmd timeout for this call site, or follow the command with: aws ssm get-command-invocation --region %s --command-id %s --instance-id %s\n' \
+				"$AWS_REGION" "$cmd_id" "$instance_id" >&2
+			;;
+		esac
 		if [ "$details" = "Undeliverable" ]; then
 			printf '\033[0;31m[ERROR]\033[0m SSM could not deliver the command to %s (PingStatus likely ConnectionLost).\n' "$instance_id" >&2
 			printf '\033[0;31m[ERROR]\033[0m Recovery: reboot the instance ('\''aws ec2 reboot-instances --instance-ids %s'\'').\n' "$instance_id" >&2

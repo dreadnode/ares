@@ -683,3 +683,83 @@ async fn dispatch_lateral_still_rejects_cross_forest_target() {
     };
     assert!(msg.contains("REJECTED"), "got: {msg}");
 }
+
+fn make_vuln(vuln_id: &str, vuln_type: &str) -> ares_core::models::VulnerabilityInfo {
+    ares_core::models::VulnerabilityInfo {
+        vuln_id: vuln_id.into(),
+        vuln_type: vuln_type.into(),
+        target: "192.168.58.220".into(),
+        discovered_by: "test".into(),
+        discovered_at: chrono::Utc::now(),
+        details: {
+            let mut m = std::collections::HashMap::new();
+            m.insert("domain".into(), json!("contoso.local"));
+            m.insert("ca_name".into(), json!("CONTOSO-CA"));
+            m
+        },
+        recommended_agent: String::new(),
+        priority: 1,
+    }
+}
+
+fn exploit_call(vuln_id: &str) -> ToolCall {
+    ToolCall {
+        id: "exp-1".into(),
+        name: "dispatch_exploit".into(),
+        arguments: json!({ "vuln_id": vuln_id }),
+    }
+}
+
+#[tokio::test]
+async fn dispatch_exploit_refuses_a_vuln_abandoned_at_max_failures() {
+    let state = SharedState::new("test-op".to_string());
+    {
+        let mut s = state.write().await;
+        s.discovered_vulnerabilities.insert(
+            "adcs_esc1_dead".into(),
+            make_vuln("adcs_esc1_dead", "adcs_esc1"),
+        );
+    }
+    for _ in 0..crate::orchestrator::state::MAX_EXPLOIT_FAILURES {
+        state.record_exploit_failure("adcs_esc1_dead").await;
+    }
+
+    let handler = OrchestratorCallbackHandler::new_for_test(state);
+    let result = handler
+        .dispatch_exploit(&exploit_call("adcs_esc1_dead"))
+        .await
+        .unwrap();
+
+    let CallbackResult::Continue(msg) = result else {
+        panic!("expected a Continue refusal");
+    };
+    assert!(msg.contains("Refused"), "got: {msg}");
+    assert!(msg.contains("adcs_esc1_dead"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn dispatch_exploit_still_dispatches_below_the_failure_cap() {
+    let state = SharedState::new("test-op".to_string());
+    {
+        let mut s = state.write().await;
+        s.discovered_vulnerabilities.insert(
+            "adcs_esc1_live".into(),
+            make_vuln("adcs_esc1_live", "adcs_esc1"),
+        );
+    }
+    for _ in 0..(crate::orchestrator::state::MAX_EXPLOIT_FAILURES - 1) {
+        state.record_exploit_failure("adcs_esc1_live").await;
+    }
+
+    let handler = OrchestratorCallbackHandler::new_for_test(state);
+    // Below the cap the guard must fall through to the dispatcher, which this
+    // test handler does not have — proving the vuln was not refused.
+    let err = handler
+        .dispatch_exploit(&exploit_call("adcs_esc1_live"))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Dispatcher not configured"),
+        "a vuln below the cap must reach dispatch, got {err}"
+    );
+}

@@ -519,6 +519,32 @@ fn exploit_adcs_esc1() {
 }
 
 #[test]
+fn exploit_adcs_esc1_reads_parameters_nested_under_details() {
+    // The shape `Dispatcher::request_exploit` builds — the whole vulnerability
+    // record under `details`, nothing but vuln_type/target at the top level.
+    // Reading only the top level renders every parameter blank and the agent
+    // fails the task on a missing-parameter precondition.
+    let payload = serde_json::json!({
+        "vuln_id": "adcs_esc1_192.168.58.15_subca",
+        "vuln_type": "adcs_esc1",
+        "target": "192.168.58.15",
+        "details": {
+            "ca_name": "CONTOSO-CA",
+            "ca_host": "192.168.58.15",
+            "template_name": "SubCA",
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10"
+        }
+    });
+    let prompt = generate_task_prompt("exploit", "t-24b", &payload, None).unwrap();
+    assert!(prompt.contains("ADCS ADCS_ESC1 EXPLOITATION"));
+    assert!(prompt.contains("CONTOSO-CA"));
+    assert!(prompt.contains("SubCA"));
+    assert!(prompt.contains("contoso.local"));
+    assert!(prompt.contains("192.168.58.10"));
+}
+
+#[test]
 fn exploit_adcs_esc8() {
     let payload = serde_json::json!({
         "vuln_type": "adcs_esc8",

@@ -1435,7 +1435,8 @@ tasks:
 
         echo -e "{{.INFO}} Launching orchestrator on $INSTANCE_ID..."
 
-        run_ssm_cmd "$INSTANCE_ID" "$LAUNCH_PAYLOAD" 30 || exit 1
+        LAUNCH_SSM_TIMEOUT=$(( {{.ORCH_STOP_TIMEOUT}} + 120 ))
+        run_ssm_cmd "$INSTANCE_ID" "$LAUNCH_PAYLOAD" "$LAUNCH_SSM_TIMEOUT" || exit 1
 
         echo -e "{{.SUCCESS}} Operation $OP_ID launched"
         echo -e "{{.INFO}} Monitor: task ec2:runtime EC2_NAME={{.EC2_NAME}}"

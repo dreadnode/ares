@@ -113,11 +113,37 @@ fn domain_relative_sid(sid: &str) -> Option<&'static str> {
     }
 }
 
+/// True when `source_name` is still a raw SID string, i.e. neither the
+/// directory roster nor the well-known table resolved it to a principal name.
+///
+/// Trustees from another domain in the forest are the common case: the roster
+/// query runs against one domain, so a foreign-security-principal ACE keeps its
+/// `S-1-5-21-<other domain>-<rid>` form. There is no username to authenticate
+/// as, so every downstream exploit attempt returns `invalidCredentials`.
+pub(super) fn is_unresolved_sid(source_name: &str) -> bool {
+    let mut parts = source_name.split('-');
+    if parts.next() != Some("S") {
+        return false;
+    }
+    let mut count = 0;
+    for part in parts {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        count += 1;
+    }
+    count >= 3
+}
+
 /// True for ACE trustees whose rights are not an escalation primitive: system
-/// principals, and groups you would already need domain-level control to
-/// authenticate as. Shared with the BloodHound collector parser so both ACL
-/// sources filter identically.
+/// principals, groups you would already need domain-level control to
+/// authenticate as, and trustees that never resolved past their raw SID.
+/// Shared with the BloodHound collector parser so both ACL sources filter
+/// identically.
 pub(super) fn is_unactionable_acl_source(source_name: &str) -> bool {
+    if is_unresolved_sid(source_name) {
+        return true;
+    }
     let lower = source_name.to_lowercase();
     let lower = lower.strip_prefix("builtin\\").unwrap_or(&lower);
     matches!(
@@ -1684,6 +1710,11 @@ nTSecurityDescriptor:: {SD_GENERIC_ALL_B64}
 
         let output = format!(
             "\
+dn: CN=alice,DC=contoso,DC=local
+sAMAccountName: alice
+objectClass: user
+objectSid: S-1-5-21-1-2-1001
+
 dn: CN=victim,DC=contoso,DC=local
 sAMAccountName: victim
 objectClass: user
@@ -1837,6 +1868,31 @@ nTSecurityDescriptor:: {sd}
         // Operator groups that ARE an escalation primitive must stay publishable.
         assert!(!is_unactionable_acl_source("BUILTIN\\Backup Operators"));
         assert!(!is_unactionable_acl_source("BUILTIN\\Server Operators"));
+    }
+
+    #[test]
+    fn unresolved_raw_sid_is_an_unactionable_acl_source() {
+        // A cross-domain trustee the local roster cannot name. There is no
+        // username to authenticate as, so publishing it only produces
+        // invalidCredentials on every exploit attempt.
+        assert!(is_unactionable_acl_source(
+            "S-1-5-21-916080216-17955212-404331485-1009"
+        ));
+        assert!(is_unactionable_acl_source("S-1-5-32-1234"));
+        assert!(is_unactionable_acl_source("S-1-5-21-1-2-3-500"));
+    }
+
+    #[test]
+    fn resolved_principals_are_not_mistaken_for_raw_sids() {
+        assert!(!is_unresolved_sid("alice"));
+        assert!(!is_unresolved_sid("svc_sql"));
+        assert!(!is_unresolved_sid("Backup Operators"));
+        assert!(!is_unresolved_sid("BUILTIN\\Server Operators"));
+        // Malformed SID-looking strings must not be swallowed silently.
+        assert!(!is_unresolved_sid("S-1-5"));
+        assert!(!is_unresolved_sid("S-1-5-21-abc-2-3-1009"));
+        assert!(!is_unresolved_sid("S-"));
+        assert!(!is_unresolved_sid("SQL-01-A-B"));
     }
 
     #[test]

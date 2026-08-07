@@ -907,7 +907,7 @@ tasks:
               -e "s|__OTEL_TRACES_ENDPOINT__|{{.OTEL_TRACES_ENDPOINT}}|" \
               .taskfiles/ec2/scripts/launch-orchestrator.sh.tmpl > "$ORCH_SCRIPT"
 
-          if OUTPUT=$(run_ssm_cmd "$INSTANCE_ID" "$(cat "$ORCH_SCRIPT")" 30); then
+          if OUTPUT=$(run_ssm_cmd "$INSTANCE_ID" "$(cat "$ORCH_SCRIPT")" 300); then
             echo "$OUTPUT" | tee -a "{{.LOGFILE}}"
           else
             echo "ERROR: Failed to start orchestrator on $INSTANCE_ID" | tee -a "{{.LOGFILE}}" >&2

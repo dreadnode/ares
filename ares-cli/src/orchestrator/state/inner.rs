@@ -208,6 +208,14 @@ pub struct StateInner {
     // restart resets the budget, which re-tries rather than over-revokes.
     pub containment_reject_counts: HashMap<String, u32>,
 
+    // Per-realm count of `KRB_AP_ERR_MODIFIED` observations seen by the
+    // containment classifier. The realm is only marked krbtgt-rotated once the
+    // mismatch recurs `KRBTGT_ROTATION_MIN_OBSERVATIONS` times, because a single
+    // sighting skips every Kerberos-shaped credential_access task in the realm
+    // for the rest of the op. In-memory only, same as
+    // `containment_reject_counts`.
+    pub containment_krbtgt_mismatch_counts: HashMap<String, u32>,
+
     // Per-(dc, domain, principal) consecutive-`Transient` counter for
     // `auto_krbtgt_extraction`, keyed by `krbtgt_principal_attempt_key`. A
     // `Transient` outcome intentionally leaves state clean so genuine network
@@ -405,6 +413,7 @@ impl StateInner {
             forge_empty_dump: HashMap::new(),
             mssql_link_pivot_attempts: HashMap::new(),
             containment_reject_counts: HashMap::new(),
+            containment_krbtgt_mismatch_counts: HashMap::new(),
             krbtgt_transient_counts: HashMap::new(),
             crack_attempts: HashMap::new(),
             golden_ticket_forge_attempts: HashMap::new(),
