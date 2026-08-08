@@ -738,6 +738,54 @@ async fn dispatch_exploit_refuses_a_vuln_abandoned_at_max_failures() {
 }
 
 #[tokio::test]
+async fn dispatch_exploit_refuses_forest_pivot_vulns_owned_by_trust_automation() {
+    for vuln_type in ["forest_trust_escalation", "child_to_parent"] {
+        let vuln_id = format!("{vuln_type}_contoso.local_fabrikam.local");
+        let state = SharedState::new("test-op".to_string());
+        {
+            let mut s = state.write().await;
+            s.discovered_vulnerabilities
+                .insert(vuln_id.clone(), make_vuln(&vuln_id, vuln_type));
+        }
+
+        let handler = OrchestratorCallbackHandler::new_for_test(state);
+        let result = handler.dispatch_exploit(&exploit_call(&vuln_id)).await;
+
+        let Ok(CallbackResult::Continue(msg)) = result else {
+            panic!("{vuln_type} must be refused before the dispatcher lookup");
+        };
+        assert!(msg.contains("Refused"), "got: {msg}");
+        assert!(msg.contains(&vuln_id), "got: {msg}");
+        assert!(
+            msg.contains("TARGET realm"),
+            "the refusal must redirect the planner at the real blocker, got: {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dispatch_exploit_still_allows_acl_vulns_the_llm_path_can_land() {
+    let state = SharedState::new("test-op".to_string());
+    {
+        let mut s = state.write().await;
+        s.discovered_vulnerabilities.insert(
+            "acl_genericall_alice_bob".into(),
+            make_vuln("acl_genericall_alice_bob", "genericall"),
+        );
+    }
+
+    let handler = OrchestratorCallbackHandler::new_for_test(state);
+    let err = handler
+        .dispatch_exploit(&exploit_call("acl_genericall_alice_bob"))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Dispatcher not configured"),
+        "an ACL vuln must still reach dispatch, got {err}"
+    );
+}
+
+#[tokio::test]
 async fn dispatch_exploit_still_dispatches_below_the_failure_cap() {
     let state = SharedState::new("test-op".to_string());
     {

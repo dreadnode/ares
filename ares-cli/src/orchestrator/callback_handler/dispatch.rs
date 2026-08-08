@@ -241,6 +241,23 @@ impl OrchestratorCallbackHandler {
             )));
         }
 
+        if crate::orchestrator::exploitation::is_trust_automation_owned_vuln(&vuln.vuln_type) {
+            debug!(
+                vuln_id = vuln_id,
+                vuln_type = %vuln.vuln_type,
+                "Refusing orchestrator exploit dispatch — forest-pivot vuln is owned by auto_trust_follow"
+            );
+            return Ok(CallbackResult::Continue(format!(
+                "Refused: {vuln_id} is a {} vuln, which the trust automation owns end to end \
+                 (trust-key extraction → inter-realm ticket forge → secretsdump). Dispatching it \
+                 here produces an exploit task with no trust key and it always fails. The \
+                 automation retries on its own whenever new trust material lands, so do not \
+                 dispatch it. To unblock that forest, get a credential or certificate valid in \
+                 the TARGET realm instead — ADCS enrolment, a relay, or cracking a hash from it.",
+                vuln.vuln_type
+            )));
+        }
+
         let dispatcher = self
             .dispatcher
             .as_ref()

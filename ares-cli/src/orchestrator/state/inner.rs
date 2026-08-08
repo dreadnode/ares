@@ -86,6 +86,8 @@ pub struct StateInner {
     // can never be satisfied. Operation-scoped, in-memory only.
     pub exploit_failure_counts: HashMap<String, u32>,
 
+    pub adcs_unauth_retry_counts: HashMap<String, u32>,
+
     // Maps
     pub domain_controllers: HashMap<String, String>,
     pub netbios_to_fqdn: HashMap<String, String>,
@@ -386,6 +388,7 @@ impl StateInner {
             exploited_vulnerabilities: HashSet::new(),
             superseded_vulnerabilities: HashSet::new(),
             exploit_failure_counts: HashMap::new(),
+            adcs_unauth_retry_counts: HashMap::new(),
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),
             domain_sids: HashMap::new(),

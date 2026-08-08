@@ -164,6 +164,8 @@ pub(super) fn is_unactionable_acl_source(source_name: &str) -> bool {
             | "account operators"
             | "domain controllers"
             | "enterprise domain controllers"
+            | "cert publishers"
+            | "terminal server license servers"
     )
 }
 
@@ -1868,6 +1870,21 @@ nTSecurityDescriptor:: {sd}
         // Operator groups that ARE an escalation primitive must stay publishable.
         assert!(!is_unactionable_acl_source("BUILTIN\\Backup Operators"));
         assert!(!is_unactionable_acl_source("BUILTIN\\Server Operators"));
+    }
+
+    #[test]
+    fn default_blanket_ace_trustees_are_unactionable() {
+        assert!(is_unactionable_acl_source("Cert Publishers"));
+        assert!(is_unactionable_acl_source(
+            "BUILTIN\\Terminal Server License Servers"
+        ));
+        assert!(is_unactionable_acl_source(
+            "Terminal Server License Servers"
+        ));
+        assert_eq!(
+            well_known_sid("S-1-5-32-561").map(|n| n.contains("Terminal")),
+            Some(true)
+        );
     }
 
     #[test]

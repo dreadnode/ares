@@ -564,24 +564,39 @@ pub async fn auto_adcs_enumeration(
                             && vulns_found == 0
                             && find_result_is_unauthenticated(&exec.output)
                         {
-                            warn!(
-                                task_id = %task_id_bg,
-                                ca_host = %host_ip_bg,
-                                "Deterministic certipy_find enumerated nothing because the bind never authenticated — clearing dedup so a later credential can retry this CA"
-                            );
-                            dispatcher_bg
+                            let (attempts, may_retry) = dispatcher_bg
                                 .state
-                                .write()
-                                .await
-                                .unmark_processed(DEDUP_ADCS_SERVERS, &dedup_key_bg);
-                            let _ = dispatcher_bg
-                                .state
-                                .unpersist_dedup(
-                                    &dispatcher_bg.queue,
-                                    DEDUP_ADCS_SERVERS,
-                                    &dedup_key_bg,
-                                )
+                                .record_adcs_unauth_retry(&dedup_key_bg)
                                 .await;
+                            if may_retry {
+                                warn!(
+                                    task_id = %task_id_bg,
+                                    ca_host = %host_ip_bg,
+                                    attempts,
+                                    max_attempts = crate::orchestrator::state::MAX_ADCS_UNAUTH_RETRIES,
+                                    "Deterministic certipy_find enumerated nothing because the bind never authenticated — clearing dedup so a later credential can retry this CA"
+                                );
+                                dispatcher_bg
+                                    .state
+                                    .write()
+                                    .await
+                                    .unmark_processed(DEDUP_ADCS_SERVERS, &dedup_key_bg);
+                                let _ = dispatcher_bg
+                                    .state
+                                    .unpersist_dedup(
+                                        &dispatcher_bg.queue,
+                                        DEDUP_ADCS_SERVERS,
+                                        &dedup_key_bg,
+                                    )
+                                    .await;
+                            } else {
+                                warn!(
+                                    task_id = %task_id_bg,
+                                    ca_host = %host_ip_bg,
+                                    attempts,
+                                    "Deterministic certipy_find bind never authenticated after the retry cap — keeping dedup locked for this credential; a different credential gets its own key"
+                                );
+                            }
                         }
                         if let Some(err) = exec.error {
                             warn!(

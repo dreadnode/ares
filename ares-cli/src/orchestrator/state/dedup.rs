@@ -19,6 +19,8 @@ use crate::orchestrator::task_queue::TaskQueueCore;
 /// 5 attempts × 120s cooldown = ~10 min ceiling per stuck vuln.
 pub const MAX_EXPLOIT_FAILURES: u32 = 5;
 
+pub const MAX_ADCS_UNAUTH_RETRIES: u32 = 2;
+
 impl SharedState {
     /// Mark a vulnerability as exploited.
     ///
@@ -213,6 +215,16 @@ impl SharedState {
         *count
     }
 
+    pub async fn record_adcs_unauth_retry(&self, dedup_key: &str) -> (u32, bool) {
+        let mut state = self.inner.write().await;
+        let count = state
+            .adcs_unauth_retry_counts
+            .entry(dedup_key.to_string())
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+        (*count, *count <= MAX_ADCS_UNAUTH_RETRIES)
+    }
+
     /// Returns true once `vuln_id` has accumulated `MAX_EXPLOIT_FAILURES`
     /// consecutive failures. Checked by the exploitation workflow before
     /// dispatching a vuln from the priority queue.
@@ -303,7 +315,7 @@ fn compute_superseded(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_superseded, MAX_EXPLOIT_FAILURES};
+    use super::{compute_superseded, MAX_ADCS_UNAUTH_RETRIES, MAX_EXPLOIT_FAILURES};
     use crate::orchestrator::state::SharedState;
     use crate::orchestrator::task_queue::TaskQueueCore;
     use ares_core::models::VulnerabilityInfo;
@@ -728,6 +740,39 @@ mod tests {
         );
         // Different vuln tracked independently.
         assert_eq!(state.record_exploit_failure("other_vuln").await, 1);
+    }
+
+    #[tokio::test]
+    async fn adcs_unauth_retry_stops_clearing_dedup_at_the_cap() {
+        let state = SharedState::new("op-1".to_string());
+        let key = "192.168.58.50:cred:alice@contoso.local";
+        for attempt in 1..=MAX_ADCS_UNAUTH_RETRIES {
+            let (count, may_retry) = state.record_adcs_unauth_retry(key).await;
+            assert_eq!(count, attempt);
+            assert!(may_retry, "attempt {attempt} is still within the cap");
+        }
+        let (count, may_retry) = state.record_adcs_unauth_retry(key).await;
+        assert_eq!(count, MAX_ADCS_UNAUTH_RETRIES + 1);
+        assert!(
+            !may_retry,
+            "past the cap the CA must stay dedup-locked for this credential — \
+             clearing it is what turned the retry into a ~30s hot loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn adcs_unauth_retry_is_scoped_per_credential_key() {
+        let state = SharedState::new("op-1".to_string());
+        let exhausted = "192.168.58.50:cred:alice@contoso.local";
+        for _ in 0..=MAX_ADCS_UNAUTH_RETRIES {
+            state.record_adcs_unauth_retry(exhausted).await;
+        }
+        assert!(!state.record_adcs_unauth_retry(exhausted).await.1);
+        let (count, may_retry) = state
+            .record_adcs_unauth_retry("192.168.58.50:cred:bob@contoso.local")
+            .await;
+        assert_eq!(count, 1);
+        assert!(may_retry);
     }
 
     #[tokio::test]
