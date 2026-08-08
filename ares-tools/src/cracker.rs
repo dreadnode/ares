@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -721,6 +722,18 @@ pub async fn crack_with_hashcat(args: &Value) -> Result<ToolOutput> {
     let max_time_secs = max_time_minutes * 60;
     let use_dynamic = optional_bool(args, "use_dynamic_wordlist").unwrap_or(true);
 
+    let hash_count = hash_value.lines().filter(|l| !l.trim().is_empty()).count();
+    info!(
+        tool = "crack_with_hashcat",
+        mode,
+        hashes = hash_count,
+        hash_kind = hash_kind(hash_value),
+        max_time_secs,
+        status = "queued",
+        "crack job queued for the hashcat pool"
+    );
+    let queued_at = Instant::now();
+
     // Gate the whole crack job through the hashcat pool. hashcat owns the GPU
     // as a small fixed pool; the process-level permit is held
     // until this function returns (drop releases it). AES Kerberoast also takes
@@ -738,6 +751,16 @@ pub async fn crack_with_hashcat(args: &Value) -> Result<ToolOutput> {
     // hashcat writing one at all; the unique name is belt-and-suspenders for
     // any hashcat run that overlaps this one on the same box.
     let session = next_crack_session("hc");
+    info!(
+        tool = "crack_with_hashcat",
+        mode,
+        hashes = hash_count,
+        hash_kind = hash_kind(hash_value),
+        session = %session,
+        queued_secs = queued_at.elapsed().as_secs(),
+        status = "running",
+        "crack job admitted to the hashcat pool"
+    );
 
     // Write hash to a temp file that persists until command completes.
     let mut hash_file = tempfile::NamedTempFile::new()?;
@@ -961,8 +984,10 @@ pub async fn crack_with_hashcat(args: &Value) -> Result<ToolOutput> {
         mode,
         // How many hashes this run actually loaded (batch size): a `no_plaintext`
         // on a large batch vs a single hash reads very differently.
-        hashes = hash_value.lines().filter(|l| !l.trim().is_empty()).count(),
+        hashes = hash_count,
         hash_kind = hash_kind(hash_value),
+        session = %session,
+        elapsed_secs = queued_at.elapsed().as_secs(),
         cracked_count = cracked,
         // Why the run ended, distilled from hashcat's own output — so a
         // `no_plaintext` that is actually a GPU/kernel failure is visible in the
