@@ -16,11 +16,6 @@
 //! - **Kerberos ccaches** in `/tmp/ares-tickets` — a still-valid TGT would let
 //!   a later op skip re-authentication / re-compromise.
 //!
-//! Not covered (documented gap): the **remote crackd** potfile lives on a
-//! separate service this process can't reach — crackd must run hashcat with
-//! `--potfile-disable` server-side (as ares already does locally). The pass
-//! logs a warning when crackd is configured.
-//!
 //! Opt out with `ARES_KEEP_WORKSPACE=1` (carry state between engagements / dev
 //! loop), mirroring `ARES_KEEP_POTFILE`.
 
@@ -62,15 +57,6 @@ pub fn sanitize_workspace() -> SanitizeReport {
         nxc_paths_removed: reset_nxc_workspace(nxc_home().as_deref()),
         ccaches_removed: reset_ccaches(Path::new(ARES_TICKETS_DIR)),
     };
-
-    if crate::cracker::remote_crackd_configured() {
-        warn!(
-            target: "sanitize",
-            "remote crackd is configured (HASHCAT_SERVICE_URL): its server-side potfile is NOT \
-             reset from here — ensure crackd runs hashcat with --potfile-disable to avoid \
-             cross-op crack leakage",
-        );
-    }
 
     info!(
         target: "sanitize",

@@ -474,15 +474,6 @@ pub(crate) fn reset_hashcat_potfile() -> bool {
     }
 }
 
-/// Whether a remote crackd service is wired up (`HASHCAT_SERVICE_URL`). The
-/// sanitizer uses this to warn that crackd's server-side potfile is outside
-/// this process's reach.
-pub(crate) fn remote_crackd_configured() -> bool {
-    std::env::var("HASHCAT_SERVICE_URL")
-        .map(|s| !s.is_empty())
-        .unwrap_or(false)
-}
-
 /// Truncate hashcat's potfile the first time the cracker worker sees a new
 /// `operation_id`, so plaintexts cracked in a prior op don't leak into the
 /// next as free candidates in the known-password reuse pass
