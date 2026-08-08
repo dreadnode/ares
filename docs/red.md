@@ -768,13 +768,9 @@ When any agent discovers a credential:
 
 ## Task Flow Example
 
-> **Notation**: `dispatch_recon(...)` / `complete_operation()` below are real tool
-> names, but most dispatches in a run are submitted by the deterministic
-> automations in `ares-cli/src/orchestrator/automation/` rather than called by a
-> model. The orchestrator agent calls them when it is planning (and, under
-> `ARES_ORCHESTRATOR_MEDIATION`, when approving proposed work); completion is
-> decided by `orchestrator/completion.rs` unless the orchestrator sets the
-> `completed` flag via `complete_operation`.
+The notation caveat from [Operation Lifecycle](#operation-lifecycle) applies
+here too: these are real tool names, but most dispatches in a run come from the
+deterministic automations rather than a model.
 
 
 ```text
@@ -816,46 +812,6 @@ When any agent discovers a credential:
 └─────────────┘
 ```
 
-## Anti-Patterns to Avoid
-
-### Orchestrator Should NOT
-
-These rules are enforced structurally rather than by prompting: the orchestrator
-is Rust, holds no attack tools, and no LLM agent is given a `dispatch_*` tool.
-Kept as design intent for anyone reintroducing a coordinating agent.
-
-
-1. **Execute reconnaissance tools directly**
-   - Wrong: Orchestrator calls `nmap_scan`, `enumerate_users`
-   - Right: Orchestrator dispatches to RECON
-
-2. **Execute credential attacks directly**
-   - Wrong: Orchestrator calls `secretsdump`, `kerberoast`
-   - Right: Orchestrator dispatches to CREDENTIAL_ACCESS
-
-3. **Run exploitation tools**
-   - Wrong: Orchestrator calls `certipy_req_esc1`, `mssql_exec_linked`
-   - Right: Orchestrator queues vulnerability for PRIVESC
-
-4. **Perform lateral movement**
-   - Wrong: Orchestrator calls `psexec`, `evil_winrm`
-   - Right: Orchestrator dispatches to LATERAL
-
-5. **Crack hashes**
-   - Wrong: Orchestrator calls `hashcat`, `john`
-   - Right: Orchestrator dispatches to CRACKER
-
-### Workers Should NOT
-
-1. **Make strategic decisions**
-   - Workers execute assigned tasks, not decide what to attack next
-
-2. **Dispatch to other workers**
-   - Only the orchestrator coordinates between agents
-
-3. **Hold onto results**
-   - Results should be reported immediately for broadcast
-
 ## Debugging and Manual Testing
 
 ### Manually Running Tools on Agent Pods
@@ -885,17 +841,8 @@ kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
     nmap -sV --top-ports 1000 192.168.58.0/24
 ```
 
-#### Available Tools by Agent Pod
-
-| Agent Pod | Installed Tools |
-| --------- | --------------- |
-| `ares-recon-agent-*` | nmap, netexec, enum4linux, bloodhound-python, certipy, ldapsearch, adidnsdump |
-| `ares-credential-access-agent-*` | secretsdump, sprayhound, lsassy, gMSADumper, targetedKerberoast, smbclient |
-| `ares-cracker-agent-*` | hashcat, john, wordlists (rockyou, seclists) |
-| `ares-acl-agent-*` | bloodyAD, pywhisker, dacledit, targetedKerberoast |
-| `ares-privesc-agent-*` | certipy, krbrelayx, nopac, impacket-findDelegation, impacket-mssqlclient |
-| `ares-lateral-movement-agent-*` | evil-winrm, xfreerdp, pth-winexe, impacket-psexec, impacket-wmiexec, impacket-smbexec |
-| `ares-coercion-agent-*` | responder, ntlmrelayx, coercer, petitpotam, mitm6 |
+Which tools live on which pod is listed under
+[Installed Tools by Agent Role](#installed-tools-by-agent-role).
 
 ## File Reference
 
@@ -925,76 +872,29 @@ kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
 Each agent pod has role-specific pentesting tools installed via Ansible. Tool
 availability can vary by distro and role flags.
 
-### Base Tools (All Agents)
+Every agent inherits a base layer from `ansible/playbooks/ares/base.yml` →
+`dreadnode.nimbus_range.base`: the `ares` Rust binary, python3, the usual
+shell utilities, network diagnostics (dig, tcpdump, iproute2), debugging
+(strace, lsof), and build toolchain. The orchestrator pod gets **only** that
+base — it holds no pentesting tools, by design.
 
-All agents inherit these foundational tools:
+Each worker adds one role from the `l50.arsenal` collection, via the matching
+playbook in `ansible/playbooks/ares/`:
 
-- **Runtime**: Rust binary (`ares worker`), python3, pip3
-- **Utilities**: git, curl, wget, netcat-traditional, vim, jq, tmux, htop
-- **Network diagnostics**: dnsutils (dig, nslookup), net-tools, iproute2, tcpdump, telnet
-- **Debugging**: procps (ps, top), strace, lsof
-- **Build**: build-essential, libffi-dev, libssl-dev
+| Role | Playbook → arsenal role | Tools |
+| ---- | ----------------------- | ----- |
+| RECON | `recon.yml` → `recon_tools` | nmap; ldapsearch; enum4linux, enum4linux-ng, rpcclient; dig, nslookup, whois, adidnsdump; netexec, bloodhound-python, certipy; impacket-GetNPUsers, impacket-GetUserSPNs |
+| CREDENTIAL_ACCESS | `credential_access.yml` → `credential_access_tools` | smbclient, rpcclient; sprayhound; targetedKerberoast; lsassy, gMSADumper; impacket-GetNPUsers, impacket-GetUserSPNs, impacket-secretsdump |
+| CRACKER | `cracker.yml` → `cracking_tools` | hashcat, john; rockyou + seclists under `/usr/share/wordlists/`; GPU builds add ocl-icd-libopencl1, opencl-headers, clinfo |
+| ACL | `acl_abuse.yml` → `acl_tools` | bloodyAD, pywhisker; targetedKerberoast; rpcclient; impacket-dacledit |
+| PRIVESC | `privesc.yml` → `privesc_tools` | certipy; lsassy; nopac, printnightmare, zerologon; krbrelayx, printerbug, addspn, dnstool; impacket-findDelegation, -getST, -getTGT, -rbcd, -addcomputer, -lookupsid, -mssqlclient, -raiseChild, -ticketer, -secretsdump, -psexec; SharpGPOAbuse (local, under `mono`, speaks LDAP to the DC), pygpoabuse |
+| LATERAL | `lateral_movement.yml` → `lateral_movement_tools` | evil-winrm; xfreerdp (pass-the-hash capable); sshpass; smbclient; proxychains4; pth-winexe, pth-smbclient, pth-rpcclient, pth-net, pth-wmic; impacket-psexec, -wmiexec, -smbexec, -secretsdump |
+| COERCION | `coercion.yml` → `coercion_tools` | responder, mitm6; coercer, petitpotam, dfscoerce; krbrelayx, printerbug, addspn, dnstool; impacket-ntlmrelayx |
 
-### Orchestrator Service Pod
+> **Note**: netexec is installed on RECON only. Reaching for it on the
+> credential-access pod is a common and confusing failure.
 
-- **Runtime**: Rust binary (`ares orchestrator`)
-- **Redis client**: For dispatcher and state management
-- **No pentesting tools**: Orchestrator only coordinates, never executes tools directly
-
-### RECON Agent
-
-Provisioned by: `ansible/playbooks/ares/recon.yml` → `dreadnode.nimbus_range.recon_tools`
-
-- **Network scanning**: nmap
-- **LDAP**: ldapsearch (from ldap-utils)
-- **SMB enumeration**: enum4linux, enum4linux-ng, rpcclient
-- **DNS**: dig, nslookup, whois, adidnsdump
-- **AD tools**: netexec, bloodhound-python, certipy
-- **Impacket**: impacket-GetNPUsers, impacket-GetUserSPNs
-
-### CREDENTIAL_ACCESS Agent
-
-Provisioned by: `ansible/playbooks/ares/credential_access.yml` → `dreadnode.nimbus_range.credential_access_tools`
-
-- **SMB**: smbclient, rpcclient
-- **Password spraying**: sprayhound
-- **Kerberoasting**: targetedKerberoast
-- **Credential extraction**: lsassy, gMSADumper
-- **Impacket**: impacket-GetNPUsers, impacket-GetUserSPNs, impacket-secretsdump
-
-> **Note**: netexec is NOT installed on this agent (only on RECON).
-
-### CRACKER Agent
-
-Provisioned by: `ansible/playbooks/ares/cracker.yml` → `dreadnode.nimbus_range.cracking_tools`
-
-- **Cracking**: hashcat, john
-- **Wordlists**: rockyou (`/usr/share/wordlists/rockyou.txt`), seclists (`/usr/share/wordlists/seclists/`)
-- **GPU support** (when enabled): ocl-icd-libopencl1, opencl-headers, clinfo
-
-### ACL Agent
-
-Provisioned by: `ansible/playbooks/ares/acl_abuse.yml` → `dreadnode.nimbus_range.acl_tools`
-
-- **ACL abuse**: bloodyAD, pywhisker
-- **Kerberoasting**: targetedKerberoast
-- **SMB**: rpcclient
-- **Impacket**: impacket-dacledit
-
-### PRIVESC Agent
-
-Provisioned by: `ansible/playbooks/ares/privesc.yml` → `dreadnode.nimbus_range.privesc_tools`
-
-- **ADCS**: certipy
-- **Credential extraction**: lsassy
-- **CVE exploits**: nopac, printnightmare, zerologon
-- **Kerberos relay**: krbrelayx, printerbug, addspn, dnstool
-- **Impacket**: impacket-findDelegation, impacket-getST, impacket-getTGT, impacket-rbcd,
-  impacket-addcomputer, impacket-lookupsid, impacket-mssqlclient, impacket-raiseChild,
-  impacket-ticketer, impacket-secretsdump, impacket-psexec
-- **GPO abuse**: SharpGPOAbuse (run locally under `mono`, speaks LDAP to the DC), pygpoabuse
-
-#### On-target payload staging
+### On-target payload staging
 
 Ares stages a Windows binary on an `impacket-smbserver` share hosted by the PRIVESC
 worker and executes it over its UNC path through MSSQL `xp_cmdshell`
@@ -1020,7 +920,7 @@ UNC-launch behaviour observed:
 
 - **PrintSpoofer** — `PrintSpoofer/PrintSpoofer64.exe`, native PE, UNC-safe, T1134.001
 
-#### Provisioned but NOT reachable
+### Provisioned but NOT reachable
 
 Still installed on the PRIVESC pod with no registry entry:
 
@@ -1055,24 +955,3 @@ The exploitation queue has not caught up. `seimpersonate` is still declined by n
 `exploitation.rs::NO_EXECUTION_PRIMITIVE_VULN_TYPES`, so the tool is reachable only as an
 LLM-directed call — an automated dispatch on a `seimpersonate` finding is still dropped
 before it reaches the privesc agent.
-
-### LATERAL Agent
-
-Provisioned by: `ansible/playbooks/ares/lateral_movement.yml` → `dreadnode.nimbus_range.lateral_movement_tools`
-
-- **WinRM**: evil-winrm
-- **RDP**: xfreerdp (pass-the-hash capable)
-- **SSH**: sshpass
-- **SMB**: smbclient
-- **Pivoting**: proxychains4
-- **Pass-the-Hash**: pth-winexe, pth-smbclient, pth-rpcclient, pth-net, pth-wmic (from passing-the-hash package)
-- **Impacket**: impacket-psexec, impacket-wmiexec, impacket-smbexec, impacket-secretsdump
-
-### COERCION Agent
-
-Provisioned by: `ansible/playbooks/ares/coercion.yml` → `dreadnode.nimbus_range.coercion_tools`
-
-- **Poisoning**: responder, mitm6
-- **Coercion**: coercer, petitpotam, dfscoerce
-- **Kerberos relay**: krbrelayx, printerbug, addspn, dnstool
-- **NTLM relay**: impacket-ntlmrelayx

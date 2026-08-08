@@ -489,14 +489,14 @@ config/                           # Configuration files
 
 ansible/                          # Ansible collection: dreadnode.nimbus_range v1.5.0
   playbooks/ares/                 # Agent provisioning playbooks
-  roles/                          # 14 roles (8 agent tool roles + base + infra)
+  roles/                          # base + infra roles (tool roles live in l50.arsenal)
 
-warpgate-templates/               # Container image build templates
-  ares-python-base/               # Base: Kali + security tool dependencies
-  ares-python-orchestrator/       # Orchestrator: Rust binary + Redis
-  ares-python-worker/             # Generic worker
-  ares-python-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
-  ares-python-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
+warpgate-templates/templates/     # Container image build templates
+  ares-base/                      # Base: Kali + security tool dependencies
+  ares-orchestrator/              # Orchestrator: Rust binary + Redis
+  ares-worker/                    # Generic worker
+  ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
+  ares-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
 
 infra/                            # Terragrunt deployment configs
 modules/                          # Terraform modules
@@ -527,8 +527,8 @@ Built with [Warpgate](https://github.com/cowdogmoo/warpgate). Each template
 uses Ansible playbooks for tool provisioning:
 
 ```bash
-PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-python-base
-PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-python-recon-agent
+PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/templates/ares-base
+PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/templates/ares-recon-agent
 ```
 
 See [Infrastructure Reference](docs/infrastructure.md) for full deployment
@@ -726,7 +726,7 @@ Precedence is per-context, not a single chain:
 
 Ares supports OpenTelemetry for traces and metrics, with console and OTLP
 export. Grafana integration provides dashboards for operation monitoring
-via the [Grafana MCP](docs/grafana_mcp_usage.md) server.
+via the [Grafana MCP](docs/grafana-mcp.md) server.
 
 ## Contributing
 

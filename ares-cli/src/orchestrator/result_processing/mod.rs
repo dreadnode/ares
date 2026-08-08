@@ -565,11 +565,11 @@ pub async fn process_completed_task(
     // scoreboard credits the primitive.
     let task_technique = task_technique_from_pending(dispatcher, task_id).await;
 
-    // Blue containment classification (Option A actuators). When a red tool
-    // call fails in a way that looks like blue took action, surface it as a
-    // state event so the exploitation queue can drop dependent work and the
-    // LLM prompt reflects "this credential/host/cert/realm is dead". See
-    // docs/blue-response-actuators.md § Red side — required changes.
+    // Blue containment classification. When a red tool call fails in a way
+    // that looks like blue took action, surface it as a state event so the
+    // exploitation queue can drop dependent work and the LLM prompt reflects
+    // "this credential/host/cert/realm is dead". See docs/blue.md § How red
+    // reacts.
     {
         use containment_recovery::ContainmentSignal;
         let signals = containment_recovery::classify_containment_signals(

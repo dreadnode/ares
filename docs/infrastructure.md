@@ -17,11 +17,11 @@ environment -- Kubernetes, Docker Compose, standalone containers, or bare metal.
 ```text
 ansible/                            Ansible collection (dreadnode.nimbus_range v1.5.0)
   galaxy.yml                        Collection metadata (namespace: dreadnode, name: nimbus_range)
-  requirements.yml                  Collection dependencies (amazon.aws, ansible.windows, etc.)
+  requirements.yml                  Collection dependencies
   ansible.cfg                       Ansible config (connection plugins, timeouts)
   playbooks/
     ares/                           Agent provisioning playbooks
-      base.yml                      Base image (Python 3.13.7, uv, workspace /ares)
+      base.yml                      Base image (workspace /ares, ares binary)
       recon.yml                     Recon agent (nmap, netexec, bloodhound, certipy)
       credential_access.yml         Credential agent (sprayhound, lsassy, impacket)
       cracker.yml                   Cracker agent (hashcat, john, wordlists)
@@ -30,40 +30,46 @@ ansible/                            Ansible collection (dreadnode.nimbus_range v
       lateral_movement.yml          Lateral agent (evil-winrm, xfreerdp, pth-*)
       coercion.yml                  Coercion agent (responder, mitm6, ntlmrelayx)
       goad_attack_box.yml           All-in-one attack workstation
+      goad_attack_box_configure.yml Post-build configuration for the attack box
+      runtime_nats.yml              NATS runtime provisioning
+      logrotate.yml                 Log rotation for /var/log/ares
     linux/
-      attacker_setup.yml            Linux attacker box (SSM + CloudWatch + Fluent Bit)
+      attacker_setup.yml            Linux attacker box (SSM + CloudWatch + log shipping)
       sliver.yml                    Sliver C2 server setup
+      mythic.yml                    Mythic C2 server setup
     windows/
       target_setup.yml              Windows target telemetry setup
-  roles/
+  roles/                            Only infrastructure roles live here
     base/                           System deps + workspace setup
-    recon_tools/                    Network scanning and AD enumeration tools
-    credential_access_tools/        Password attacks and credential extraction
-    cracking_tools/                 Hashcat, John, wordlists
-    acl_tools/                      AD ACL exploitation
-    privesc_tools/                  Privilege escalation tools
-    lateral_movement_tools/         Remote access and pass-the-hash
-    coercion_tools/                 NTLM poisoning and relay
-    aws_ssm_agent/                  AWS Systems Manager agent
-    aws_cloudwatch_agent/           CloudWatch metrics + logs
-    fluent_bit/                     Log forwarding to OpenSearch
-    alloy/                          Grafana Alloy (observability)
-    mythic/                         Mythic C2 framework
-    dc_audit_sacl/                  Domain controller audit SACLs
+    fluent_bit/                     Log forwarding
+    vector/                         Log/metric pipeline
+    nats/                           NATS JetStream server
+    redis/                          Redis server
   plugins/modules/
     vnc_pw.py                       VNC password management
     getent_passwd.py                Cross-platform user enumeration
     merge_list_dicts_into_list.py   Data transformation utility
 
-warpgate-templates/                 Container image build templates
+warpgate-templates/templates/       Container image build templates
   ares-base/                        Base: Kali + Ansible base role + security tools
   ares-orchestrator/                Orchestrator: unified Ares binary + Redis & NATS clients
+  ares-cli/                         CLI-only image
   ares-worker/                      Generic worker (inherits ares-base)
   ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
   ares-cracker-{agent-gpu,base-gpu}/
   ares-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
   ares-golden-image/                All-in-one red team EC2 AMI (all tools)
+  ares-golden-azure/                Azure variant of the golden image
+  ares-attack-box-proxmox/          Proxmox attack box
+  ares-replay-stack/                Benchmark replay observability stack AMI
 ```
+
+**The pentesting tool roles are not in this repo.** `recon_tools`,
+`credential_access_tools`, `cracking_tools`, `acl_tools`, `privesc_tools`,
+`lateral_movement_tools` and `coercion_tools` live in the external
+`l50.arsenal` collection, which `ansible/requirements.yml` tracks at `main`.
+Only `base` is local (`dreadnode.nimbus_range.base`). Editing a tool list means
+editing arsenal, not this tree.
 
 ## State & Transport Layer
 
@@ -147,20 +153,20 @@ out, and the event log doesn't reach that far back.
 
 ```text
 kalilinux/kali-rolling
-  └── ares-python-base (apt + Ansible base role + Rust binaries)
-        ├── ares-python-recon-agent         (+recon_tools)
-        ├── ares-python-credential-access-agent (+credential_access_tools)
-        ├── ares-python-cracker-agent       (+cracking_tools)
-        ├── ares-python-acl-agent           (+acl_tools)
-        ├── ares-python-privesc-agent       (+privesc_tools)
-        ├── ares-python-lateral-movement-agent (+lateral_movement_tools)
-        ├── ares-python-coercion-agent      (+coercion_tools)
-        ├── ares-python-blue-*              (blue team agents)
-        └── ares-python-worker              (generic worker, no extra tools)
+  └── ares-base (apt + Ansible base role + Rust binaries)
+        ├── ares-recon-agent              (+recon_tools)
+        ├── ares-credential-access-agent  (+credential_access_tools)
+        ├── ares-cracker-agent            (+cracking_tools)
+        ├── ares-acl-agent                (+acl_tools)
+        ├── ares-privesc-agent            (+privesc_tools)
+        ├── ares-lateral-movement-agent   (+lateral_movement_tools)
+        ├── ares-coercion-agent           (+coercion_tools)
+        ├── ares-blue-*                   (blue team agents)
+        └── ares-worker                   (generic worker, no extra tools)
 
 nvidia/cuda:12.6.0-runtime-ubuntu24.04
-  └── ares-python-cracker-base-gpu (hashcat compiled from source with CUDA)
-        └── ares-python-cracker-agent-gpu (+john, wordlists)
+  └── ares-cracker-base-gpu (hashcat compiled from source with CUDA)
+        └── ares-cracker-agent-gpu (+john, wordlists)
 
 debian:bookworm-slim
   └── ares-orchestrator (unified `ares` binary, no Ansible)
@@ -177,13 +183,13 @@ export PROVISION_REPO_PATH=./ansible
 export GITHUB_TOKEN=ghp_...
 
 # Build base first (all agents depend on it)
-warpgate build warpgate-templates/ares-python-base
+warpgate build warpgate-templates/templates/ares-base
 
 # Build individual agent
-warpgate build warpgate-templates/ares-python-recon-agent
+warpgate build warpgate-templates/templates/ares-recon-agent
 
 # Build all agent images
-for t in warpgate-templates/ares-*/; do
+for t in warpgate-templates/templates/ares-*/; do
   warpgate build "$t"
 done
 ```
@@ -226,14 +232,14 @@ GPU templates (`ares-python-cracker-agent-gpu`, `ares-python-cracker-base-gpu`) 
 
 | Playbook | Template | Ansible Role | Key Tools |
 | --- | --- | --- | --- |
-| `base.yml` | `ares-python-base` | `base` | Rust binaries, security tool deps, /ares workspace |
-| `recon.yml` | `ares-python-recon-agent` | `recon_tools` | nmap, netexec, bloodhound, certipy, impacket |
-| `credential_access.yml` | `ares-python-credential-access-agent` | `credential_access_tools` | sprayhound, lsassy, gMSADumper, impacket |
-| `cracker.yml` | `ares-python-cracker-agent` | `cracking_tools` | hashcat, john, rockyou, seclists |
-| `acl_abuse.yml` | `ares-python-acl-agent` | `acl_tools` | bloodyAD, pywhisker, dacledit |
-| `privesc.yml` | `ares-python-privesc-agent` | `privesc_tools` | certipy, krbrelayx, nopac, potato, SharpGPOAbuse |
-| `lateral_movement.yml` | `ares-python-lateral-movement-agent` | `lateral_movement_tools` | evil-winrm, xfreerdp, pth-*, impacket |
-| `coercion.yml` | `ares-python-coercion-agent` | `coercion_tools` | responder, mitm6, coercer, ntlmrelayx |
+| `base.yml` | `ares-base` | `dreadnode.nimbus_range.base` | Rust binaries, security tool deps, /ares workspace |
+| `recon.yml` | `ares-recon-agent` | `l50.arsenal.recon_tools` | nmap, netexec, bloodhound, certipy, impacket |
+| `credential_access.yml` | `ares-credential-access-agent` | `l50.arsenal.credential_access_tools` | sprayhound, lsassy, gMSADumper, impacket |
+| `cracker.yml` | `ares-cracker-agent` | `l50.arsenal.cracking_tools` | hashcat, john, rockyou, seclists |
+| `acl_abuse.yml` | `ares-acl-agent` | `l50.arsenal.acl_tools` | bloodyAD, pywhisker, dacledit |
+| `privesc.yml` | `ares-privesc-agent` | `l50.arsenal.privesc_tools` | certipy, krbrelayx, nopac, potato, SharpGPOAbuse |
+| `lateral_movement.yml` | `ares-lateral-movement-agent` | `l50.arsenal.lateral_movement_tools` | evil-winrm, xfreerdp, pth-*, impacket |
+| `coercion.yml` | `ares-coercion-agent` | `l50.arsenal.coercion_tools` | responder, mitm6, coercer, ntlmrelayx |
 | `goad_attack_box.yml` | `ares-golden-image` | all roles | All red team tools (AMI, not container) |
 
 The `tools.yaml` file at the repo root is the single source of truth for
@@ -251,14 +257,20 @@ ansible-galaxy collection install -r requirements.yml
 
 ### Collection Dependencies
 
-- `amazon.aws` 11.2.0
-- `ansible.windows` 3.5.0
-- `community.windows` 3.1.0
-- `community.docker` 5.0.6
-- `community.general` 12.4.0
-- `grafana.grafana` 6.0.6
+Pinned in `ansible/requirements.yml`; the git-sourced collections track `main`
+rather than a tag, so a rebuild can pick up upstream changes.
+
+- `amazon.aws` 11.4.0
+- `community.aws` 11.1.0
+- `ansible.windows` 3.7.0
+- `community.windows` 3.3.0
+- `community.docker` 5.2.1
+- `ansible.posix` 2.2.2
+- `community.general` 13.2.0
+- `grafana.grafana` 6.1.0
 - `cowdogmoo.workstation` (git, main)
-- `l50.arsenal` (git, main)
+- `l50.arsenal` (git, main) — all pentesting tool roles
+- `l50.bulwark` (git, main)
 
 ### Running Playbooks Standalone
 
@@ -279,15 +291,16 @@ ansible-playbook ansible/playbooks/ares/recon.yml \
 
 ### Observability Roles
 
-Three roles provide the telemetry layer for deployed infrastructure:
+Two local roles ship the telemetry layer:
 
-- **aws_ssm_agent** -- Secure remote management, session logging
-- **aws_cloudwatch_agent** -- System metrics (CPU, disk, memory, network)
-- **fluent_bit** -- Log forwarding to OpenSearch (system logs, SSM sessions,
-  command history, Windows Event Logs)
+- **fluent_bit** -- Log forwarding (system logs, SSM sessions, command history,
+  Windows Event Logs)
+- **vector** -- Log and metric pipeline
 
-These are used by `playbooks/linux/attacker_setup.yml` and
-`playbooks/windows/target_setup.yml` for range host telemetry.
+Both are used by `playbooks/linux/attacker_setup.yml` and
+`playbooks/windows/target_setup.yml` for range host telemetry. SSM and
+CloudWatch agent installation comes from the external collections, not from
+roles in this repo.
 
 ## Deployment Examples
 
@@ -298,7 +311,7 @@ Deploy the orchestrator and workers in a namespace:
 ```bash
 # Orchestrator pod (interactive)
 kubectl run ares-orchestrator \
-  --image=ghcr.io/dreadnode/ares-python-orchestrator:latest \
+  --image=ghcr.io/l50/ares-orchestrator:latest \
   -it --rm \
   --env="REDIS_URL=redis://redis:6379" \
   --env="NATS_URL=nats://nats:4222" \
@@ -307,7 +320,7 @@ kubectl run ares-orchestrator \
 
 # Worker deployment (long-running)
 kubectl create deployment ares-recon \
-  --image=ghcr.io/dreadnode/ares-python-recon-agent:latest
+  --image=ghcr.io/l50/ares-recon-agent:latest
 ```
 
 ### Docker Compose
@@ -324,7 +337,7 @@ services:
     ports: ["4222:4222"]
 
   orchestrator:
-    image: ghcr.io/dreadnode/ares-orchestrator:latest
+    image: ghcr.io/l50/ares-orchestrator:latest
     command: ["ares", "orchestrator"]
     environment:
       REDIS_URL: redis://redis:6379
@@ -333,7 +346,7 @@ services:
     depends_on: [redis, nats]
 
   recon-worker:
-    image: ghcr.io/dreadnode/ares-recon-agent:latest
+    image: ghcr.io/l50/ares-recon-agent:latest
     command: ["ares", "worker"]
     environment:
       REDIS_URL: redis://redis:6379
