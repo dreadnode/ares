@@ -65,6 +65,28 @@ fn looks_like_ip(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
+pub(super) fn hostname_by_ip(hosts: &[Host]) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for host in hosts {
+        let ip = host.ip.trim();
+        let hostname = host.hostname.trim().trim_end_matches('.').to_lowercase();
+        if hostname.is_empty() || !looks_like_ip(ip) || is_aws_hostname(&hostname) {
+            continue;
+        }
+        let is_better = match map.get(ip) {
+            None => true,
+            Some(existing) => {
+                (!existing.contains('.') && hostname.contains('.'))
+                    || is_more_specific_fqdn(existing, &hostname)
+            }
+        };
+        if is_better {
+            map.insert(ip.to_string(), hostname);
+        }
+    }
+    map
+}
+
 pub(super) fn dedup_hosts(
     hosts: &[Host],
     netbios_to_fqdn: &HashMap<String, String>,
@@ -425,5 +447,65 @@ mod tests {
     #[test]
     fn aws_hostname_partial_match() {
         assert!(!is_aws_hostname("ip-192-168-58-1.contoso.local"));
+    }
+
+    // ── hostname_by_ip ──
+
+    #[test]
+    fn hostname_by_ip_maps_each_host() {
+        let hosts = vec![
+            make_host("192.168.58.10", "dc01.contoso.local"),
+            make_host("192.168.58.50", "ca01.contoso.local"),
+        ];
+        let map = hostname_by_ip(&hosts);
+        assert_eq!(map.get("192.168.58.10").unwrap(), "dc01.contoso.local");
+        assert_eq!(map.get("192.168.58.50").unwrap(), "ca01.contoso.local");
+    }
+
+    #[test]
+    fn hostname_by_ip_skips_hosts_without_a_hostname() {
+        let map = hostname_by_ip(&[make_host("192.168.58.10", "")]);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn hostname_by_ip_skips_non_ip_keys() {
+        let map = hostname_by_ip(&[make_host("dc01.contoso.local", "dc01.contoso.local")]);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn hostname_by_ip_skips_aws_hostnames() {
+        let hosts = vec![make_host(
+            "192.168.58.10",
+            "ip-192-168-58-10.us-west-2.compute.internal",
+        )];
+        assert!(hostname_by_ip(&hosts).is_empty());
+    }
+
+    #[test]
+    fn hostname_by_ip_prefers_the_fqdn_over_the_short_name() {
+        let hosts = vec![
+            make_host("192.168.58.10", "DC01"),
+            make_host("192.168.58.10", "dc01.contoso.local"),
+        ];
+        let map = hostname_by_ip(&hosts);
+        assert_eq!(map.get("192.168.58.10").unwrap(), "dc01.contoso.local");
+    }
+
+    #[test]
+    fn hostname_by_ip_keeps_the_fqdn_when_the_short_name_arrives_second() {
+        let hosts = vec![
+            make_host("192.168.58.10", "dc01.contoso.local"),
+            make_host("192.168.58.10", "DC01"),
+        ];
+        let map = hostname_by_ip(&hosts);
+        assert_eq!(map.get("192.168.58.10").unwrap(), "dc01.contoso.local");
+    }
+
+    #[test]
+    fn hostname_by_ip_normalizes_case_and_trailing_dot() {
+        let map = hostname_by_ip(&[make_host("192.168.58.10", "DC01.CONTOSO.LOCAL.")]);
+        assert_eq!(map.get("192.168.58.10").unwrap(), "dc01.contoso.local");
     }
 }

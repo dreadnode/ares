@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use ares_core::models::{Credential, Hash, SharedRedTeamState, VulnerabilityInfo};
 
 use super::format_duration;
-use super::hosts::{clean_os_string, dedup_hosts, is_real_service};
+use super::hosts::{clean_os_string, dedup_hosts, hostname_by_ip, is_real_service};
 use crate::dedup::{
     dedup_credentials, dedup_hashes, dedup_users, looks_like_workgroup_pseudo_domain,
     normalize_source_label,
@@ -282,6 +282,7 @@ pub(super) fn print_loot_human(
     print_vulnerabilities(
         &state.discovered_vulnerabilities,
         &state.exploited_vulnerabilities,
+        &hostname_by_ip(&merged_hosts),
     );
 
     print_token_coverage(
@@ -397,6 +398,7 @@ pub(super) fn is_exploitable(vuln: &VulnerabilityInfo) -> bool {
 fn print_vulnerabilities(
     discovered: &HashMap<String, VulnerabilityInfo>,
     exploited: &HashSet<String>,
+    hostnames: &HashMap<String, String>,
 ) {
     if discovered.is_empty() {
         return;
@@ -438,19 +440,19 @@ fn print_vulnerabilities(
     if exploitable.is_empty() {
         println!("  (none)");
     } else {
-        print_vuln_table(&exploitable, exploited);
+        print_vuln_table(&exploitable, exploited, hostnames);
     }
     println!();
 
     println!("Findings ({}):", findings.len());
     if !findings.is_empty() {
-        print_vuln_table(&findings, exploited);
+        print_vuln_table(&findings, exploited, hostnames);
     }
     println!();
 
     if !not_exploitable.is_empty() {
         println!("Observed but not exploitable ({}):", not_exploitable.len());
-        print_vuln_table(&not_exploitable, exploited);
+        print_vuln_table(&not_exploitable, exploited, hostnames);
         println!();
     }
 }
@@ -779,22 +781,35 @@ fn truncate_on_boundary(s: &str, max: usize) -> String {
     format!("{}...", &s[..end])
 }
 
-fn print_vuln_table(vulns: &[(&String, &VulnerabilityInfo)], exploited: &HashSet<String>) {
+fn format_vuln_target(target: &str, hostnames: &HashMap<String, String>) -> String {
+    let trimmed = target.trim();
+    match hostnames.get(trimmed) {
+        Some(hostname) if !hostname.is_empty() => format!("{hostname} ({trimmed})"),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn print_vuln_table(
+    vulns: &[(&String, &VulnerabilityInfo)],
+    exploited: &HashSet<String>,
+    hostnames: &HashMap<String, String>,
+) {
     println!(
-        "  {:<30} {:<20} {:>8} {:>9}  Details",
+        "  {:<30} {:<46} {:>8} {:>9}  Details",
         "Type", "Target", "Priority", "Exploited"
     );
-    println!("  {}", "-".repeat(100));
+    println!("  {}", "-".repeat(126));
     for (vuln_id, vuln) in vulns {
         let is_exploited = exploited.contains(*vuln_id);
         let exploited_mark = if is_exploited { "\u{2713}" } else { "\u{2717}" };
 
         let details = format_vuln_details(&vuln.details);
         let details_display = truncate_on_boundary(&details, 80);
+        let target_display = truncate_on_boundary(&format_vuln_target(&vuln.target, hostnames), 43);
 
         println!(
-            "  {:<30} {:<20} {:>8} {:>9}  {}",
-            vuln.vuln_type, vuln.target, vuln.priority, exploited_mark, details_display
+            "  {:<30} {:<46} {:>8} {:>9}  {}",
+            vuln.vuln_type, target_display, vuln.priority, exploited_mark, details_display
         );
     }
 }
@@ -2227,6 +2242,77 @@ mod tests {
             rows[0].status, "\u{2717}",
             "discovered=0 must not short-circuit to a check mark when the only \
              credit came from supersession"
+        );
+    }
+
+    // ── format_vuln_target ──────────────────────────────────────────────
+
+    fn hostname_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(ip, hostname)| (ip.to_string(), hostname.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn vuln_target_annotated_with_the_known_hostname() {
+        let map = hostname_map(&[("192.168.58.50", "ca01.contoso.local")]);
+        assert_eq!(
+            super::format_vuln_target("192.168.58.50", &map),
+            "ca01.contoso.local (192.168.58.50)"
+        );
+    }
+
+    #[test]
+    fn vuln_target_unchanged_when_the_ip_is_unknown() {
+        let map = hostname_map(&[("192.168.58.50", "ca01.contoso.local")]);
+        assert_eq!(
+            super::format_vuln_target("192.168.58.99", &map),
+            "192.168.58.99"
+        );
+    }
+
+    #[test]
+    fn vuln_target_unchanged_when_already_a_hostname() {
+        let map = hostname_map(&[("192.168.58.10", "dc01.contoso.local")]);
+        assert_eq!(
+            super::format_vuln_target("dc01.contoso.local", &map),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn vuln_target_trimmed_before_lookup() {
+        let map = hostname_map(&[("192.168.58.10", "dc01.contoso.local")]);
+        assert_eq!(
+            super::format_vuln_target("  192.168.58.10  ", &map),
+            "dc01.contoso.local (192.168.58.10)"
+        );
+    }
+
+    #[test]
+    fn vuln_target_empty_stays_empty() {
+        assert_eq!(super::format_vuln_target("", &HashMap::new()), "");
+    }
+
+    #[test]
+    fn vuln_target_ignores_an_empty_hostname_entry() {
+        let map = hostname_map(&[("192.168.58.10", "")]);
+        assert_eq!(
+            super::format_vuln_target("192.168.58.10", &map),
+            "192.168.58.10"
+        );
+    }
+
+    #[test]
+    fn vuln_target_annotated_fits_the_column() {
+        let map = hostname_map(&[("192.168.58.50", "ca01.child.contoso.local")]);
+        let rendered = super::format_vuln_target("192.168.58.50", &map);
+        assert!(
+            rendered.len() <= 43,
+            "a realistic FQDN + IP must fit the 46-wide Target column without \
+             truncation, got {} chars: {rendered}",
+            rendered.len()
         );
     }
 }
