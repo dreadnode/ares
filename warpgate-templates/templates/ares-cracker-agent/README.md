@@ -24,7 +24,8 @@ the nimbus_range collection, plus a compiled Rust worker binary with embedded Py
 
 The template configuration is managed in `warpgate.yaml`. Key settings include:
 
-- `name`: Template name (`ares-cracker-agent`)- `base.image`: Base Docker image (ares-base)
+- `name`: Template name (`ares-cracker-agent`)
+- `base.image`: Base Docker image (ares-base)
 - `sources`: Clones the ares repository for Rust compilation
 - `provisioners`: Shell, Ansible, and file provisioners for setup
 - `targets`: Defines build targets (container images)
@@ -38,7 +39,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-This builds **Ares Cracker Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares Cracker Agent** Docker images for `amd64` and `arm64` architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -101,12 +102,13 @@ warpgate validate ares-cracker-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_cracking_tools` - hashcat, john, wordlists
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-- Installed to `/usr/local/bin/ares`- **Installed Tools:**
-  - **hashcat** - Industry-leading password recovery tool
+  - Compiled from the `main` branch with PyO3 Python bindings
+  - Installed to `/usr/local/bin/ares`
+- **Installed Tools:**
+  - **hashcat** - Password recovery tool
   - **John the Ripper** - Classic password cracker with extensive format support
-  - **rockyou.txt** - Famous password wordlist
-  - **SecLists passwords** - Comprehensive password lists from SecLists
+  - **rockyou.txt** - Password wordlist
+  - **SecLists passwords** - Password lists from SecLists
 - **Directory Structure:**
   - `/ares/` - Main Ares workspace directory
   - `/ares/.venv/` - Python virtual environment
@@ -116,7 +118,8 @@ warpgate validate ares-cracker-agent
   - `/ares/results/` - Cracking results storage
   - `/usr/share/wordlists/` - Wordlist collection
   - `/usr/share/hashcat/rules/` - Hashcat rules
-- `/usr/local/bin/ares` - Compiled Ares binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+  - `/usr/local/bin/ares` - Compiled Ares binary
+- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 
@@ -126,17 +129,17 @@ This image is configured for CPU-only cracking workloads for maximum Docker
 compatibility and ARM support. For GPU-accelerated cracking, use the dedicated
 GPU-enabled image:
 
-**Use `ares-worker-gpu` for NVIDIA CUDA/OpenCL support:**
+**Use `ares-cracker-agent-gpu` for NVIDIA CUDA/OpenCL support:**
 
 ```bash
 # Build GPU-enabled image
-warpgate build --template ares-worker-gpu
+warpgate build --template ares-cracker-agent-gpu
 
 # Run with GPU access
-docker run --gpus all -it ghcr.io/l50/ares-worker-gpu:latest
+docker run --gpus all -it ghcr.io/l50/ares-cracker-agent-gpu:latest
 ```
 
-See the [ares-worker-gpu](../ares-worker-gpu/README.md) templatefor full GPU configuration and usage details.
+See the [ares-cracker-agent-gpu](../ares-cracker-agent-gpu/README.md) template for full GPU configuration and usage details.
 
 ---
 

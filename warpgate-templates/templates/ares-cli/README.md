@@ -112,7 +112,7 @@ warpgate validate ares-cli
 - **Installed Components:**
   - Pure Rust `ares` binary (no Python dependencies)
 - **Build Process:**
-  - Clones ares repository from `feature/rust-cli` branch
+  - Clones ares repository from the `main` branch
   - Installs Rust toolchain and build dependencies
   - Compiles binary with `cargo build --release --bin ares`
   - Installs binary to `/usr/local/bin/ares`

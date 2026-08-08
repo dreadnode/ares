@@ -111,7 +111,7 @@ locally as `ares-cracker-agent-gpu:latest`.
 
 - **hashcat** - GPU-accelerated password recovery tool compiled from source with CUDA support
 - **John the Ripper** - Classic password cracker
-- **rockyou.txt** - Famous password wordlist
+- **rockyou.txt** - Password wordlist
 - **SecLists passwords** - Common password lists
 - **ares** - Rust-compiled binary with PyO3 Python bindings
 - **Ares Python framework** - Agent orchestration and tool execution
@@ -144,7 +144,7 @@ locally as `ares-cracker-agent-gpu:latest`.
   - Rust-compiled `ares` binary with PyO3 Python bindings
   - Ares Python framework
 - **Build Process:**
-  - Clones ares repository from `feature/rust-cli` branch
+  - Clones ares repository from the `main` branch
   - Installs Rust toolchain, compiles binary with `--features python`
   - Installs binary to `/usr/local/bin/ares`
   - Cleans up Rust toolchain, build artifacts, and build-only dependencies

@@ -470,7 +470,7 @@ The blue agent uses MCP to connect to Grafana and access observability data:
 - Multi-architecture image rendering
 
 **Setup:**
-See [Grafana MCP Setup](grafana-mcp-setup.md) for MCP server installation instructions.
+See [Grafana MCP Setup](topics/grafana-mcp-setup.md) for MCP server installation instructions.
 
 ### Markdown Report Generation
 

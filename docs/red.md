@@ -641,9 +641,8 @@ Vulnerabilities are processed in priority order:
 
 ## Task Throttling and Phase-Aware Dispatch
 
-The dispatcher uses intelligent throttling to prevent LLM API rate limit storms
+The dispatcher uses throttling to prevent LLM API rate limit storms
 while ensuring all worker agents stay productive.
-See [Phase Priority Guide](phase-priority.md) for detailed analysis.
 
 ### Throttling Behavior
 

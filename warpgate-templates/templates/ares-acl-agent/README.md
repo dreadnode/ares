@@ -39,7 +39,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-This builds **Ares ACL Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares ACL Agent** Docker images for `amd64` and `arm64` architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -101,14 +101,16 @@ warpgate validate ares-acl-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_acl_tools` - bloodyAD, pywhisker
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-- Installed to `/usr/local/bin/ares`- **Installed Tools:**
+  - Compiled from the `main` branch with PyO3 Python bindings
+  - Installed to `/usr/local/bin/ares`
+- **Installed Tools:**
   - **bloodyAD** - Active Directory ACL exploitation framework
   - **pywhisker** - Shadow credentials manipulation tool
 - **Directory Structure:**
   - `/ares/` - Main Ares workspace directory
   - `/ares/.venv/` - Python virtual environment
-- `/usr/local/bin/ares` - Compiled Ares binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+  - `/usr/local/bin/ares` - Compiled Ares binary
+- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

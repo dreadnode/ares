@@ -39,7 +39,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-This builds **Ares PrivEsc Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares PrivEsc Agent** Docker images for `amd64` and `arm64` architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -93,16 +93,17 @@ warpgate validate ares-privesc-agent
   provisioning playbooks and requirement files are available at the path
   specified by `PROVISION_REPO_PATH`.
 - **Docker build:**
-  - Multi-arch (`amd64` + `arm64`) and privileged for full testbed support.
+  - Multi-arch (`amd64` + `arm64`) and privileged for testbed support.
   - Images are suitable for CI, local testing, or deployment in a Kubernetes cluster.
   - Default user: `root`
   - Working directory: `/root`
 - **Ansible Roles:** Uses `dreadnode.nimbus_range` roles:
   - `ares_base` - Python 3.13.7, uv, core dependencies
-  - `ares_privesc_tools` - Comprehensive privilege escalation toolkit
+  - `ares_privesc_tools` - Privilege escalation toolkit
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-- Installed to `/usr/local/bin/ares`- **Installed Tools:**
+  - Compiled from the `main` branch with PyO3 Python bindings
+  - Installed to `/usr/local/bin/ares`
+- **Installed Tools:**
 
   > **Most of the Windows tooling below is installed but not reachable.** Ares drives
   > SMB/LDAP/Kerberos/MSSQL against a target from Linux; it has no primitive for staging
@@ -150,7 +151,8 @@ warpgate validate ares-privesc-agent
     - `/opt/privesc/RunasCs/`
     - `/opt/privesc/noPac/`
     - `/opt/privesc/PrintNightmare/`
-- `/usr/local/bin/ares` - Compiled Ares binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+  - `/usr/local/bin/ares` - Compiled Ares binary
+- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

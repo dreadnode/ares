@@ -65,7 +65,7 @@ warpgate validate ares-golden-image
 - **AMI build:**
   - Architecture: `x86_64` (amd64)
   - Region: `us-west-1`
-  - Instance type: `t3.large`
+  - Instance type: `g4dn.xlarge`
   - Volume size: 100 GB
   - Base: Kali Linux (latest Debian Kali snapshot)
 - **Build Process:**
