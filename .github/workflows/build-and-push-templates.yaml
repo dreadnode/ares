@@ -709,7 +709,7 @@ jobs:
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
-            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max,ignore-error=true
 
           # Check if the specific digest file exists
           DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
@@ -1198,7 +1198,7 @@ jobs:
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
-            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max,ignore-error=true
 
           # Check if the specific digest file exists
           DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
@@ -1629,7 +1629,7 @@ jobs:
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
-            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max,ignore-error=true
           DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
           if [ -f "$DIGEST_FILE" ]; then
             cat "$DIGEST_FILE"
@@ -1990,7 +1990,7 @@ jobs:
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
-            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max,ignore-error=true
           DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
           if [ -f "$DIGEST_FILE" ]; then
             cat "$DIGEST_FILE"
