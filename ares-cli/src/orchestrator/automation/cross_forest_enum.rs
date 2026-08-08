@@ -465,8 +465,6 @@ mod tests {
         assert!(counts[2] >= 3); // 3 users = not under-enumerated
     }
 
-    // --- collect_cross_forest_work tests ---
-
     fn make_cred(
         id: &str,
         user: &str,

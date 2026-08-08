@@ -470,7 +470,7 @@ mod tests {
         assert!(tools.is_empty());
     }
 
-    // ── Task-loop resolver wire-up: fallback when no Redis conn ─────────
+    // Task-loop resolver wire-up: fallback when no Redis conn
 
     #[tokio::test]
     async fn resolve_for_dispatch_returns_input_when_no_conn() {

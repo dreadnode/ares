@@ -486,8 +486,6 @@ mod tests {
         assert_eq!(DcTier::LastResort.to_string(), "last_resort");
     }
 
-    // ── Additional tier coverage ────────────────────────────────────
-
     #[test]
     fn find_dc_ip_target_tier_via_ip_match() {
         // Tier "Target": when target_ip matches a host that has DC role/services

@@ -265,8 +265,6 @@ mod tests {
         }
     }
 
-    // ── recommend_for_ioc ──────────────────────────────────────────
-
     #[test]
     fn ioc_ip_recommendation() {
         let ioc = make_ioc("ip", "192.168.58.1", true);
@@ -335,8 +333,6 @@ mod tests {
         let rec = recommend_for_ioc(&ioc).unwrap();
         assert_eq!(rec.techniques, vec!["T1046"]);
     }
-
-    // ── recommend_for_technique ────────────────────────────────────
 
     #[test]
     fn technique_t1003_known() {

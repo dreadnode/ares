@@ -730,8 +730,6 @@ mod tests {
         assert_eq!(format!("{esc8}"), "esc8_adcs");
     }
 
-    // --- collect_relay_work integration tests ---
-
     use crate::orchestrator::state::SharedState;
 
     fn make_cred() -> ares_core::models::Credential {
@@ -1025,7 +1023,7 @@ mod tests {
         );
     }
 
-    // ── Forest-aware coercion / credential pairing ──────────────────────
+    // Forest-aware coercion / credential pairing
 
     fn make_fabrikam_cred() -> ares_core::models::Credential {
         ares_core::models::Credential {

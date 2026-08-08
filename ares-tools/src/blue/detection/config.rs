@@ -6,8 +6,6 @@ pub use ares_core::detection::{detection_config, find_template, TemplateEntry};
 
 use super::{build_event_filter, build_pattern_filter, build_selector, WIN_SECURITY, WIN_SYSTEM};
 
-// ─── LogQL builder ─────────────────────────────────────────────────────────
-
 /// Compose a LogQL query from a template entry and optional hostname.
 pub fn build_template_logql(entry: &TemplateEntry, host: Option<&str>) -> String {
     let job = match entry.log_source.as_str() {

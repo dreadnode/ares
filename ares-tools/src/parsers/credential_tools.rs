@@ -6,8 +6,6 @@ use serde_json::{json, Value};
 use std::sync::LazyLock;
 use tracing::{debug, warn};
 
-// ── Lsassy ──────────────────────────────────────────────────────────────────
-
 /// Real ANSI escape sequences (e.g. `\x1b[1;33m`).
 static ANSI_ESC_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").expect("ansi esc regex"));
@@ -367,7 +365,7 @@ fn looks_like_ntlm_hash(s: &str) -> bool {
     false
 }
 
-// ── Password spray / username-as-password ───────────────────────────────────
+// Password spray / username-as-password
 
 /// Parse netexec password spray output for successful authentications.
 ///
@@ -461,7 +459,7 @@ pub fn parse_spray_success(output: &str, params: &Value) -> Vec<Value> {
     creds
 }
 
-// ── NTDS.DIT extract (same format as secretsdump) ───────────────────────────
+// NTDS.DIT extract (same format as secretsdump)
 
 /// Parse NTDS.DIT extraction output — identical format to secretsdump.
 pub fn parse_ntds_dit(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) {
@@ -469,7 +467,7 @@ pub fn parse_ntds_dit(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) 
     super::parse_secretsdump(output, params)
 }
 
-// ── LDAP description password search ────────────────────────────────────────
+// LDAP description password search
 
 /// Regex to find passwords embedded in LDAP description fields.
 /// Common patterns: "Password: xxx", "pwd=xxx", "pass: xxx"
@@ -618,7 +616,7 @@ fn extract_username_from_description_line(line: &str) -> Option<String> {
     None
 }
 
-// ── LAPS (netexec -M laps) ──────────────────────────────────────────────────
+// LAPS (netexec -M laps)
 
 /// Parse netexec `-M laps` output for local Administrator passwords.
 ///
@@ -800,8 +798,6 @@ fn is_hex32(s: &str) -> bool {
     s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-// ── adidnsdump ──────────────────────────────────────────────────────────────
-
 /// Parse adidnsdump output for DNS records that map to host IPs.
 ///
 /// Output format:
@@ -836,8 +832,6 @@ pub fn parse_adidnsdump(output: &str) -> Vec<Value> {
 
     hosts
 }
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

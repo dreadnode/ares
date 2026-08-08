@@ -353,8 +353,6 @@ $pass = "P@ssw0rd"
         assert!(creds.is_empty());
     }
 
-    // ── split_domain_user ─────────────────────────────────────────
-
     #[test]
     fn split_domain_user_with_backslash() {
         let (domain, user) = split_domain_user("CONTOSO\\admin");
@@ -375,8 +373,6 @@ $pass = "P@ssw0rd"
         assert!(domain.is_none());
         assert_eq!(user, "");
     }
-
-    // ── resolve_domain_from_fqdn ──────────────────────────────────
 
     #[test]
     fn resolve_fqdn_matching() {
@@ -408,8 +404,6 @@ $pass = "P@ssw0rd"
         assert_eq!(resolve_domain_from_fqdn("CHILD", ""), None);
     }
 
-    // ── is_plausible_password ─────────────────────────────────────
-
     #[test]
     fn plausible_password_valid() {
         assert!(is_plausible_password("Summer2025!"));
@@ -438,8 +432,6 @@ $pass = "P@ssw0rd"
         assert!(!is_plausible_password("none"));
         assert!(!is_plausible_password("empty"));
     }
-
-    // ── first_capture ─────────────────────────────────────────────
 
     #[test]
     fn first_capture_finds_group() {

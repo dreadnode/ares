@@ -74,7 +74,8 @@ impl AresConfig {
     /// Resolution order:
     /// 1. `ARES_CONFIG` env var
     /// 2. `./config/ares.yaml`
-    /// 3. `/etc/ares/config.yaml`
+    /// 3. `/ares/config/ares.yaml`
+    /// 4. `/etc/ares/config.yaml`
     pub fn from_env() -> Result<Self> {
         let path = Self::resolve_path()?;
         Self::load(&path)

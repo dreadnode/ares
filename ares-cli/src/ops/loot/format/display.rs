@@ -1808,8 +1808,6 @@ mod tests {
         assert!(children.is_empty());
     }
 
-    // --- token_category coverage ------------------------------------------
-
     #[test]
     fn token_category_adcs_long_form_does_not_collapse_to_esc1() {
         // Real vuln_id forms always include `_<details>` after the ESC code.
@@ -1952,8 +1950,6 @@ mod tests {
         assert_eq!(super::token_category(""), "other");
     }
 
-    // ── compute_forest_topology ─────────────────────────────────────────
-
     #[test]
     fn topology_empty_input() {
         let t = super::compute_forest_topology(&[]);
@@ -2030,8 +2026,6 @@ mod tests {
         assert_eq!(t1, t2);
     }
 
-    // ── count_compromised_forests ───────────────────────────────────────
-
     fn ach(has_da: bool, has_gt: bool) -> super::DomainAchievement {
         super::DomainAchievement {
             has_da,
@@ -2095,8 +2089,6 @@ mod tests {
         a.insert("contoso.local".to_string(), ach(false, false));
         assert_eq!(super::count_compromised_forests(&topology, &a), 0);
     }
-
-    // ── compute_token_coverage_rows ─────────────────────────────────────
 
     fn discovered_vuln(vuln_id: &str) -> (String, ares_core::models::VulnerabilityInfo) {
         (
@@ -2244,8 +2236,6 @@ mod tests {
              credit came from supersession"
         );
     }
-
-    // ── format_vuln_target ──────────────────────────────────────────────
 
     fn hostname_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

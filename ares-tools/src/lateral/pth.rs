@@ -110,8 +110,6 @@ mod tests {
     use crate::args::{optional_str, required_str};
     use serde_json::json;
 
-    // --- pth_cred_string ---
-
     #[test]
     fn cred_string_with_domain() {
         let result = pth_cred_string(Some("CONTOSO"), "admin", "aabbccdd");
@@ -129,8 +127,6 @@ mod tests {
         let result = pth_cred_string(Some(""), "admin", "aabbccdd");
         assert_eq!(result, "admin%aabbccdd");
     }
-
-    // --- pth_winexe ---
 
     #[test]
     fn pth_winexe_requires_target() {
@@ -162,8 +158,6 @@ mod tests {
         let target = "192.168.58.1";
         assert_eq!(format!("//{target}"), "//192.168.58.1");
     }
-
-    // --- pth_smbclient ---
 
     #[test]
     fn pth_smbclient_default_share() {
@@ -198,16 +192,12 @@ mod tests {
         assert_eq!(format!("//{target}/{share}"), "//192.168.58.1/C$");
     }
 
-    // --- pth_rpcclient ---
-
     #[test]
     fn pth_rpcclient_default_command() {
         let args = json!({"target": "192.168.58.1", "username": "admin", "hash": "aa"});
         let command = optional_str(&args, "command").unwrap_or("getusername");
         assert_eq!(command, "getusername");
     }
-
-    // --- pth_wmic ---
 
     #[test]
     fn pth_wmic_default_query() {
@@ -248,8 +238,6 @@ mod tests {
         let cred = pth_cred_string(domain, username, hash);
         assert_eq!(cred, "CONTOSO/admin%aad3b435:aabbccdd");
     }
-
-    // --- mock executor tests ---
 
     use crate::executor::mock;
 

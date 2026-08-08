@@ -314,8 +314,6 @@ mod tests {
     use crate::args::{optional_str, required_str};
     use serde_json::json;
 
-    // --- kerberoast ---
-
     #[test]
     fn kerberoast_target_format() {
         let domain = "contoso.local";
@@ -364,8 +362,6 @@ mod tests {
         });
         assert!(required_str(&args, "dc_ip").is_err());
     }
-
-    // --- asrep_roast ---
 
     #[test]
     fn asrep_roast_authenticated_format() {
@@ -417,8 +413,6 @@ mod tests {
         assert_eq!(users_file, Some("/tmp/users.txt"));
     }
 
-    // --- DEFAULT_AD_USERNAMES ---
-
     #[test]
     fn default_ad_usernames_is_non_empty() {
         assert!(!super::DEFAULT_AD_USERNAMES.is_empty());
@@ -433,8 +427,6 @@ mod tests {
     fn default_ad_usernames_contains_krbtgt() {
         assert!(super::DEFAULT_AD_USERNAMES.contains("krbtgt"));
     }
-
-    // --- kerberos_user_enum_noauth ---
 
     #[test]
     fn kerberos_user_enum_requires_domain() {
@@ -476,8 +468,6 @@ mod tests {
         });
         assert!(optional_str(&args, "users_file").is_none());
     }
-
-    // --- mock executor tests ---
 
     use crate::executor::mock;
 

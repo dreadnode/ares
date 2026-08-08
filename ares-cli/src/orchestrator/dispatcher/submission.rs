@@ -1231,8 +1231,6 @@ mod helper_tests {
     use super::*;
     use serde_json::json;
 
-    // --- task_params_from_payload ---------------------------------------
-
     #[test]
     fn task_params_includes_credential_key_when_provided() {
         let payload = json!({"target_ip": "192.168.58.10"});
@@ -1275,8 +1273,6 @@ mod helper_tests {
         assert!(p.is_empty());
     }
 
-    // --- inject_vuln_id_into_result --------------------------------------
-
     fn make_result(result: Option<serde_json::Value>) -> TaskResult {
         TaskResult {
             task_id: "t-test".into(),
@@ -1310,8 +1306,6 @@ mod helper_tests {
         // Stayed a string; injection silently no-ops.
         assert_eq!(tr.result.unwrap(), json!("just a string"));
     }
-
-    // --- parse_task_complete_result --------------------------------------
 
     #[test]
     fn parse_complete_result_uses_object_form_when_json() {
@@ -1348,8 +1342,6 @@ mod helper_tests {
         assert_eq!(r["steps"], 5);
         assert_eq!(r["tool_calls"], 10);
     }
-
-    // --- merge_result_extras ---------------------------------------------
 
     #[test]
     fn merge_extras_strips_llm_supplied_keys_first() {

@@ -3900,8 +3900,6 @@ mod tests {
         assert_eq!(vuln_id_a, vuln_id_b);
     }
 
-    // --- sweep_stale_forge_in_flight -----------------------------------
-
     /// Simulate "in flight for longer than allowed" by offsetting the start
     /// timestamp into the past — direct Instant subtraction past program
     /// start would panic, so use checked_sub and fall back to "now" only if
@@ -3997,8 +3995,6 @@ mod tests {
         );
         assert!(s.forge_wedged.is_empty());
     }
-
-    // --- sweep_rearmable_empty_dump_forges ------------------------------
 
     fn trust_hash(
         account: &str,

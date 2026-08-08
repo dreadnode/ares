@@ -806,8 +806,6 @@ mod tests {
         Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap()
     }
 
-    // ── techniques_match ───────────────────────────────────────────
-
     #[test]
     fn techniques_match_exact() {
         assert!(RedBlueCorrelator::techniques_match(
@@ -873,8 +871,6 @@ mod tests {
         ));
     }
 
-    // ── determine_gap_reason ───────────────────────────────────────
-
     #[test]
     fn gap_reason_no_technique() {
         let activity = make_red(None, Some("192.168.58.1"), "scan", base_time());
@@ -902,8 +898,6 @@ mod tests {
         let reason = RedBlueCorrelator::determine_gap_reason(&activity, &detections);
         assert!(reason.contains("Alert exists but did not trigger"));
     }
-
-    // ── recommend_detection ────────────────────────────────────────
 
     #[test]
     fn recommend_detection_t1046() {
@@ -940,8 +934,6 @@ mod tests {
         let activity = make_red(None, None, "stuff", base_time());
         assert!(RedBlueCorrelator::recommend_detection(&activity).is_none());
     }
-
-    // ── calculate_technique_coverage ───────────────────────────────
 
     #[test]
     fn coverage_empty() {
@@ -1017,8 +1009,6 @@ mod tests {
         assert_eq!(cov["T1003"].missed, 1);
         assert!((cov["T1003"].detection_rate - 0.5).abs() < 0.001);
     }
-
-    // ── correlate ──────────────────────────────────────────────────
 
     #[test]
     fn correlate_empty() {
@@ -1222,8 +1212,6 @@ mod tests {
         assert_eq!(report.gaps.len(), 1);
         assert_eq!(report.technique_coverage.len(), 3);
     }
-
-    // ── constructor ────────────────────────────────────────────────
 
     #[test]
     fn new_default_window() {

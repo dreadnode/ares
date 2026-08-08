@@ -214,8 +214,6 @@ pub(super) fn dedup_hosts(
 mod tests {
     use super::*;
 
-    // ── clean_os_string ──
-
     #[test]
     fn clean_os_removes_parenthetical() {
         assert_eq!(clean_os_string("Windows 10 (Build 19041)"), "Windows 10");
@@ -249,8 +247,6 @@ mod tests {
         assert_eq!(clean_os_string("  Windows 10  "), "Windows 10");
     }
 
-    // ── is_real_service ──
-
     #[test]
     fn real_service_tcp() {
         assert!(is_real_service("80/tcp"));
@@ -281,8 +277,6 @@ mod tests {
         assert!(is_real_service("  443/tcp"));
     }
 
-    // ── looks_like_ip ──
-
     #[test]
     fn looks_like_ip_valid_ipv4() {
         assert!(looks_like_ip("192.168.58.1"));
@@ -312,8 +306,6 @@ mod tests {
     fn looks_like_ip_with_colon() {
         assert!(!looks_like_ip("::1"));
     }
-
-    // ── is_more_specific_fqdn ──
 
     #[test]
     fn more_specific_fqdn_more_parts() {
@@ -364,8 +356,6 @@ mod tests {
             "dc.sub.contoso.local"
         ));
     }
-
-    // ── resolve_display_hostname ──
 
     fn make_host(ip: &str, hostname: &str) -> Host {
         Host {
@@ -430,8 +420,6 @@ mod tests {
         assert_eq!(resolve_display_hostname(&host, &map), "dc01.contoso.local");
     }
 
-    // ── is_aws_hostname ──
-
     #[test]
     fn aws_hostname_positive() {
         assert!(is_aws_hostname(
@@ -448,8 +436,6 @@ mod tests {
     fn aws_hostname_partial_match() {
         assert!(!is_aws_hostname("ip-192-168-58-1.contoso.local"));
     }
-
-    // ── hostname_by_ip ──
 
     #[test]
     fn hostname_by_ip_maps_each_host() {

@@ -871,7 +871,7 @@ mod tests {
         assert!(!should_reset_failure_count(&tr));
     }
 
-    // -- helpers for select_s4u_work_items / build_s4u_payload tests --
+    // helpers for select_s4u_work_items / build_s4u_payload tests
 
     fn make_delegation_vuln(
         vuln_id: &str,
@@ -931,8 +931,6 @@ mod tests {
             trust_pair_label: None,
         }
     }
-
-    // --- select_s4u_work_items -------------------------------------------
 
     #[test]
     fn select_skips_non_delegation_vuln_types() {
@@ -1208,8 +1206,6 @@ mod tests {
         assert_eq!(work.len(), 2);
     }
 
-    // --- build_s4u_payload -----------------------------------------------
-
     fn work_with_credential() -> S4uWork {
         let vuln = make_delegation_vuln(
             "v-cd",
@@ -1316,7 +1312,7 @@ mod tests {
         assert!(p.get("auth_method").is_none());
     }
 
-    // ── plan_post_s4u_dump (Fix D gate) ──────────────────────────────────
+    // plan_post_s4u_dump (Fix D gate)
 
     fn host(ip: &str, hostname: &str, is_dc: bool) -> ares_core::models::Host {
         ares_core::models::Host {

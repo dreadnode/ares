@@ -211,9 +211,7 @@ impl OpStateProjector {
     }
 }
 
-// =========================================================================
 // Single-row upserts (no transaction; PG enforces per-row UNIQUE constraints)
-// =========================================================================
 
 async fn upsert_credential(
     pool: &PgPool,

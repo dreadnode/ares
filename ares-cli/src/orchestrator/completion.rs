@@ -1706,8 +1706,6 @@ mod tests {
         assert!(!parent_child.is_cross_forest());
     }
 
-    // ── tests for evaluate_completion ─────────────────────────────────
-
     fn empty_snapshot() -> CompletionSnapshot {
         CompletionSnapshot {
             has_domain_admin: false,
@@ -2011,7 +2009,7 @@ mod tests {
         );
     }
 
-    // ── tests for the blue drain wait ─────────────────────────────────
+    // tests for the blue drain wait
 
     #[test]
     fn drain_budget_must_outlast_one_investigation() {

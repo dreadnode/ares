@@ -53,7 +53,6 @@ const SWEEP_HOURS_BACK: i64 = 2;
 
 const DEFAULT_SWEEP_REFRESH_SECS: u64 = 900;
 
-// ─── Golden ticket correlation ──────────────────────────────────────────────
 //
 // A Golden Ticket is a TGT forged offline from the krbtgt key, so the DC never
 // sees the AS-REQ that would normally mint it — there is no 4768. Using the
@@ -1838,8 +1837,6 @@ mod tests {
             "a failed query must never be listed as clean: {no_match_line}"
         );
     }
-
-    // ─── Golden ticket correlation ──────────────────────────────────────────
 
     /// Build metric series from `(account, domain, count)` triples.
     fn series(rows: &[(&str, &str, u64)]) -> Vec<ares_tools::blue::loki::MetricSeries> {

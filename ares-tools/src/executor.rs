@@ -698,8 +698,6 @@ pub(crate) mod mock {
 mod tests {
     use super::*;
 
-    // ── sanitize_tool_output ─────────────────────────────────────────────────
-
     #[test]
     fn sanitize_valid_utf8_passthrough() {
         let input = b"hello world";
@@ -751,8 +749,6 @@ mod tests {
         let input = b"alert\x07\nsafe text";
         assert_eq!(sanitize_tool_output(input), "alert\nsafe text");
     }
-
-    // ── CommandBuilder builder API ───────────────────────────────────────────
 
     #[test]
     fn builder_new_does_not_panic() {
@@ -874,7 +870,7 @@ mod tests {
             .stdin("y\n");
     }
 
-    // ── timeout kills the child process ─────────────────────────────────────
+    // timeout kills the child process
     //
     // Regression guard for the OOM cause where a hung tool's `Child` was
     // detached (via dropping the `JoinHandle`) instead of aborted, leaking
@@ -1069,7 +1065,6 @@ mod tests {
         assert!(failure_message(&ok).is_none());
     }
 
-    // ── ENOENT wording contract ──────────────────────────────────────────────
     //
     // Three separate call sites in three separate crates key off the exact
     // phrasing this code emits when `Command::spawn()` returns

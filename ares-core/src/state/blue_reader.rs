@@ -252,8 +252,6 @@ impl BlueStateReader {
     }
 
     /// Load the full SharedBlueTeamState from Redis.
-    ///
-    /// This is the Rust equivalent of `BlueStateBackend.snapshot()`.
     pub async fn load_state(
         &self,
         conn: &mut impl AsyncCommands,

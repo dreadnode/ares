@@ -380,8 +380,6 @@ mod tests {
         }
     }
 
-    // --- sanitize_credential ---
-
     #[test]
     fn valid_credential_passes_through() {
         let cred = make_cred("alice", "P@ssw0rd!", "contoso.local");
@@ -557,8 +555,6 @@ mod tests {
         assert_eq!(result.domain, "contoso.local");
     }
 
-    // --- is_default_os_label ---
-
     #[test]
     fn default_os_label_detects_windows_oobe() {
         assert!(is_default_os_label("WIN-HVTT4F8YN5N"));
@@ -636,8 +632,6 @@ mod tests {
             "ip-10-0-0-1.us-west-2.compute.internal"
         ));
     }
-
-    // --- strip_netexec_artifact ---
 
     #[test]
     fn strip_netexec_zero_dot() {

@@ -332,8 +332,6 @@ fn is_adcs_vuln(vuln_lower: &str) -> bool {
 mod tests {
     use super::*;
 
-    // --- credential_techniques ---
-
     #[test]
     fn credential_techniques_admin() {
         let t = credential_techniques("nxc-smb", true);
@@ -384,8 +382,6 @@ mod tests {
         let t = credential_techniques("KERBEROAST", false);
         assert!(t.contains(&"T1558.003".to_string()));
     }
-
-    // --- hash_techniques ---
 
     #[test]
     fn hash_techniques_base() {
@@ -453,8 +449,6 @@ mod tests {
         assert!(!t.contains(&"T1003.006".to_string()));
     }
 
-    // --- is_critical_hash ---
-
     #[test]
     fn critical_hash_krbtgt() {
         assert!(is_critical_hash("krbtgt"));
@@ -469,8 +463,6 @@ mod tests {
     fn critical_hash_regular_user() {
         assert!(!is_critical_hash("jsmith"));
     }
-
-    // --- exploitation_techniques ---
 
     #[test]
     fn exploitation_techniques_base() {

@@ -17,12 +17,8 @@ mod templates;
 #[cfg(test)]
 mod tests;
 
-// ─── Label constants ────────────────────────────────────────────────────────
-
 pub const WIN_SECURITY: &str = r#"job="windows-security""#;
 pub(super) const WIN_SYSTEM: &str = r#"job="windows-system""#;
-
-// ─── Query builder helpers ──────────────────────────────────────────────────
 
 /// Build an optimized label selector.
 ///
@@ -94,8 +90,6 @@ pub(super) fn build_pattern_filter(patterns: &[&str]) -> String {
         _ => format!(" |~ `(?i)({})`", patterns.join("|")),
     }
 }
-
-// ─── Re-exports ──────────────────────────────────────────────────────────────
 
 pub use catalog::list_detection_templates;
 pub use runner::{

@@ -863,8 +863,6 @@ fn lookup_domain_sid(
     domain_sids.get(domain).cloned()
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
 /// Best-effort domain resolution from a tool call's target arguments.
 ///
 /// Walks the standard target argument keys in priority order:
@@ -2669,7 +2667,7 @@ mod tests {
         assert!(!expects_ticket("psexec_kerberos", &args_with_ticket));
     }
 
-    // ── cross-forest Kerberos ticket injection ──────────────────────────────
+    // cross-forest Kerberos ticket injection
 
     #[test]
     fn resolve_cross_forest_ticket_not_injected_when_ntlm_exists() {
@@ -3001,8 +2999,6 @@ mod tests {
         );
     }
 
-    // ── is_placeholder_str ──────────────────────────────────────────────
-
     #[test]
     fn placeholder_str_empty_and_whitespace() {
         assert!(is_placeholder_str(""));
@@ -3045,8 +3041,6 @@ mod tests {
         assert!(!is_placeholder_str("Administrator"));
     }
 
-    // ── is_placeholder_value ────────────────────────────────────────────
-
     #[test]
     fn placeholder_value_null_is_placeholder() {
         assert!(is_placeholder_value(&Value::Null));
@@ -3065,8 +3059,6 @@ mod tests {
         assert!(!is_placeholder_value(&serde_json::json!([])));
         assert!(!is_placeholder_value(&serde_json::json!({})));
     }
-
-    // ── looks_like_ip ───────────────────────────────────────────────────
 
     #[test]
     fn looks_like_ip_v4_dotted_quad() {
@@ -3098,8 +3090,6 @@ mod tests {
         assert!(!looks_like_ip(""));
     }
 
-    // ── is_common_per_domain_account ────────────────────────────────────
-
     #[test]
     fn common_per_domain_account_recognises_built_in_names() {
         assert!(is_common_per_domain_account("administrator"));
@@ -3121,8 +3111,6 @@ mod tests {
         assert!(!is_common_per_domain_account("svc_sql"));
         assert!(!is_common_per_domain_account(""));
     }
-
-    // ── is_authenticating_hash_type ─────────────────────────────────────
 
     #[test]
     fn auth_hash_type_ntlm_is_authenticating() {

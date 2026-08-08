@@ -1450,8 +1450,6 @@ mod tests {
     use crate::args::{optional_bool, optional_str, required_str};
     use serde_json::json;
 
-    // --- certipy_find ---
-
     #[test]
     fn certipy_find_missing_username() {
         let args = json!({
@@ -1461,8 +1459,6 @@ mod tests {
         });
         assert!(required_str(&args, "username").is_err());
     }
-
-    // --- certipy_esc7_full_chain identity composition ---
 
     #[test]
     fn esc7_binds_a_trust_sourced_credential_in_its_own_realm() {
@@ -1574,8 +1570,6 @@ mod tests {
         assert!(vulnerable);
     }
 
-    // --- certipy_request ---
-
     #[test]
     fn certipy_request_missing_ca() {
         let args = json!({
@@ -1645,8 +1639,6 @@ mod tests {
         });
         assert!(optional_str(&args, "upn").is_none());
     }
-
-    // --- certipy_auth ---
 
     #[test]
     fn certipy_auth_missing_pfx_path() {
@@ -1930,8 +1922,6 @@ mod tests {
         assert!(!line.contains(crate::acl::SHADOW_CRED_PFX_PASSPHRASE));
     }
 
-    // --- certipy_shadow ---
-
     #[test]
     fn certipy_shadow_missing_target() {
         let args = json!({
@@ -1996,8 +1986,6 @@ mod tests {
         assert!(hashes.is_some());
     }
 
-    // --- certipy_template_esc4 ---
-
     #[test]
     fn certipy_template_esc4_missing_template() {
         let args = json!({
@@ -2023,8 +2011,6 @@ mod tests {
         let user_at_domain = format!("{username}@{domain}");
         assert_eq!(user_at_domain, "admin@contoso.local");
     }
-
-    // --- certipy_esc3_full_chain (arg-shape) ---
 
     #[test]
     fn certipy_esc3_full_chain_requires_agent_template() {
@@ -2121,8 +2107,6 @@ mod tests {
             .or_else(|| optional_str(&args2, "target_ip"));
         assert_eq!(target2, Some("192.168.58.51"));
     }
-
-    // --- mock executor tests ---
 
     use crate::executor::mock;
 
@@ -2233,7 +2217,7 @@ mod tests {
         assert!(super::certipy_esc4_full_chain(&args).await.is_ok());
     }
 
-    // --- cross-forest Kerberos wiring (Bug B, certipy subset) ---
+    // cross-forest Kerberos wiring (Bug B, certipy subset)
 
     // A forged inter-realm ccache for a contoso.local -> fabrikam.local trust.
     const XFOREST_CCACHE: &str =
@@ -2503,8 +2487,6 @@ mod tests {
             .iter()
             .any(|(k, _)| k == "KRB5CCNAME"));
     }
-
-    // --- render_chain_output ---
 
     #[tokio::test]
     async fn remove_ccache_files_deletes_every_ccache_in_dir() {

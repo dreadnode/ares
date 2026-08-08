@@ -10,9 +10,7 @@
 
 use std::process::Command;
 
-// ============================================================================
 // Argv pre-scanning (runs before clap)
-// ============================================================================
 
 /// Scan raw argv for `--k8s <namespace>` and `--k8s-deploy <deploy>`.
 /// Returns `(namespace, deploy)` if `--k8s` is present.
@@ -91,9 +89,7 @@ fn prescan_ec2_args() -> Option<(String, String, String)> {
     })
 }
 
-// ============================================================================
 // Argv stripping (shared by both transports)
-// ============================================================================
 
 /// Strip all transport and credential flags from argv.
 /// Returns the remaining args (without the binary name).
@@ -135,9 +131,7 @@ fn strip_transport_args() -> Vec<String> {
     result
 }
 
-// ============================================================================
 // K8s transport (kubectl exec — synchronous)
-// ============================================================================
 
 /// Auto-detect the K8s deployment name from the subcommand.
 fn detect_deploy(args: &[String]) -> &str {
@@ -181,11 +175,8 @@ pub(crate) fn maybe_exec_k8s() -> Option<i32> {
     }
 }
 
-// ============================================================================
 // EC2 transport (AWS SSM — async send/poll/fetch)
-// ============================================================================
 
-/// Resolve EC2 instance ID from a Name tag pattern.
 /// Return `["--profile", profile]` unless session env credentials are already
 /// exported (assume, aws-vault, instance metadata) — in that case the AWS CLI
 /// should use the env session, and passing `--profile` would send it looking
@@ -198,6 +189,7 @@ fn profile_args(profile: &str) -> Vec<&str> {
     }
 }
 
+/// Resolve EC2 instance ID from a Name tag pattern.
 fn resolve_ec2_instance(name: &str, profile: &str, region: &str) -> Result<String, String> {
     // Pass-through: if the caller already provided an instance ID (`i-…`),
     // skip the tag lookup. Lets operators pin a specific box when the Name
@@ -455,8 +447,6 @@ pub(crate) fn maybe_exec_ec2() -> Option<i32> {
 mod tests {
     use super::*;
 
-    // ── shell_join ──
-
     #[test]
     fn shell_join_simple_args() {
         let args = vec!["foo".into(), "bar".into(), "baz".into()];
@@ -509,8 +499,6 @@ mod tests {
         assert_eq!(shell_join(&args), "'a|b'");
     }
 
-    // ── json_escape ──
-
     #[test]
     fn json_escape_plain() {
         assert_eq!(json_escape("hello"), "hello");
@@ -550,8 +538,6 @@ mod tests {
     fn json_escape_combined() {
         assert_eq!(json_escape("a\\b\n\"c\""), "a\\\\b\\n\\\"c\\\"");
     }
-
-    // ── detect_deploy ──
 
     #[test]
     fn detect_deploy_blue() {

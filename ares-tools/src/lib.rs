@@ -91,7 +91,6 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
     };
 
     match tool_name {
-        // ── Reconnaissance ──────────────────────────────────────────
         "nmap_scan" => recon::nmap_scan(arguments).await,
         "smb_sweep" => recon::smb_sweep(arguments).await,
         "enumerate_users" => recon::enumerate_users(arguments).await,
@@ -110,7 +109,6 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "smbclient_kerberos_shares" => recon::smbclient_kerberos_shares(arguments).await,
         "ldap_acl_enumeration" => recon::ldap_acl_enumeration(arguments).await,
 
-        // ── Credential Access ───────────────────────────────────────
         "kerberoast" => credential_access::kerberoast(arguments).await,
         "asrep_roast" => credential_access::asrep_roast(arguments).await,
         "kerberos_user_enum_noauth" => {
@@ -134,11 +132,9 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "check_autologon_registry" => credential_access::check_autologon_registry(arguments).await,
         "netexec_auth_check" => credential_access::netexec_auth_check(arguments).await,
 
-        // ── Cracking ────────────────────────────────────────────────
         "crack_with_hashcat" => cracker::crack_with_hashcat(arguments).await,
         "crack_with_john" => cracker::crack_with_john(arguments).await,
 
-        // ── Lateral Movement ────────────────────────────────────────
         "psexec" => lateral::psexec(arguments).await,
         "psexec_kerberos" => lateral::psexec_kerberos(arguments).await,
         "wmiexec" => lateral::wmiexec(arguments).await,
@@ -168,7 +164,6 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "mssql_far_host_secretsdump" => lateral::mssql_far_host_secretsdump(arguments).await,
         "mssql_ntlm_coerce" => lateral::mssql_ntlm_coerce(arguments).await,
 
-        // ── Privilege Escalation ────────────────────────────────────
         "certipy_find" => privesc::certipy_find(arguments).await,
         "certipy_request" => privesc::certipy_request(arguments).await,
         "certipy_auth" => privesc::certipy_auth(arguments).await,
@@ -208,7 +203,6 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "petitpotam_unauth" => privesc::petitpotam_unauth(arguments).await,
         "windows_stage_and_run" => privesc::windows_stage_and_run(arguments).await,
 
-        // ── ACL Exploitation ────────────────────────────────────────
         "bloodyad_add_group_member" => acl::bloodyad_add_group_member(arguments).await,
         "bloodyad_get_object" => acl::bloodyad_get_object(arguments).await,
         "bloodyad_set_password" => acl::bloodyad_set_password(arguments).await,
@@ -223,7 +217,6 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "dacl_edit" => acl::dacl_edit(arguments).await,
         "owner_edit" => acl::owner_edit(arguments).await,
 
-        // ── Coercion & Relay ────────────────────────────────────────
         "start_responder" => coercion::start_responder(arguments).await,
         "start_mitm6" => coercion::start_mitm6(arguments).await,
         "coercer" => coercion::coercer(arguments).await,
@@ -243,7 +236,7 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
 mod tests {
     use super::*;
 
-    // ── ToolOutput::combined ─────────────────────────────────────────────────
+    // ToolOutput::combined
 
     #[test]
     fn combined_stdout_and_stderr_joined_with_separator() {
@@ -302,7 +295,7 @@ mod tests {
         assert_eq!(out.combined(), "");
     }
 
-    // ── ToolOutput::combined_raw ─────────────────────────────────────────────
+    // ToolOutput::combined_raw
 
     #[test]
     fn combined_raw_stdout_and_stderr_joined() {
@@ -345,8 +338,6 @@ mod tests {
         // combined() would strip it; combined_raw() must not
         assert!(out.combined_raw().contains("Last login"));
     }
-
-    // ── dispatch ─────────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn dispatch_unknown_tool_returns_error() {

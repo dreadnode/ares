@@ -291,7 +291,7 @@ mod tests {
         redact_command_line("tool", &owned)
     }
 
-    // ── Layer 1: unambiguous secret flags ────────────────────────────────────
+    // Layer 1: unambiguous secret flags
 
     #[test]
     fn every_secret_flag_masks_its_value() {
@@ -325,7 +325,7 @@ mod tests {
         );
     }
 
-    // ── Layer 2: ambiguous flags default to masking ──────────────────────────
+    // Layer 2: ambiguous flags default to masking
 
     #[test]
     fn ambiguous_p_masks_even_a_port_spec() {
@@ -350,7 +350,7 @@ mod tests {
         assert!(!line.contains(NT), "NT hash survived -H: {line}");
     }
 
-    // ── Boundary: secret flag with no following value ────────────────────────
+    // Boundary: secret flag with no following value
 
     #[test]
     fn secret_flag_as_last_arg_does_not_panic() {
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(redact_command_line("nmap", &[]), "nmap");
     }
 
-    // ── Boundary: an empty value is the absence of a secret ──────────────────
+    // Boundary: an empty value is the absence of a secret
 
     #[test]
     fn empty_values_are_never_masked() {
@@ -395,7 +395,7 @@ mod tests {
         );
     }
 
-    // ── Benign lookalikes stay intact ────────────────────────────────────────
+    // Benign lookalikes stay intact
 
     #[test]
     fn valueless_kerberos_booleans_do_not_swallow_the_next_arg() {
@@ -455,7 +455,7 @@ mod tests {
         );
     }
 
-    // ── Layer 3: embedded secrets in positional args ─────────────────────────
+    // Layer 3: embedded secrets in positional args
 
     #[test]
     fn impacket_target_keeps_identity_masks_password() {
@@ -548,8 +548,6 @@ mod tests {
         );
     }
 
-    // ── Opt-out ──────────────────────────────────────────────────────────────
-
     #[test]
     fn visible_index_is_left_unmasked() {
         let args = vec![
@@ -586,8 +584,6 @@ mod tests {
             format!("hashcat -w {REDACTED}")
         );
     }
-
-    // ── End-to-end argv shapes ───────────────────────────────────────────────
 
     #[test]
     fn full_netexec_argv_leaks_nothing() {
@@ -647,8 +643,6 @@ mod tests {
             "benign args lost: {line}"
         );
     }
-
-    // ── Free-text redaction ──────────────────────────────────────────────────
 
     #[test]
     fn ordinary_prose_passes_through_untouched() {

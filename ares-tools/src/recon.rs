@@ -976,10 +976,6 @@ for item in resp:
         .args(ACL_ENUM_ATTRIBUTES.iter().copied()))
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1002,7 +998,7 @@ mod tests {
         assert_eq!(domain_to_base_dn("local"), "DC=local");
     }
 
-    // --- mock executor tests: exercise full CommandBuilder code paths ---
+    // mock executor tests: exercise full CommandBuilder code paths
 
     use crate::executor::mock;
     use serde_json::json;
@@ -1304,7 +1300,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ── Bug B (ldap_search): ticket_path → KRB5CCNAME / password → -w ───
+    // Bug B (ldap_search): ticket_path → KRB5CCNAME / password → -w
 
     #[test]
     fn ldap_search_invocation_exports_krb5ccname_when_ticket_path_set() {
@@ -1499,7 +1495,7 @@ mod tests {
         assert!(msg.contains("anonymous bind"), "{msg}");
     }
 
-    // ── Bug B (enumerate_domain_trusts): ticket_path → KRB5CCNAME ───────
+    // Bug B (enumerate_domain_trusts): ticket_path → KRB5CCNAME
 
     #[test]
     fn enumerate_domain_trusts_invocation_exports_krb5ccname_when_ticket_path_set() {
@@ -1579,7 +1575,7 @@ mod tests {
         );
     }
 
-    // ── Bug B (ldap_acl_enumeration): ticket_path → KRB5CCNAME ──────────
+    // Bug B (ldap_acl_enumeration): ticket_path → KRB5CCNAME
 
     #[test]
     fn ldap_acl_enumeration_invocation_exports_krb5ccname_when_ticket_path_set() {

@@ -287,7 +287,7 @@ fn set_password_plan(record: &MutationRecord) -> UndoPlan {
 pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
     let a = &record.args;
     match record.tool.as_str() {
-        // ── CLEAN: action-flip on the same forward args ──────────────
+        // CLEAN: action-flip on the same forward args
         "add_computer" => add_computer_plan(record),
         "rbcd_write" => UndoPlan {
             class: Reversibility::Clean,
@@ -370,7 +370,7 @@ pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
              read-before-write capture of sys.configurations.value_in_use",
         ),
 
-        // ── HARD: reversible core but leaves residue needing a scrub ──
+        // HARD: reversible core but leaves residue needing a scrub
         // No clean tool inverse: the deployed bloodyAD exposes no `aclEntry`
         // remove (verified on-box), and SDProp has already propagated copies
         // of the ACE to every protected group — those must be scrubbed by hand.
@@ -391,7 +391,7 @@ pub fn undo_plan(record: &MutationRecord) -> UndoPlan {
              template-config path)",
         ),
 
-        // ── NEEDS-CAPTURE: blocked until forward-time state is journaled ──
+        // NEEDS-CAPTURE: blocked until forward-time state is journaled
         "pywhisker" => pywhisker_plan(record),
         "bloodyad_set_object_attr" => UndoPlan::manual(
             Reversibility::NeedsCapture,

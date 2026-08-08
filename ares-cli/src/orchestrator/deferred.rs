@@ -1669,7 +1669,7 @@ mod tests {
         assert_eq!(t.source_agent, "orchestrator");
     }
 
-    // ── Bug J: signature dedup ────────────────────────────────────────
+    // Bug J: signature dedup
 
     fn make_signed_task(
         task_type: &str,

@@ -1358,8 +1358,6 @@ mod tests {
         assert_eq!(resolve_linked_server_host_ip(&state, "SQL01"), None);
     }
 
-    // ── probe_failure_is_cross_forest_shape ────────────────────────────
-
     #[test]
     fn cross_forest_shape_matches_login_failed_for_user() {
         // Classic cross-forest double-hop failure: SQL accepts the
@@ -1460,7 +1458,7 @@ mod tests {
         assert!(probe_failure_is_cross_forest_shape(&outcome));
     }
 
-    // ── classify_probe_result (shared classifier path) ─────────────────
+    // classify_probe_result (shared classifier path)
 
     #[test]
     fn classify_tool_error_propagates_error_and_output() {
@@ -1508,8 +1506,6 @@ mod tests {
             ProbeOutcome::NoEvidence(_)
         ));
     }
-
-    // ── resolve_host_domain / has_far_forest_admin_credential ──────────
 
     fn make_host(ip: &str, hostname: &str) -> ares_core::models::Host {
         ares_core::models::Host {

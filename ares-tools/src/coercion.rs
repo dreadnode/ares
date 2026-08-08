@@ -399,7 +399,6 @@ fn build_relay_args(target_url: &str, template: &str, icpr_ca_name: Option<&str>
     args
 }
 
-// === Trait-based execution seam =====================================
 //
 // The phase-progression logic (spawn relay → run coerce phases → poll
 // log → extract cert) is exercised by unit tests via FakeCoerceProcs,
@@ -479,10 +478,6 @@ impl RunOptions {
     }
 }
 
-/// Wait for the given TCP port to become free on `0.0.0.0`. Polls every
-/// 250ms via a connect probe to `127.0.0.1:<port>`; a connection refused
-/// means nothing is listening. Returns `Ok(())` as soon as the port is
-/// free, `Err(reason)` if `timeout` elapses while it's still held.
 /// True when `ip` parses as a routable address bound to a local interface.
 /// Rejects loopback, unspecified and multicast addresses outright.
 pub(crate) fn is_local_interface_ip(ip: &str) -> bool {
@@ -497,6 +492,10 @@ pub(crate) fn is_local_interface_ip(ip: &str) -> bool {
     UdpSocket::bind((parsed, 0)).is_ok()
 }
 
+/// Wait for the given TCP port to become free on `0.0.0.0`. Polls every
+/// 250ms via a connect probe to `127.0.0.1:<port>`; a connection refused
+/// means nothing is listening. Returns `Ok(())` as soon as the port is
+/// free, `Err(reason)` if `timeout` elapses while it's still held.
 pub(crate) async fn wait_for_port_free(
     port: u16,
     timeout: Duration,
@@ -532,8 +531,6 @@ pub(crate) async fn wait_for_port_free(
         sleep(Duration::from_millis(250)).await;
     }
 }
-
-// --- Real (production) implementation -------------------------------
 
 struct RealCoerceProcs;
 
@@ -1629,7 +1626,7 @@ mod tests {
         );
     }
 
-    // ── Phase-progression coverage via FakeCoerceProcs ─────────────────────
+    // Phase-progression coverage via FakeCoerceProcs
 
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;

@@ -12,8 +12,6 @@ use tracing::info;
 use ares_core::state::blue_task_queue::BlueTaskResult;
 use ares_llm::tool_registry::blue::BlueAgentRole;
 
-// ── Static configuration ───────────────────────────────────────────
-
 /// Follow-up action descriptor produced by evidence chaining.
 #[derive(Debug, Clone)]
 struct ChainAction {
@@ -103,7 +101,7 @@ static EVIDENCE_CHAIN_MAP: LazyLock<HashMap<&'static str, Vec<ChainAction>>> = L
             ],
         );
 
-        // ── Crown-jewel evidence types (the paths blue historically missed) ──
+        // Crown-jewel evidence types (the paths blue historically missed)
         // Focus strings are actionable: event IDs to query and fields to check,
         // not English blurbs — the sub-agent gets them verbatim as its focus.
 
@@ -165,8 +163,6 @@ static CRITICAL_USERS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     s.insert("schema admins");
     s
 });
-
-// ── Public API ─────────────────────────────────────────────────────
 
 /// A follow-up hunt the chain map wants to run, resolved from evidence.
 ///
@@ -334,8 +330,6 @@ pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
 
     None
 }
-
-// ── Internals ──────────────────────────────────────────────────────
 
 /// Extract evidence type strings from a result payload.
 ///
@@ -631,7 +625,7 @@ mod additional_tests {
     use super::*;
     use serde_json::json;
 
-    // --- extract_evidence_types MITRE technique paths ---
+    // extract_evidence_types MITRE technique paths
 
     #[test]
     fn technique_t1003_maps_to_credential_access() {
@@ -764,7 +758,7 @@ mod crown_jewel_tests {
         }
     }
 
-    // --- extract_evidence_types: crown-jewel technique routing ---
+    // extract_evidence_types: crown-jewel technique routing
 
     #[test]
     fn t1649_maps_to_certificate_abuse() {
@@ -803,7 +797,7 @@ mod crown_jewel_tests {
         assert_eq!(types, vec!["credential_access"]);
     }
 
-    // --- chain map has the crown-jewel entries ---
+    // chain map has the crown-jewel entries
 
     #[test]
     fn chain_map_has_crown_jewel_entries() {
@@ -819,8 +813,6 @@ mod crown_jewel_tests {
             );
         }
     }
-
-    // --- plan_chain_actions / plan_task_result ---
 
     #[test]
     fn plan_chain_actions_for_certificate_abuse() {

@@ -1151,7 +1151,7 @@ mod tests {
         ));
     }
 
-    // ── tests for select_local_admin_secretsdump_work / select_pth_secretsdump_work ──
+    // tests for select_local_admin_secretsdump_work / select_pth_secretsdump_work
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -1186,8 +1186,6 @@ mod tests {
             trust_pair_label: None,
         }
     }
-
-    // --- select_local_admin_secretsdump_work ----------------------------
 
     #[test]
     fn select_local_admin_skips_empty_password() {
@@ -1283,8 +1281,6 @@ mod tests {
         // 2 creds × 2 DCs = 4 items.
         assert_eq!(work.len(), 4);
     }
-
-    // --- select_pth_secretsdump_work ------------------------------------
 
     #[test]
     fn select_pth_returns_empty_when_no_dominated_child() {

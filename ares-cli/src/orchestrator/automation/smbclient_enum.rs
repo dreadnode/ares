@@ -193,8 +193,6 @@ mod tests {
         }
     }
 
-    // ---- collect_smbclient_work tests ----
-
     #[tokio::test]
     async fn collect_empty_state_returns_nothing() {
         let shared = SharedState::new("op-test".into());
@@ -595,8 +593,6 @@ mod tests {
         let work = collect_smbclient_work(&state);
         assert!(work.is_empty());
     }
-
-    // ---- original tests ----
 
     #[test]
     fn dedup_key_format() {

@@ -481,8 +481,6 @@ mod tests {
         assert_eq!(work.domain, "contoso.local");
     }
 
-    // --- collect_acl_discovery_work tests ---
-
     #[test]
     fn collect_empty_state_returns_no_work() {
         let state = StateInner::new("test-op".into());

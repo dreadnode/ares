@@ -39,7 +39,7 @@ use crate::worker::config::WorkerConfig;
 use crate::worker::credential_resolver::resolve_credentials;
 use crate::worker::heartbeat::WorkerStatus;
 
-// ─── Wire types (match orchestrator's tool_dispatcher.rs exactly) ────────────
+// Wire types (match orchestrator's tool_dispatcher.rs exactly)
 
 /// Request from the orchestrator's RedisToolDispatcher.
 #[derive(Debug, Deserialize)]
@@ -73,8 +73,6 @@ struct ToolExecResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     failure_kind: Option<ares_llm::ToolFailureKind>,
 }
-
-// ─── Tool executor loop ─────────────────────────────────────────────────────
 
 /// Default per-worker concurrent-tool cap. Each worker processes up to N
 /// tool requests in parallel via `tokio::spawn`; the serial `.await` on
@@ -724,13 +722,9 @@ async fn send_reply(
     }
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── Dispatch/registry parity ──────────────────────────────────────────
 
     /// The worker dispatch table, read at compile time so the parity test
     /// below reads the real match arms rather than a hand-kept copy of them.
@@ -903,7 +897,7 @@ mod tests {
         });
     }
 
-    // ── Per-worker concurrency (Serial-loop wedge fix) ────────────────────
+    // Per-worker concurrency (Serial-loop wedge fix)
 
     /// Env-var tests serialise on this mutex — process-wide `set_var` is
     /// not test-isolated, and cargo runs unit tests in parallel by default.

@@ -89,7 +89,7 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
     let value = required_str(args, "value")?;
     let source = required_str(args, "source")?;
 
-    // ── Validate evidence before writing ─────────────────────────────
+    // Validate evidence before writing
     let vr = validation::validate_evidence(evidence_type, value, source);
     if !vr.valid {
         return Ok(make_error(&format!(

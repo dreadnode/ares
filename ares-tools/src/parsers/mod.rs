@@ -1141,8 +1141,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── empty_harvest_advisory ──────────────────────────────────────────────
-
     #[test]
     fn empty_harvest_advisory_fires_on_zero_yield_spray() {
         // password_spray that parsed no credentials → advisory.
@@ -1967,8 +1965,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert_eq!(hosts[0]["services"].as_array().unwrap().len(), 3);
     }
 
-    // ── is_zerologon_vulnerable ────────────────────────────────────────
-
     #[test]
     fn zerologon_vulnerable_token_only() {
         // Classic netexec column-formatted positive row.
@@ -2028,8 +2024,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         let out = "SMB         192.168.58.210  445    DC01             INVULNERABLE_TO_THIS_CHECK";
         assert!(!is_zerologon_vulnerable(out));
     }
-
-    // ── parse_tool_output("zerologon_check", ...) integration ──────────
 
     #[test]
     fn parse_tool_output_zerologon_emits_vuln_on_positive() {
@@ -2099,7 +2093,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
             b["vulnerabilities"][0]["vuln_id"]
         );
     }
-    // ── password_policy ───────────────────────────────────────────────
 
     #[test]
     fn parse_tool_output_password_policy_extracts_fields() {
@@ -2145,8 +2138,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert_eq!(policies[0]["lockout_threshold"], "0");
         assert!(policies[0].get("min_password_length").is_none());
     }
-
-    // ── evil_winrm ────────────────────────────────────────────────────
 
     #[test]
     fn parse_tool_output_evil_winrm_shell_success() {
@@ -2194,8 +2185,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert!(disc.get("vulnerabilities").is_none());
     }
 
-    // ── xfreerdp ─────────────────────────────────────────────────────
-
     #[test]
     fn parse_tool_output_xfreerdp3_auth_success() {
         // FreeRDP 3 logs rc directly, so a successful auth reads "status 1".
@@ -2236,8 +2225,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert!(disc.get("vulnerabilities").is_none());
     }
 
-    // ── ntds_dit_extract ──────────────────────────────────────────────
-
     #[test]
     fn parse_tool_output_ntds_dit_extract() {
         // ntds_dit_extract output is secretsdump format
@@ -2247,8 +2234,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert!(disc.get("hashes").is_some() || disc.get("credentials").is_some());
     }
 
-    // ── smb_login_check ───────────────────────────────────────────────
-
     #[test]
     fn parse_tool_output_smb_login_check() {
         let output = "[+] 192.168.58.10 contoso.local\\alice:Password1 (Pwn3d!)";
@@ -2257,8 +2242,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         let creds = disc["credentials"].as_array().expect("credentials");
         assert!(!creds.is_empty());
     }
-
-    // ── mssql_enum_impersonation ──────────────────────────────────────
 
     #[test]
     fn parse_tool_output_mssql_enum_impersonation() {
@@ -2279,8 +2262,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert!(disc.get("vulnerabilities").is_none());
     }
 
-    // ── mssql_enum_linked_servers ─────────────────────────────────────
-
     #[test]
     fn parse_tool_output_mssql_enum_linked_servers_returns_vulns() {
         // `SELECT name FROM sys.servers WHERE is_linked = 1` — single `name`
@@ -2293,8 +2274,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         let disc = parse_tool_output("mssql_enum_linked_servers", output, &params);
         assert!(disc.get("vulnerabilities").is_some());
     }
-
-    // ── enumerate_domain_trusts ───────────────────────────────────────
 
     #[test]
     fn parse_tool_output_enumerate_domain_trusts() {
@@ -2309,8 +2288,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert_eq!(td[0]["domain"], "fabrikam.local");
         assert_eq!(td[0]["trust_type"], "forest");
     }
-
-    // ── ldap_acl_enumeration ──────────────────────────────────────────
 
     #[test]
     fn parse_tool_output_ldap_acl_enumeration_empty() {
@@ -2416,7 +2393,7 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert!(disc.get("vulnerabilities").is_none());
     }
 
-    // ── merge_discoveries: discovered_users and shares ─────────────────
+    // merge_discoveries: discovered_users and shares
 
     #[test]
     fn merge_discoveries_combines_discovered_users() {
@@ -2493,8 +2470,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert!(merged.get("hosts").is_none());
     }
 
-    // ── looks_like_ip_pub ─────────────────────────────────────────────
-
     #[test]
     fn looks_like_ip_pub_accepts_valid() {
         assert!(looks_like_ip_pub("192.168.58.10"));
@@ -2508,7 +2483,7 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert!(!looks_like_ip_pub("256.1.1.1"));
     }
 
-    // ── relay_and_coerce: no relayed_user ────────────────────────────
+    // relay_and_coerce: no relayed_user
 
     #[test]
     fn parse_tool_output_relay_and_coerce_no_relayed_user_still_emits() {
@@ -2522,7 +2497,7 @@ CONTOSO\\svc_sql:P@ssw0rd!
         assert!(vulns[0]["details"].get("target_user").is_none());
     }
 
-    // ── certipy_esc4/esc7_full_chain reuse the ESC1/ESC13/auth arm ────
+    // certipy_esc4/esc7_full_chain reuse the ESC1/ESC13/auth arm
 
     #[test]
     fn parse_tool_output_certipy_esc4_full_chain_extracts_hash() {
@@ -2548,8 +2523,6 @@ CONTOSO\\svc_sql:P@ssw0rd!
         );
         assert_eq!(disc["hashes"].as_array().unwrap().len(), 1);
     }
-
-    // ── ntlmrelayx_* arms ─────────────────────────────────────────────
 
     #[test]
     fn parse_tool_output_pywhisker_publishes_the_pfx_for_stage_two() {
@@ -2712,8 +2685,6 @@ localadmin:1001:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef123456789
         assert!(disc.get("vulnerabilities").is_none());
     }
 
-    // ── start_mitm6 ───────────────────────────────────────────────────
-
     #[test]
     fn parse_tool_output_start_mitm6_extracts_netntlmv2() {
         let output = "\
@@ -2731,8 +2702,6 @@ Starting mitm6 using the domain: contoso.local
         let disc = parse_tool_output("start_mitm6", output, &params);
         assert!(disc.get("hashes").is_none());
     }
-
-    // ── mssql_ntlm_coerce ─────────────────────────────────────────────
 
     #[test]
     fn parse_tool_output_mssql_ntlm_coerce_emits_coercion_marker() {
@@ -2795,8 +2764,6 @@ Starting mitm6 using the domain: contoso.local
         assert!(disc.get("spns").is_none());
     }
 
-    // ── nopac ─────────────────────────────────────────────────────────
-
     #[test]
     fn parse_tool_output_nopac_extracts_dcsync_hashes() {
         let output = "\
@@ -2829,8 +2796,6 @@ Starting mitm6 using the domain: contoso.local
         assert!(disc.get("hashes").is_none());
         assert!(disc.get("vulnerabilities").is_none());
     }
-
-    // ── printnightmare ────────────────────────────────────────────────
 
     #[test]
     fn parse_tool_output_printnightmare_emits_vuln_on_success_marker() {
@@ -2865,8 +2830,6 @@ Starting mitm6 using the domain: contoso.local
         );
         assert!(disc.get("vulnerabilities").is_none());
     }
-
-    // ── laps_dump ─────────────────────────────────────────────────────
 
     #[test]
     fn parse_tool_output_laps_dump_extracts_admin_creds() {

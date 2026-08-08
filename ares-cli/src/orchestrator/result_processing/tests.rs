@@ -790,8 +790,6 @@ fn parse_shares_with_comment() {
     assert_eq!(parsed.shares[0].comment, "Logon server share");
 }
 
-// --- parse_pwned_line tests ---
-
 #[test]
 fn pwned_line_standard_format() {
     let line = "[+] CONTOSO\\admin:P@ssw0rd! (Pwn3d!)";
@@ -868,8 +866,6 @@ fn pwned_line_username_with_special_chars() {
     );
 }
 
-// --- extract_ip_from_line tests ---
-
 #[test]
 fn extract_ip_basic() {
     let line = "SMB 192.168.58.10 445 DC01 [+] CONTOSO\\admin (Pwn3d!)";
@@ -914,8 +910,6 @@ fn extract_ip_boundary_values() {
     assert_eq!(extract_ip_from_line(line), Some("0.0.0.0".to_string()));
 }
 
-// --- has_golden_ticket_indicator tests ---
-
 #[test]
 fn golden_ticket_indicator_present() {
     let text = "Saving ticket in administrator.ccache";
@@ -944,8 +938,6 @@ fn golden_ticket_indicator_both_present_not_adjacent() {
     let text = "Saving ticket in /tmp/krbtgt@CONTOSO.LOCAL.ccache\nDone";
     assert!(has_golden_ticket_indicator(text));
 }
-
-// --- resolve_da_path tests ---
 
 fn state_with_krbtgt_from(source: &str) -> StateInner {
     let mut state = StateInner::new("op-test".to_string());
@@ -994,8 +986,6 @@ fn da_path_does_not_read_agent_authored_claims() {
         Some("secretsdump → krbtgt NTLM hash".to_string())
     );
 }
-
-// --- credential_techniques tests ---
 
 #[test]
 fn credential_techniques_admin_base() {
@@ -1053,8 +1043,6 @@ fn credential_techniques_empty_source() {
     let t = credential_techniques("", false);
     assert_eq!(t, vec!["T1552"]);
 }
-
-// --- hash_techniques tests ---
 
 #[test]
 fn hash_techniques_base() {
@@ -1140,8 +1128,6 @@ fn hash_techniques_as_rep_hyphenated_source() {
     let t = hash_techniques("aabb", "unknown", "as-rep_roast");
     assert!(t.contains(&"T1558.004".to_string()));
 }
-
-// --- is_critical_hash tests ---
 
 #[test]
 fn critical_hash_krbtgt() {
@@ -2502,8 +2488,6 @@ fn roast_token_lowercases_account_and_domain() {
     );
 }
 
-// ── result_has_ntlmv1_signal ──────────────────────────────────────────
-
 #[test]
 fn ntlmv1_signal_none_payload_is_false() {
     use super::result_has_ntlmv1_signal;
@@ -2580,8 +2564,6 @@ fn ntlmv1_signal_ignores_scalar_output_field() {
     assert!(!result_has_ntlmv1_signal(&Some(p)));
 }
 
-// ── result_has_seimpersonate_signal ────────────────────────────────────
-
 #[test]
 fn seimpersonate_signal_recognises_enabled_row() {
     use super::result_has_seimpersonate_signal;
@@ -2637,8 +2619,6 @@ fn seimpersonate_signal_ignores_scalar_output_field() {
     assert!(!result_has_seimpersonate_signal(&Some(p)));
 }
 
-// ── result_has_ccache_evidence ─────────────────────────────────────────
-
 #[test]
 fn ccache_evidence_recognises_canonical_saving_line() {
     use super::result_has_ccache_evidence;
@@ -2678,8 +2658,6 @@ fn ccache_evidence_ignores_scalar_output_field() {
     let p = json!({"output": "Saving ticket in admin.ccache"});
     assert!(!result_has_ccache_evidence(&Some(p)));
 }
-
-// ── result_text_indicates_failure ──────────────────────────────────────
 
 #[test]
 fn text_failure_recognises_summary_failure_prefixes() {
@@ -2734,8 +2712,6 @@ fn text_failure_none_payload_false() {
     assert!(!result_text_indicates_failure(&None));
 }
 
-// ── parse_lockout_principal ─────────────────────────────────────────────
-
 #[test]
 fn parse_lockout_principal_canonical_netexec_line() {
     use super::parse_lockout_principal;
@@ -2779,8 +2755,6 @@ fn parse_lockout_principal_empty_user_or_domain_rejected() {
     let line = "[-] CONTOSO\\:pw STATUS_ACCOUNT_LOCKED_OUT";
     assert!(parse_lockout_principal(line).is_none());
 }
-
-// ── extract_locked_usernames_from_result ────────────────────────────────
 
 #[test]
 fn locked_usernames_walks_tool_outputs_strings() {
@@ -3047,7 +3021,6 @@ mod reconcile_low_trust_credential_domain {
     }
 }
 
-// ── collect_result_text_parts ─────────────────────────────────────────────
 //
 // `collect_result_text_parts` pulls trusted tool stdout out of the
 // `tool_outputs` array, ignoring top-level `output` / `summary` prose fields
@@ -3116,8 +3089,6 @@ fn collect_result_text_parts_skips_non_string_and_non_object_entries() {
     assert_eq!(parts, vec!["kept"]);
 }
 
-// ── is_low_trust_realm_inferred_credential_source ──────────────────────────
-
 #[test]
 fn low_trust_sources_are_recognised() {
     use super::is_low_trust_realm_inferred_credential_source;
@@ -3156,8 +3127,6 @@ fn high_trust_sources_are_not_recognised() {
         );
     }
 }
-
-// ── is_dcsync_chain_blocked_by_sid_filter (Bug C) ──────────────────────────
 
 #[test]
 fn auto_trust_follow_skips_dcsync_chain_for_sid_filtered_target() {
@@ -3246,7 +3215,7 @@ fn dcsync_chain_not_blocked_when_no_trust_metadata() {
     ));
 }
 
-// ── Bug E: AES kerberoast retry + SPN lockout propagation ──────────────────
+// Bug E: AES kerberoast retry + SPN lockout propagation
 
 #[test]
 fn etype_nosupp_detector_matches_canonical_marker() {
@@ -3389,8 +3358,6 @@ fn lockout_on_spn_account_propagates_to_spray_exclusion() {
         remaining
     );
 }
-
-// ── shadow-cred pre-flight helpers ─────────────────────────────────────
 
 use super::{
     grants_dacl_write, is_shadow_cred_vuln_type, result_indicates_keycredlink_access_denied,
@@ -3536,8 +3503,6 @@ fn keycredlink_denied_accepts_worker_error_string() {
         "INSUFF_ACCESS_RIGHTS on msDS-KeyCredentialLink for target CB-ATTK1$"
     ));
 }
-
-// ── extract_asrep_roastable_users ──
 
 /// Shape a `report_finding` payload the way `merge_result_extras` / the
 /// `report_finding` callback produce it: an `llm_findings` array of
@@ -3692,7 +3657,6 @@ fn asrep_finding_multiple_findings_all_recovered() {
     assert_eq!(users[1].domain, "fabrikam.local");
 }
 
-// ── Hash-credit convergence ─────────────────────────────────────────────────
 //
 // Two paths publish hashes — the parser path in `mod.rs` and the realtime
 // discovery channel in `discovery_polling.rs` — and for the whole life of the
@@ -3771,7 +3735,7 @@ fn roast_credit_publishes_its_record_before_it_claims_the_credit() {
     );
 }
 
-// ── Credential publish credit parity ────────────────────────────────────────
+// Credential publish credit parity
 
 const ACL_GRANTS_SRC: &str = include_str!("acl_grants.rs");
 
@@ -3856,8 +3820,6 @@ fn credential_publish_and_credit_are_welded_in_one_helper() {
         "credential publishing escaped the single credited call site"
     );
 }
-
-// ── Admin-upgrade host scope ────────────────────────────────────────────────
 
 #[test]
 fn admin_upgrade_description_names_the_host_the_grant_was_proven_on() {

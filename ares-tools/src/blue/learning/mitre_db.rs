@@ -580,8 +580,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── truncate_description ────────────────────────────────────────
-
     #[test]
     fn truncate_short_string_unchanged() {
         assert_eq!(truncate_description("hello", 10), "hello");
@@ -603,8 +601,6 @@ mod tests {
     fn truncate_empty_string() {
         assert_eq!(truncate_description("", 10), "");
     }
-
-    // ── lookup_technique ────────────────────────────────────────────
 
     #[test]
     fn lookup_known_technique() {
@@ -655,8 +651,6 @@ mod tests {
         assert!(result.stdout.contains("OS Credential Dumping"));
     }
 
-    // ── suggest_techniques ──────────────────────────────────────────
-
     #[test]
     fn suggest_credential_access() {
         let args = json!({"evidence_type": "credential_access"});
@@ -693,8 +687,6 @@ mod tests {
         let args = json!({});
         assert!(suggest_techniques(&args).is_err());
     }
-
-    // ── static data integrity ───────────────────────────────────────
 
     #[test]
     fn techniques_db_is_nonempty() {

@@ -210,8 +210,6 @@ mod tests {
         assert_eq!(key, "maq:contoso.local");
     }
 
-    // --- collect_maq_work tests ---
-
     use crate::orchestrator::state::StateInner;
 
     fn make_cred(username: &str, domain: &str) -> ares_core::models::Credential {

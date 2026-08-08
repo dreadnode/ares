@@ -126,7 +126,7 @@ impl ToolDispatcher for MockDispatcher {
 async fn main() -> Result<()> {
     println!("=== Ares LLM Smoke Test ===\n");
 
-    // ── 1. System prompt via Tera template ──
+    // 1. System prompt via Tera template
     let capabilities = vec![
         "nmap_scan".to_string(),
         "enumerate_users".to_string(),
@@ -150,7 +150,7 @@ async fn main() -> Result<()> {
         system_prompt.len()
     );
 
-    // ── 2. Task prompt from payload ──
+    // 2. Task prompt from payload
     let payload = json!({
         "target": "192.168.58.10",
         "scan_type": "default",
@@ -161,12 +161,11 @@ async fn main() -> Result<()> {
     assert!(!task_prompt.is_empty());
     println!("[OK] Task prompt generated ({} chars)", task_prompt.len());
 
-    // ── 3. Tool registry ──
     let tools: Vec<ToolDefinition> = tools_for_role(AgentRole::Recon);
     assert!(!tools.is_empty());
     println!("[OK] Tool registry: {} tools for recon role", tools.len());
 
-    // ── 4. Agent loop (mock provider + mock dispatcher) ──
+    // 4. Agent loop (mock provider + mock dispatcher)
     let provider = MockProvider::new();
     let dispatcher: Arc<dyn ToolDispatcher> = Arc::new(MockDispatcher);
     let config = AgentLoopConfig {

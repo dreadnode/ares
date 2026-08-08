@@ -379,8 +379,6 @@ mod tests {
         assert!(closest_match("totally.unrelated.domain", &known).is_none());
     }
 
-    // ── cross-realm auth guardrail ──────────────────────────────────────────
-
     #[test]
     fn native_auth_tools_are_guarded() {
         // Native impacket auth tools with a Kerberos alternative → guarded.

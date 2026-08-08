@@ -7,8 +7,6 @@
 
 use serde_json::{json, Value};
 
-// ── Well-known SID prefixes ────────────────────────────────────────────────
-
 /// Map well-known SIDs to friendly names: the universal SIDs, the
 /// `S-1-5-32-<rid>` BUILTIN aliases, and the domain-relative
 /// `S-1-5-21-<domain>-<rid>` principals every AD install creates.
@@ -201,8 +199,6 @@ fn is_laps_expiry_attribute(line: &str) -> bool {
     LAPS_EXPIRY_ATTRIBUTES.contains(&name.as_str())
 }
 
-// ── Access mask flags ──────────────────────────────────────────────────────
-
 const GENERIC_ALL: u32 = 0x10000000;
 const GENERIC_WRITE: u32 = 0x40000000;
 const ADS_RIGHT_DS_CONTROL_ACCESS: u32 = 0x00000100;
@@ -212,7 +208,7 @@ const WRITE_DACL: u32 = 0x00040000;
 const WRITE_OWNER: u32 = 0x00080000;
 const FULL_CONTROL: u32 = 0x000F01FF;
 
-// ── Object type GUIDs for extended rights ──────────────────────────────────
+// Object type GUIDs for extended rights
 
 /// User-Force-Change-Password (Reset Password extended right)
 const GUID_FORCE_CHANGE_PASSWORD: &str = "00299570-246d-11d0-a768-00aa006e0529";
@@ -220,8 +216,6 @@ const GUID_FORCE_CHANGE_PASSWORD: &str = "00299570-246d-11d0-a768-00aa006e0529";
 const GUID_SELF_MEMBERSHIP: &str = "bf9679c0-0de6-11d0-a285-00aa003049e2";
 /// Write-Member (write to member attribute on group)
 const GUID_WRITE_MEMBER: &str = "bf9679a8-0de6-11d0-a285-00aa003049e2";
-
-// ── Binary parsing helpers ─────────────────────────────────────────────────
 
 fn read_u8(data: &[u8], offset: usize) -> Option<u8> {
     data.get(offset).copied()
@@ -295,8 +289,6 @@ fn parse_guid(data: &[u8], offset: usize) -> Option<String> {
         d1, d2, d3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7]
     ))
 }
-
-// ── ACE types ──────────────────────────────────────────────────────────────
 
 const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
 const ACCESS_ALLOWED_OBJECT_ACE_TYPE: u8 = 0x05;
@@ -1177,7 +1169,7 @@ displayName: Default Domain Policy
         assert!(result.is_empty());
     }
 
-    // ── parse_security_descriptor / parse_ace edge cases ────────────────
+    // parse_security_descriptor / parse_ace edge cases
 
     #[test]
     fn parse_sd_rejects_without_dacl_present_bit() {
@@ -1251,8 +1243,6 @@ displayName: Default Domain Policy
         assert_eq!(result[0].0, "S-1-5-21-1-2-1001");
         assert_eq!(result[0].1, "genericall");
     }
-
-    // ── parse_acl_enumeration coverage ──────────────────────────────────
 
     #[test]
     fn parse_acl_enumeration_ignores_record_without_ntsd() {
@@ -1365,8 +1355,6 @@ displayName: Test GPO
         assert!(v.is_empty());
     }
 
-    // ── base64_decode edge cases ────────────────────────────────────────
-
     #[test]
     fn base64_decode_padded_full_block() {
         // "Man" → "TWFu"
@@ -1379,8 +1367,6 @@ displayName: Test GPO
         let decoded = base64_decode("T\n W\t F u").unwrap();
         assert_eq!(decoded, b"Man".to_vec());
     }
-
-    // ── classify_ace edge cases ─────────────────────────────────────────
 
     #[test]
     fn classify_combined_flags_returns_each_dangerous_type() {
@@ -1433,7 +1419,7 @@ displayName: Test GPO
         let types = classify_ace(&ace);
         assert!(types.contains(&"allextendedrights"));
     }
-    // ── parse_acl_enumeration with real SD producing vulns ─────────
+    // parse_acl_enumeration with real SD producing vulns
 
     // The SD built below encodes a GenericAll ACE granted to trustee
     // S-1-5-21-1-2-1001 on a user object with sAMAccountName "bob".

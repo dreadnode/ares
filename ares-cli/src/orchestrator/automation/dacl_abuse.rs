@@ -1073,8 +1073,6 @@ mod tests {
         assert_eq!(source, "svc_account");
     }
 
-    // -- collect_dacl_work integration tests --
-
     use crate::orchestrator::state::SharedState;
     use ares_core::models::{Credential, VulnerabilityInfo};
     use std::collections::HashMap;
@@ -2513,8 +2511,6 @@ mod tests {
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].target_user, "fallback_target");
     }
-
-    // ── build_dacl_payload ─────────────────────────────────────────────
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {

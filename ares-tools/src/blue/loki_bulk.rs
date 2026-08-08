@@ -83,8 +83,6 @@ const EXPORT_PAGE_LIMIT: u64 = 5000;
 /// Default batch size for import (entries per push request).
 const DEFAULT_IMPORT_BATCH: usize = 2000;
 
-// ─── Export ──────────────────────────────────────────────────────────────
-
 /// Paginated forward-scan through `query_range`, writing push-format JSONL.
 ///
 /// Returns the total number of log entries exported. Each output line is a
@@ -260,8 +258,6 @@ async fn export_page(
 
     bail!("export page failed after {MAX_RETRIES} attempts")
 }
-
-// ─── Import ─────────────────────────────────────────────────────────────
 
 /// Read push-format JSONL and POST to `/loki/api/v1/push` in batches.
 ///
@@ -441,8 +437,6 @@ struct AggregatedStream {
     stream: serde_json::Map<String, serde_json::Value>,
     values: Vec<Vec<String>>,
 }
-
-// ─── Label discovery ────────────────────────────────────────────────────
 
 /// Fetch all values for a Loki label within a time range.
 ///

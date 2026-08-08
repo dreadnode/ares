@@ -132,8 +132,6 @@ mod tests {
         }
     }
 
-    // -- resolve_flat_to_fqdn -----------------------------------------------
-
     #[test]
     fn resolve_flat_uses_trusted_domain_metadata() {
         let mut state = StateInner::new("op-test".into());
@@ -194,8 +192,6 @@ mod tests {
         );
     }
 
-    // -- resolve_fqdn_to_flat ----------------------------------------------
-
     #[test]
     fn resolve_fqdn_to_flat_uses_trusted_domain_metadata() {
         let mut state = StateInner::new("op-test".into());
@@ -246,8 +242,6 @@ mod tests {
         assert_eq!(resolve_fqdn_to_flat("", &state), None);
     }
 
-    // -- is_valid_domain_fqdn ----------------------------------------------
-
     #[test]
     fn valid_fqdn_accepts_standard_domain() {
         assert!(is_valid_domain_fqdn("contoso.local"));
@@ -297,8 +291,6 @@ mod tests {
         assert!(is_valid_domain_fqdn("hr-team.contoso.local"));
         assert!(is_valid_domain_fqdn("_kerberos.contoso.local"));
     }
-
-    // -- canonicalize_domain_label -----------------------------------------
 
     #[test]
     fn canonicalize_passes_through_valid_fqdn() {

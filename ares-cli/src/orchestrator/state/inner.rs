@@ -1216,7 +1216,6 @@ mod tests {
         assert!(!state.has_golden_ticket);
         assert!(!state.completed);
 
-        // All 19 dedup sets should be initialized
         for name in ALL_DEDUP_SETS {
             assert!(state.dedup.contains_key(*name), "Missing dedup set: {name}");
             assert!(state.dedup[*name].is_empty());
@@ -1277,8 +1276,6 @@ mod tests {
         let removed = state.unmark_processed_by_prefix("does_not_exist", "x:");
         assert!(removed.is_empty());
     }
-
-    // --- assist-abandoned TTL ----------------------------------------
 
     #[test]
     fn assist_abandoned_starts_false() {
@@ -1897,8 +1894,6 @@ mod tests {
         // Should not be quarantined (expired)
         assert!(!state.is_principal_quarantined("jdoe", "child.contoso.local"));
     }
-
-    // --- push_hash_capped ---------------------------------------------------
 
     fn make_test_hash(username: &str, hash_value: &str) -> Hash {
         Hash {

@@ -194,8 +194,6 @@ mod tests {
         }
     }
 
-    // --- resolve_delegation_dc -----------------------------------------
-
     #[test]
     fn resolve_dc_exact_match() {
         let mut s = StateInner::new("op".into());
@@ -250,8 +248,6 @@ mod tests {
             Some("192.168.58.10")
         );
     }
-
-    // --- select_delegation_work ---------------------------------------
 
     #[test]
     fn select_delegation_emits_when_cred_dc_match() {

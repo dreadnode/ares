@@ -9,8 +9,6 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-// ─── Config types ──────────────────────────────────────────────────────────
-
 #[derive(Debug, Deserialize)]
 pub struct DetectionConfig {
     /// Event ID descriptions — agent context, not used by query builder.
@@ -60,8 +58,6 @@ fn default_log_source() -> String {
     "windows-security".to_string()
 }
 
-// ─── Rule-provisioning gate ────────────────────────────────────────────────
-
 pub const RULE_CREATION_ENV: &str = "ARES_BLUE_ALLOW_RULE_CREATION";
 
 /// Whether blue agents may author and provision Grafana alert rules. Defaults
@@ -80,8 +76,6 @@ pub fn rule_creation_enabled() -> bool {
     }
 }
 
-// ─── Singleton loader ──────────────────────────────────────────────────────
-
 static CONFIG: OnceLock<DetectionConfig> = OnceLock::new();
 
 pub fn detection_config() -> &'static DetectionConfig {
@@ -90,8 +84,6 @@ pub fn detection_config() -> &'static DetectionConfig {
         serde_yaml::from_str(yaml).expect("detections.yaml is invalid")
     })
 }
-
-// ─── Template lookup ───────────────────────────────────────────────────────
 
 /// Find a template by name or alias.
 pub fn find_template(name: &str) -> Option<(&'static str, &'static TemplateEntry)> {
@@ -108,8 +100,6 @@ pub fn find_template(name: &str) -> Option<(&'static str, &'static TemplateEntry
     }
     None
 }
-
-// ─── Lateral movement helpers ──────────────────────────────────────────────
 
 /// Mapping from connection type to MITRE technique ID.
 ///

@@ -307,8 +307,6 @@ pub fn spawn_hosts_sync(
     })
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,8 +360,6 @@ mod tests {
         let entries = build_host_entries(&hosts, &HashSet::new());
         assert_eq!(entries.len(), 1);
     }
-
-    // ─── render_hosts_file ────────────────────────────────────────────────
 
     #[test]
     fn render_hosts_file_appends_block_to_base() {

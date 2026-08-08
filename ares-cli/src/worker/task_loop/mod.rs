@@ -38,8 +38,6 @@ use crate::worker::heartbeat::WorkerStatus;
 /// TTL for task status keys — 24 hours.
 const TASK_STATUS_TTL: i64 = 60 * 60 * 24;
 
-// ─── Task loop ───────────────────────────────────────────────────────────────
-
 /// Run the main task consumption loop until shutdown is signalled.
 pub async fn run_task_loop(
     config: &WorkerConfig,

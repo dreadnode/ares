@@ -144,8 +144,6 @@ pub fn assign_pyramid_level(evidence_type: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    // ── validate_evidence tests ──────────────────────────────────────
-
     #[test]
     fn valid_evidence_passes() {
         let result = validate_evidence("suspicious_ip", "192.168.58.10", "siem");
@@ -238,8 +236,6 @@ mod tests {
         assert!(result.warnings.is_empty());
     }
 
-    // ── validate_technique_id tests ──────────────────────────────────
-
     #[test]
     fn valid_technique_id_base() {
         let result = validate_technique_id("T1003");
@@ -279,8 +275,6 @@ mod tests {
         let result = validate_technique_id("T1003abc");
         assert!(!result.valid);
     }
-
-    // ── assign_pyramid_level tests ──────────────────────────────────
 
     #[test]
     fn pyramid_level_ip() {

@@ -154,8 +154,6 @@ pub(crate) fn dedup_users(users: &[User], netbios_to_fqdn: &HashMap<String, Stri
 mod tests {
     use super::*;
 
-    // ── resolve_netbios_domain ──────────────────────────────────────
-
     #[test]
     fn fqdn_passthrough() {
         let map = HashMap::new();
@@ -194,8 +192,6 @@ mod tests {
         );
     }
 
-    // ── noise filtering ─────────────────────────────────────────────
-
     #[test]
     fn noise_usernames_list_is_nonempty() {
         assert!(!NOISE_USERNAMES.is_empty());
@@ -208,8 +204,6 @@ mod tests {
         assert!(!NOISE_USERNAME_PREFIXES.is_empty());
         assert!(NOISE_USERNAME_PREFIXES.contains(&"sqlserver"));
     }
-
-    // ── dedup_users ─────────────────────────────────────────────────
 
     fn make_user(username: &str, domain: &str, source: &str) -> User {
         User {

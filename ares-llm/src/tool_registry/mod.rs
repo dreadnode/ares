@@ -839,7 +839,7 @@ mod tests {
         assert!(names.contains(&"coercer"));
     }
 
-    // ── AgentRole::parse ────────────────────────────────────────────
+    // AgentRole::parse
 
     #[test]
     fn parse_role_exact() {
@@ -906,9 +906,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
     // Blue team tool registry tests
-    // -----------------------------------------------------------------------
 
     #[cfg(feature = "blue")]
     mod blue_tests {

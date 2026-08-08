@@ -49,7 +49,7 @@ pub struct OperationConfig {
     #[serde(default)]
     pub llm_temperature: Option<f32>,
 
-    // --- Attack-path diversity (see docs/attack-path-diversity.md) ---
+    // Attack-path diversity (see docs/attack-path-diversity.md)
     // All default to today's deterministic behaviour; nothing changes until set.
     /// Queue selection temperature for softmax sampling in `pop_best` /
     /// `pop_next_vuln`. 0.0 = deterministic argmin (current behaviour); higher

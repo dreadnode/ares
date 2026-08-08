@@ -180,8 +180,6 @@ mod tests {
         assert_eq!(optional_str(&args, "dc_ip"), Some("192.168.58.2"));
     }
 
-    // --- mock executor tests ---
-
     use crate::executor::mock;
 
     #[tokio::test]

@@ -905,8 +905,6 @@ mod tests {
     use crate::args::{optional_bool, optional_str, required_str};
     use serde_json::json;
 
-    // ── domain_to_base_dn ──────────────────────────────────────────────
-
     #[test]
     fn domain_to_base_dn_simple() {
         assert_eq!(domain_to_base_dn("contoso.local"), "DC=contoso,DC=local");
@@ -956,8 +954,6 @@ mod tests {
         );
     }
 
-    // ── bloodyad_add_group_member arg validation ───────────────────────
-
     #[test]
     fn bloodyad_add_group_member_missing_domain() {
         let args = json!({
@@ -987,8 +983,6 @@ mod tests {
         assert_eq!(required_str(&args, "group").unwrap(), "Domain Admins");
         assert_eq!(required_str(&args, "target_user").unwrap(), "jsmith");
     }
-
-    // ── bloodyad_set_password arg validation ───────────────────────────
 
     #[test]
     fn bloodyad_set_password_missing_new_password() {
@@ -1091,8 +1085,6 @@ mod tests {
         }
     }
 
-    // ── bloodyad_add_genericall arg validation ─────────────────────────
-
     #[test]
     fn bloodyad_genericall_missing_target_dn() {
         let args = json!({
@@ -1121,8 +1113,6 @@ mod tests {
         );
         assert_eq!(required_str(&args, "principal").unwrap(), "jsmith");
     }
-
-    // ── adminsd_holder_add_ace arg validation ──────────────────────────
 
     #[test]
     fn adminsd_holder_right_default() {
@@ -1162,8 +1152,6 @@ mod tests {
         assert!(adminsd_dn.ends_with("DC=local"));
     }
 
-    // ── gmsa_read_password arg validation ──────────────────────────────
-
     #[test]
     fn gmsa_read_password_missing_account() {
         let args = json!({
@@ -1186,8 +1174,6 @@ mod tests {
         });
         assert_eq!(required_str(&args, "gmsa_account").unwrap(), "svc_web$");
     }
-
-    // ── pywhisker arg validation ───────────────────────────────────────
 
     #[test]
     fn pywhisker_default_action() {
@@ -1227,8 +1213,6 @@ mod tests {
         assert!(required_str(&args, "target_samaccountname").is_err());
     }
 
-    // ── targeted_kerberoast arg validation ─────────────────────────────
-
     #[test]
     fn targeted_kerberoast_missing_target_user() {
         let args = json!({
@@ -1251,8 +1235,6 @@ mod tests {
         });
         assert_eq!(required_str(&args, "target_user").unwrap(), "svc_sql");
     }
-
-    // ── sharpgpoabuse arg validation ───────────────────────────────────
 
     #[test]
     fn sharpgpoabuse_default_action() {
@@ -1326,8 +1308,6 @@ mod tests {
         assert!(optional_str(&args, "computer_target").is_none());
     }
 
-    // ── pygpoabuse_immediate_task arg validation ───────────────────────
-
     #[test]
     fn pygpoabuse_default_taskname() {
         let args = json!({
@@ -1382,8 +1362,6 @@ mod tests {
         });
         assert!(required_str(&args, "gpo_id").is_err());
     }
-
-    // ── dacl_edit arg validation ───────────────────────────────────────
 
     #[test]
     fn dacl_edit_default_action() {
@@ -1442,8 +1420,6 @@ mod tests {
         assert!(required_str(&args, "principal").is_err());
     }
 
-    // ── credential helper integration ──────────────────────────────────
-
     #[test]
     fn bloodyad_creds_format() {
         let creds =
@@ -1488,8 +1464,6 @@ mod tests {
         assert_eq!(target, "admin:P@ssw0rd!@192.168.58.10");
     }
 
-    // ── domain_to_base_dn edge cases ──────────────────────────────────
-
     #[test]
     fn domain_to_base_dn_empty_string() {
         assert_eq!(domain_to_base_dn(""), "DC=");
@@ -1503,7 +1477,7 @@ mod tests {
         );
     }
 
-    // ── adminsd_holder_dn with nested domains ─────────────────────────
+    // adminsd_holder_dn with nested domains
 
     #[test]
     fn adminsd_holder_dn_nested_domain() {
@@ -1514,8 +1488,6 @@ mod tests {
             "CN=AdminSDHolder,CN=System,DC=child,DC=contoso,DC=local"
         );
     }
-
-    // ── sharpgpoabuse action_flag formatting ──────────────────────────
 
     #[test]
     fn sharpgpoabuse_custom_action_flag() {
@@ -1532,7 +1504,7 @@ mod tests {
         assert_eq!(action_flag, "--AddComputerTask");
     }
 
-    // --- mock executor tests: exercise full CommandBuilder code paths ---
+    // mock executor tests: exercise full CommandBuilder code paths
 
     use crate::executor::mock;
 
@@ -1714,7 +1686,7 @@ mod tests {
         assert!(super::dacl_edit(&args).await.is_ok());
     }
 
-    // ── Bug B: ticket_path → KRB5CCNAME env wiring ──────────────────────
+    // Bug B: ticket_path → KRB5CCNAME env wiring
 
     #[test]
     fn bloodyad_set_password_invocation_receives_krb5ccname_env() {
@@ -1839,7 +1811,7 @@ mod tests {
         );
     }
 
-    // ── Bug E: etype_hint consumption ───────────────────────────────────
+    // Bug E: etype_hint consumption
 
     #[test]
     fn targeted_kerberoast_passes_etype_hint_to_underlying_binary() {
@@ -1919,7 +1891,7 @@ mod tests {
         );
     }
 
-    // ── hash / ticket_path auth for pywhisker & targeted_kerberoast ───────
+    // hash / ticket_path auth for pywhisker & targeted_kerberoast
 
     #[test]
     fn pywhisker_ticket_path_sets_krb5ccname_and_no_pass() {
@@ -2366,7 +2338,7 @@ mod tests {
         assert!(super::build_targeted_kerberoast(&args).is_err());
     }
 
-    // ── hash / ticket auth for the bloodyAD + dacledit family ───────────
+    // hash / ticket auth for the bloodyAD + dacledit family
 
     const NT: &str = "0123456789abcdef0123456789abcdef";
     const LM: &str = "fedcba9876543210fedcba9876543210";

@@ -376,8 +376,6 @@ flatName: CHILD
         assert_eq!(trusts[0]["domain"], "fabrikam.local");
     }
 
-    // ── securityIdentifier extraction ──────────────────────────────────
-
     #[test]
     fn parse_trust_captures_canonical_sid_from_impacket_path() {
         // impacket-LDAP variant of enumerate_domain_trusts decodes the SID
@@ -474,8 +472,6 @@ flatName: B
             "second trust without SID line must not inherit the first's SID"
         );
     }
-
-    // ── decode_ldap_sid_base64 unit tests ──────────────────────────────
 
     #[test]
     fn decode_sid_b64_rejects_too_short_input() {

@@ -599,8 +599,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // -- resolve_da_path ----------------------------------------------------
-
     fn krbtgt_hash_from(source: &str) -> ares_core::models::Hash {
         ares_core::models::Hash {
             id: "h1".to_string(),
@@ -676,8 +674,6 @@ mod tests {
         assert_eq!(krbtgt_da_path("   "), "krbtgt NTLM hash");
     }
 
-    // -- has_golden_ticket_indicator ----------------------------------------
-
     #[test]
     fn golden_ticket_indicator_positive() {
         assert!(has_golden_ticket_indicator(
@@ -711,8 +707,6 @@ mod tests {
     fn golden_ticket_indicator_empty() {
         assert!(!has_golden_ticket_indicator(""));
     }
-
-    // -- parse_pwned_line ---------------------------------------------------
 
     #[test]
     fn parse_pwned_full_format() {
@@ -768,8 +762,6 @@ mod tests {
         assert!(parse_pwned_line(line).is_none());
     }
 
-    // -- extract_ip_from_line -----------------------------------------------
-
     #[test]
     fn extract_ip_basic() {
         let line = "SMB 192.168.58.10 445 DC01 [+] admin (Pwn3d!)";
@@ -796,8 +788,6 @@ mod tests {
     fn extract_ip_not_fooled_by_version() {
         assert!(extract_ip_from_line("version 1.2.3 released").is_none());
     }
-
-    // ── collect_payload_text_parts ─────────────────────────────────────
 
     #[test]
     fn collect_text_parts_ignores_top_level_scalar_fields() {
@@ -872,8 +862,6 @@ mod tests {
         assert!(collect_payload_text_parts(&json!({})).is_empty());
     }
 
-    // ── payload_contains_golden_ticket_marker ──────────────────────────
-
     #[test]
     fn gt_marker_in_tool_outputs_string_form() {
         let p = json!({
@@ -939,8 +927,6 @@ mod tests {
         let p = json!({"summary": "nothing here"});
         assert!(!payload_contains_golden_ticket_marker(&p));
     }
-
-    // ── parse_sid_from_combined_text ───────────────────────────────────
 
     #[test]
     fn parse_sid_recognises_lookupsid_header() {

@@ -1029,7 +1029,7 @@ mod tests {
         assert_eq!(from_hostname2, "");
     }
 
-    // ── tests for extracted pure helpers ──────────────────────────────
+    // tests for extracted pure helpers
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -1083,8 +1083,6 @@ mod tests {
         }
     }
 
-    // --- resolve_cred_domain ---------------------------------------------
-
     #[test]
     fn resolve_cred_domain_passes_through_fqdn() {
         let s = StateInner::new("op".into());
@@ -1114,8 +1112,6 @@ mod tests {
         assert_eq!(resolve_cred_domain(&s, "UNKNOWN"), "unknown");
     }
 
-    // --- resolve_host_domain ---------------------------------------------
-
     #[test]
     fn resolve_host_domain_uses_hostname_fqdn() {
         let s = StateInner::new("op".into());
@@ -1138,8 +1134,6 @@ mod tests {
         let h = make_host("dc01", "192.168.58.10");
         assert!(resolve_host_domain(&s, &h).is_empty());
     }
-
-    // --- domain_is_same_or_relative --------------------------------------
 
     #[test]
     fn same_or_relative_same_domain() {
@@ -1174,8 +1168,6 @@ mod tests {
     fn same_or_relative_empty_host_returns_false() {
         assert!(!domain_is_same_or_relative("", "contoso.local"));
     }
-
-    // --- find_lateral_targets_for_cred_domain ----------------------------
 
     #[test]
     fn find_targets_collects_same_domain_non_owned_hosts() {
@@ -1223,8 +1215,6 @@ mod tests {
         assert!(find_lateral_targets_for_cred_domain(&s, "contoso.local").is_empty());
     }
 
-    // --- find_dc_ips_for_cred_domain --------------------------------------
-
     #[test]
     fn find_dc_ips_same_and_child_domain() {
         let mut s = StateInner::new("op".into());
@@ -1252,8 +1242,6 @@ mod tests {
         let ips = find_dc_ips_for_cred_domain(&s, "child.contoso.local");
         assert_eq!(ips, vec!["192.168.58.11"]);
     }
-
-    // --- select_credential_expansion_work --------------------------------
 
     #[test]
     fn select_creds_skips_empty_password() {
@@ -1368,8 +1356,6 @@ mod tests {
         assert_eq!(select_credential_expansion_work(&s, 10).len(), 1);
     }
 
-    // --- hash_expansion_dedup_key ---------------------------------------
-
     #[test]
     fn hash_dedup_key_lowercases_and_truncates() {
         let h = make_ntlm_hash(
@@ -1390,8 +1376,6 @@ mod tests {
         assert_eq!(hash_expansion_dedup_key(&h), "contoso.local:alice:abc");
     }
 
-    // --- build_pth_credential --------------------------------------------
-
     #[test]
     fn build_pth_cred_assigns_hash_to_password_slot() {
         let h = make_ntlm_hash("alice", "deadbeef".repeat(4).as_str(), "contoso.local");
@@ -1403,8 +1387,6 @@ mod tests {
         assert_eq!(c.source, "hash_pth");
         assert!(!c.is_admin);
     }
-
-    // --- select_hash_expansion_work --------------------------------------
 
     #[test]
     fn select_hash_work_filters_non_ntlm() {
@@ -1538,8 +1520,6 @@ mod tests {
         }
         assert_eq!(select_hash_expansion_work(&s, 2).len(), 2);
     }
-
-    // --- find_pth_dc_ips_for_hash ----------------------------------------
 
     #[test]
     fn pth_dc_ips_same_forest_only() {

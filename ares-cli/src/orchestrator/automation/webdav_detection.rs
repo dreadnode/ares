@@ -431,8 +431,6 @@ mod tests {
         assert!(!has_webdav);
     }
 
-    // --- collect_webdav_work tests ---
-
     use crate::orchestrator::state::StateInner;
 
     fn make_host(

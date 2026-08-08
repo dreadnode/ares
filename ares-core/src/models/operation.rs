@@ -1179,11 +1179,7 @@ impl SharedRedTeamState {
                 format!("{}\\{} (password)", step.domain, step.username)
             };
 
-            if !step.source.is_empty() && parts.is_empty() {
-                // First step: show source → credential
-                parts.push(step.source.clone());
-            } else if !step.source.is_empty() {
-                // Subsequent steps: show source before credential
+            if !step.source.is_empty() {
                 parts.push(step.source.clone());
             }
             parts.push(cred_desc);

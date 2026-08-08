@@ -561,8 +561,6 @@ mod tests {
     use crate::eval::scorers::types::{EvidenceItem, InvestigationSnapshot, TimelineEvent};
     use crate::models::PyramidLevel;
 
-    // -- helpers --
-
     fn empty_snap() -> InvestigationSnapshot {
         InvestigationSnapshot::default()
     }
@@ -1113,7 +1111,7 @@ mod tests {
         assert!(!timeline_event_matches("credential dump", &descs));
     }
 
-    // -- technique_phase / KillChainPhase mapping --
+    // technique_phase / KillChainPhase mapping
 
     #[track_caller]
     fn assert_phase(id: &str, expected: KillChainPhase) {
@@ -1171,8 +1169,6 @@ mod tests {
         ];
         assert_abs_diff_eq!(score_phase_coverage(&snap, &gt), 1.0, epsilon = 0.001);
     }
-
-    // -- build_evidence_values / expand_aliases --
 
     #[test]
     fn build_evidence_values_domain_splits_short_name() {
@@ -1245,7 +1241,7 @@ mod tests {
         assert_abs_diff_eq!(score_ioc_detection(&snap, &gt), 1.0, epsilon = 0.001);
     }
 
-    // -- score_investigation_overall weight renormalization / bounds --
+    // score_investigation_overall weight renormalization / bounds
 
     #[test]
     fn overall_renormalizes_when_timeline_absent() {

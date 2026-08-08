@@ -97,10 +97,6 @@ impl PersistentStore {
         &self.pool
     }
 
-    // =========================================================================
-    // Full Operation Offload
-    // =========================================================================
-
     /// Offload complete operation state to PostgreSQL.
     ///
     /// This is the main entry point for persisting an operation, typically
@@ -452,9 +448,7 @@ impl PersistentStore {
         Ok(())
     }
 
-    // =========================================================================
     // Incremental Offload (sync during operation)
-    // =========================================================================
 
     /// Incrementally offload credentials during an operation.
     pub async fn offload_credentials(
@@ -497,10 +491,6 @@ impl PersistentStore {
         Ok(true)
     }
 
-    // =========================================================================
-    // Store Report
-    // =========================================================================
-
     /// Store the final operation report.
     pub async fn store_report(&self, operation_id: &str, report_markdown: &str) -> Result<bool> {
         let result = sqlx::query("UPDATE operations SET final_report = $2 WHERE operation_id = $1")
@@ -517,10 +507,6 @@ impl PersistentStore {
         debug!(operation_id, "Stored operation report");
         Ok(true)
     }
-
-    // =========================================================================
-    // Cost Tracking
-    // =========================================================================
 
     /// Update cost tracking for an operation.
     pub async fn update_cost(
@@ -549,10 +535,6 @@ impl PersistentStore {
 
         Ok(result.rows_affected() > 0)
     }
-
-    // =========================================================================
-    // Helpers
-    // =========================================================================
 
     async fn get_operation_uuid(&self, operation_id: &str) -> Result<Option<Uuid>> {
         let row: Option<(Uuid,)> =

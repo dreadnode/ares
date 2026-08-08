@@ -244,8 +244,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── has_domain_admin_indicator ──
-
     #[test]
     fn domain_admin_flag_true_ignored() {
         // Agent self-reporting is not accepted — must have a krbtgt hash.
@@ -321,8 +319,6 @@ mod tests {
         });
         assert!(has_domain_admin_indicator(&payload));
     }
-
-    // ── resolve_parent_id ──
 
     fn make_credential(id: &str, username: &str, domain: &str, step: i32) -> Credential {
         Credential {

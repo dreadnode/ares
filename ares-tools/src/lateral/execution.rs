@@ -358,8 +358,6 @@ mod tests {
     use crate::credentials;
     use serde_json::json;
 
-    // --- psexec ---
-
     #[test]
     fn psexec_requires_target() {
         let args = json!({"username": "admin"});
@@ -425,8 +423,6 @@ mod tests {
         assert_eq!(auth_str, "CONTOSO/admin@192.168.58.1");
         assert_eq!(extra_args, vec!["-hashes", ":aabbccdd"]);
     }
-
-    // --- psexec_kerberos ---
 
     #[test]
     fn psexec_kerberos_target_format() {
@@ -502,8 +498,6 @@ mod tests {
         assert_eq!(optional_str(&args, "dc_ip"), Some("192.168.58.1"));
     }
 
-    // --- wmiexec ---
-
     #[test]
     fn wmiexec_requires_target() {
         let args = json!({"username": "admin"});
@@ -522,8 +516,6 @@ mod tests {
         let command = optional_str(&args, "command").unwrap_or("whoami");
         assert_eq!(command, "whoami");
     }
-
-    // --- wmiexec_kerberos ---
 
     #[test]
     fn wmiexec_kerberos_target_format() {
@@ -546,8 +538,6 @@ mod tests {
         assert_eq!(command, "whoami");
     }
 
-    // --- smbexec ---
-
     #[test]
     fn smbexec_requires_target() {
         let args = json!({"username": "admin"});
@@ -567,8 +557,6 @@ mod tests {
         assert_eq!(command, "whoami");
     }
 
-    // --- smbexec_kerberos ---
-
     #[test]
     fn smbexec_kerberos_target_format() {
         let domain = "child.contoso.local";
@@ -580,8 +568,6 @@ mod tests {
             "child.contoso.local/admin@dc02.child.contoso.local"
         );
     }
-
-    // --- evil_winrm ---
 
     #[test]
     fn evil_winrm_default_command() {
@@ -650,8 +636,6 @@ mod tests {
         };
         assert!(used_flag.is_empty());
     }
-
-    // --- xfreerdp ---
 
     #[test]
     fn xfreerdp_target_format() {
@@ -748,8 +732,6 @@ mod tests {
         assert_eq!(auth_arg, "/pth:aabbccdd");
     }
 
-    // --- ssh_with_password ---
-
     #[test]
     fn ssh_user_host_format() {
         let username = "root";
@@ -795,8 +777,6 @@ mod tests {
         });
         assert!(optional_str(&args, "port").is_none());
     }
-
-    // --- secretsdump_kerberos ---
 
     #[test]
     fn secretsdump_kerberos_target_format() {
@@ -906,8 +886,6 @@ mod tests {
         };
         assert!(err.to_string().contains("ticket_path"), "{err}");
     }
-
-    // --- mock executor tests ---
 
     use crate::executor::mock;
 

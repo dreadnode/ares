@@ -364,7 +364,7 @@ mod tests {
         assert!(work.dc_ip.is_none());
     }
 
-    // -- Tests exercising the extracted `collect_cert_auth_work` function --
+    // Tests exercising the extracted `collect_cert_auth_work` function
 
     use crate::orchestrator::state::SharedState;
 

@@ -7,14 +7,14 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-// ── Box-drawing characters that appear in MOTD banners ──────────────────────
+// Box-drawing characters that appear in MOTD banners
 
 const BOX_CHARS: &[char] = &[
     '┏', '┃', '┗', '┓', '┛', '━', '─', '│', '┌', '┐', '└', '┘', '├', '┤', '┬', '┴', '┼', '╔', '╗',
     '╚', '╝', '║', '═',
 ];
 
-// ── Substrings that mark a line as MOTD / banner noise ──────────────────────
+// Substrings that mark a line as MOTD / banner noise
 
 const MOTD_MARKERS: &[&str] = &[
     "message from kali",
@@ -31,7 +31,7 @@ const MOTD_MARKERS: &[&str] = &[
     "welcome to",
 ];
 
-// ── Substrings that mark "not found" or similar noise lines ─────────────────
+// Substrings that mark "not found" or similar noise lines
 
 const NOISE_MARKERS: &[&str] = &[
     "command not found",
@@ -40,16 +40,16 @@ const NOISE_MARKERS: &[&str] = &[
     "is not recognized as",
 ];
 
-// ── Regex: section header lines ──────────────────────────────────────────────
+// Regex: section header lines
 
 static SECTION_HEADER_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^={5,}\s+[^=]+\s+={5,}\s*$").unwrap());
 
-// ── Regex: collapse 3+ consecutive blank lines into 2 ───────────────────────
+// Regex: collapse 3+ consecutive blank lines into 2
 
 static EXCESS_BLANKS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{4,}").unwrap());
 
-// ── Regex: netexec's SMB banner "Null Auth:True" marker ─────────────────────
+// Regex: netexec's SMB banner "Null Auth:True" marker
 //
 // netexec emits this on every SMB scan whose negotiate step accepted an
 // anonymous null session. The LLM has been repeatedly interpreting the
@@ -146,8 +146,6 @@ pub fn filter_output(raw: &str) -> String {
 
     result.trim().to_string()
 }
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

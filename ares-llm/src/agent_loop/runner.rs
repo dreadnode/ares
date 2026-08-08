@@ -1148,7 +1148,6 @@ mod runner_tests {
         assert_eq!(p["err"], "network timeout");
     }
 
-    // --- wrap-up nudge ---------------------------------------------------
     //
     // The full nudge-injection path lives inside `run_agent_loop`, which
     // is end-to-end (provider + dispatcher + tool registry). The unit
@@ -1156,7 +1155,7 @@ mod runner_tests {
     // so we can verify the boundary math without firing the loop.
 
     fn should_inject_wrapup_nudge(steps: u32, max_steps: u32, already_injected: bool) -> bool {
-        // Mirrors the gate at runner.rs:~265 — keeps the math testable
+        // Mirrors the wrap-up nudge gate in run_agent_loop — keeps the math testable
         // even though the side-effect (messages.push) is inside the loop.
         !already_injected
             && max_steps > super::WRAPUP_THRESHOLD_STEPS
@@ -1235,7 +1234,7 @@ mod runner_tests {
         assert!(should_inject_wrapup_nudge(1, 6, false));
     }
 
-    // ── should_prune_for_spawn_failure: pruning contract ─────────────────────
+    // should_prune_for_spawn_failure: pruning contract
     //
     // The whole point of the ToolFailureKind split. These tests lock in the
     // invariant that ONLY confirmed ENOENT prunes a tool from the LLM's

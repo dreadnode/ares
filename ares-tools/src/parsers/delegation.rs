@@ -311,8 +311,6 @@ ws01$        Computer     Constrained w/o Protocol Transition  HTTP/web01";
         assert_eq!(vulns[1]["details"]["protocol_transition"], false);
     }
 
-    // ── extract_spn_from_parts ────────────────────────────────────
-
     #[test]
     fn spn_basic() {
         let parts = vec!["Constrained", "CIFS/dc01.contoso.local"];

@@ -425,7 +425,7 @@ fn fast_weights() -> HashMap<String, i32> {
 /// The goal: exploit *everything* discovered, not just the fastest path to DA.
 fn comprehensive_weights() -> HashMap<String, i32> {
     [
-        // --- Tier 1: Exploitation breadth (these were starved before) ---
+        // Tier 1: Exploitation breadth (these were starved before)
         ("esc1", 1),
         ("esc4", 1),
         ("esc8", 1),
@@ -443,7 +443,7 @@ fn comprehensive_weights() -> HashMap<String, i32> {
         ("nopac", 1),
         ("certifried", 1),
         ("printnightmare", 1),
-        // --- Tier 2: Credential pipeline + lateral + persistence ---
+        // Tier 2: Credential pipeline + lateral + persistence
         ("dc_secretsdump", 2),
         ("golden_ticket", 2),
         ("forest_trust_escalation", 2),
@@ -467,7 +467,7 @@ fn comprehensive_weights() -> HashMap<String, i32> {
         ("pth_spray", 2),
         ("winrm_lateral", 2),
         ("rdp_lateral", 2),
-        // --- Tier 3: Recon, enumeration, coercion setup ---
+        // Tier 3: Recon, enumeration, coercion setup
         ("smb_signing_disabled", 3),
         ("share_coercion", 3),
         ("mssql_coercion", 3),

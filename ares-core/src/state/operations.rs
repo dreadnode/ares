@@ -529,7 +529,7 @@ mod tests {
         assert_eq!(pick_latest(&items), "op-solo");
     }
 
-    // -- async tests using MockRedisConnection --------------------------------
+    // async tests using MockRedisConnection
 
     use crate::state::mock_redis::MockRedisConnection;
     use redis::AsyncCommands;

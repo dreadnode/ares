@@ -590,8 +590,6 @@ mod tests {
         assert_eq!(cross_reuse_dedup_key("", "", "", ""), ":::");
     }
 
-    // ── cred_password_prefix ────────────────────────────────────────────
-
     #[test]
     fn cred_password_prefix_takes_first_16_chars() {
         assert_eq!(
@@ -614,8 +612,6 @@ mod tests {
     fn cred_password_prefix_empty_returns_empty() {
         assert_eq!(cred_password_prefix(""), "");
     }
-
-    // ── select_hash_reuse_work ──────────────────────────────────────────
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -855,8 +851,6 @@ mod tests {
             .insert("fabrikam.local".into(), "192.168.58.40".into());
         assert!(select_hash_reuse_work(&s).is_empty());
     }
-
-    // ── select_cred_reuse_work ──────────────────────────────────────────
 
     #[test]
     fn cred_reuse_empty_state() {

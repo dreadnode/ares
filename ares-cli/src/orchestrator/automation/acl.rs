@@ -507,8 +507,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // --- extract_chain_steps ---
-
     #[test]
     fn extract_chain_steps_from_array() {
         let chain = json!([{"source": "a"}, {"source": "b"}]);
@@ -548,8 +546,6 @@ mod tests {
         assert!(extract_chain_steps(&chain).is_none());
     }
 
-    // --- extract_source_user ---
-
     #[test]
     fn extract_source_user_from_source_key() {
         let step = json!({"source": "admin"});
@@ -586,8 +582,6 @@ mod tests {
         assert_eq!(extract_source_user(&step), "");
     }
 
-    // --- extract_source_domain ---
-
     #[test]
     fn extract_source_domain_from_source_domain_key() {
         let step = json!({"source_domain": "contoso.local"});
@@ -618,8 +612,6 @@ mod tests {
         assert_eq!(extract_source_domain(&step), "");
     }
 
-    // --- acl_step_dedup_key ---
-
     #[test]
     fn acl_step_dedup_key_basic() {
         assert_eq!(acl_step_dedup_key(0, 0), "chain:0:step:0");
@@ -629,8 +621,6 @@ mod tests {
     fn acl_step_dedup_key_large_indices() {
         assert_eq!(acl_step_dedup_key(42, 7), "chain:42:step:7");
     }
-
-    // --- acl_step_key ---
 
     #[test]
     fn acl_step_key_prefers_chain_id() {
@@ -656,8 +646,6 @@ mod tests {
         assert_eq!(acl_step_key(&chain, 2, 1), "chain:2:step:1");
     }
 
-    // --- extract_step_vuln_id ---
-
     #[test]
     fn extract_step_vuln_id_reads_the_field() {
         let step = json!({"vuln_id": "acl_genericall_alice_bob"});
@@ -668,8 +656,6 @@ mod tests {
     fn extract_step_vuln_id_missing_returns_empty() {
         assert_eq!(extract_step_vuln_id(&json!({"source": "alice"})), "");
     }
-
-    // --- collect_acl_chain_work ---
 
     fn cred(username: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {

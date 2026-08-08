@@ -187,8 +187,6 @@ impl RedisStateReader {
     }
 
     /// Load the full SharedRedTeamState from Redis.
-    ///
-    /// This is the Rust equivalent of `_load_state_from_redis()` in cli_ops.py.
     pub async fn load_state(
         &self,
         conn: &mut impl AsyncCommands,
@@ -847,8 +845,6 @@ mod tests {
         }
     }
 
-    // -- exists ---------------------------------------------------------------
-
     #[tokio::test]
     async fn exists_empty_returns_false() {
         let mut conn = MockRedisConnection::new();
@@ -866,8 +862,6 @@ mod tests {
             .unwrap();
         assert!(reader.exists(&mut conn).await.unwrap());
     }
-
-    // -- get_meta / set_meta_field -------------------------------------------
 
     #[tokio::test]
     async fn get_meta_empty_returns_defaults() {
@@ -903,8 +897,6 @@ mod tests {
         assert!(meta.has_domain_admin);
     }
 
-    // -- get_credentials / add_credential ------------------------------------
-
     #[tokio::test]
     async fn get_credentials_empty() {
         let mut conn = MockRedisConnection::new();
@@ -938,8 +930,6 @@ mod tests {
         let creds = reader.get_credentials(&mut conn).await.unwrap();
         assert_eq!(creds.len(), 1);
     }
-
-    // -- get_hashes / add_hash -----------------------------------------------
 
     #[tokio::test]
     async fn get_hashes_empty() {
@@ -1049,8 +1039,6 @@ mod tests {
         assert_eq!(hashes.len(), 2);
     }
 
-    // -- get_hosts / add_host ------------------------------------------------
-
     #[tokio::test]
     async fn get_hosts_empty() {
         let mut conn = MockRedisConnection::new();
@@ -1103,8 +1091,6 @@ mod tests {
         assert!(hosts.iter().any(|h| h.ip == "192.168.58.5"));
         assert!(hosts.iter().any(|h| h.ip == "192.168.58.6"));
     }
-
-    // -- get_users / add_user ------------------------------------------------
 
     #[tokio::test]
     async fn get_users_empty() {
@@ -1186,8 +1172,6 @@ mod tests {
         assert!(reader.get_users(&mut conn).await.unwrap().is_empty());
     }
 
-    // -- get_shares / add_share ----------------------------------------------
-
     #[tokio::test]
     async fn get_shares_empty() {
         let mut conn = MockRedisConnection::new();
@@ -1221,8 +1205,6 @@ mod tests {
         assert_eq!(shares.len(), 1);
     }
 
-    // -- get_domains / add_domain --------------------------------------------
-
     #[tokio::test]
     async fn get_domains_empty() {
         let mut conn = MockRedisConnection::new();
@@ -1254,8 +1236,6 @@ mod tests {
         assert_eq!(domains.len(), 1);
     }
 
-    // -- get_vulnerabilities / add_vulnerability -----------------------------
-
     #[tokio::test]
     async fn get_vulnerabilities_empty() {
         let mut conn = MockRedisConnection::new();
@@ -1278,7 +1258,7 @@ mod tests {
         assert_eq!(vulns["esc1_192.168.58.5"].vuln_type, "ADCS_ESC1");
     }
 
-    // -- get_exploited_vulnerabilities (via mock directly) -------------------
+    // get_exploited_vulnerabilities (via mock directly)
 
     #[tokio::test]
     async fn get_exploited_vulnerabilities_empty() {
@@ -1308,7 +1288,7 @@ mod tests {
         assert!(exploited.contains("deleg_svc_sql"));
     }
 
-    // -- get_dc_map / get_netbios_map (via mock directly) --------------------
+    // get_dc_map / get_netbios_map (via mock directly)
 
     #[tokio::test]
     async fn get_dc_map_empty() {
@@ -1345,8 +1325,6 @@ mod tests {
         assert_eq!(nb_map["CONTOSO"], "contoso.local");
     }
 
-    // -- is_running ----------------------------------------------------------
-
     #[tokio::test]
     async fn is_running_false_when_no_lock() {
         let mut conn = MockRedisConnection::new();
@@ -1362,8 +1340,6 @@ mod tests {
         let _: () = conn.set(lock_key, "1").await.unwrap();
         assert!(reader.is_running(&mut conn).await.unwrap());
     }
-
-    // -- add_timeline_event / get_timeline -----------------------------------
 
     #[tokio::test]
     async fn get_timeline_empty() {
@@ -1389,8 +1365,6 @@ mod tests {
         assert_eq!(timeline[0]["description"], "Initial access via kerberoast");
     }
 
-    // -- add_technique / get_techniques --------------------------------------
-
     #[tokio::test]
     async fn get_techniques_empty() {
         let mut conn = MockRedisConnection::new();
@@ -1411,8 +1385,6 @@ mod tests {
         let techniques = reader.get_techniques(&mut conn).await.unwrap();
         assert_eq!(techniques.len(), 2);
     }
-
-    // -- get_report ----------------------------------------------------------
 
     #[tokio::test]
     async fn get_report_none_when_missing() {
@@ -1436,7 +1408,7 @@ mod tests {
         assert_eq!(report.as_deref(), Some("# Report\nDomain admin achieved."));
     }
 
-    // -- increment_vuln_type_failure / get_vuln_type_failure_count / get_all --
+    // increment_vuln_type_failure / get_vuln_type_failure_count / get_all
 
     #[tokio::test]
     async fn vuln_type_failure_count_starts_at_zero() {
@@ -1494,8 +1466,6 @@ mod tests {
         assert_eq!(all["delegation"], 1);
     }
 
-    // -- get_trusted_domains / add_trusted_domain ----------------------------
-
     #[tokio::test]
     async fn get_trusted_domains_empty() {
         let mut conn = MockRedisConnection::new();
@@ -1527,8 +1497,6 @@ mod tests {
         assert!(!reader.add_trusted_domain(&mut conn, &trust).await.unwrap());
     }
 
-    // -- set_domain_sid / set_admin_name -------------------------------------
-
     #[tokio::test]
     async fn set_domain_sid_stores_value() {
         let mut conn = MockRedisConnection::new();
@@ -1556,8 +1524,6 @@ mod tests {
         let name: Option<String> = conn.hget(key, "contoso.local").await.unwrap();
         assert_eq!(name.as_deref(), Some("Administrator"));
     }
-
-    // -- load_state ----------------------------------------------------------
 
     #[tokio::test]
     async fn load_state_returns_none_when_empty() {

@@ -800,8 +800,6 @@ mod tests {
         assert_eq!(domain, "");
     }
 
-    // ── parse_pygpoabuse_output ────────────────────────────────────────
-
     #[test]
     fn parse_pygpoabuse_output_recognises_scheduled_task_success() {
         // Realistic pygpoabuse output for a successful GPO write: the tool
@@ -892,8 +890,6 @@ mod tests {
         assert_eq!(parse_pygpoabuse_output(""), GpoAbuseOutcome::NoEvidence);
     }
 
-    // ── build_pygpoabuse_args ──────────────────────────────────────────
-
     #[test]
     fn build_pygpoabuse_args_includes_all_required_fields() {
         let args = build_pygpoabuse_args(
@@ -944,8 +940,6 @@ mod tests {
         assert!(b["task_name"].as_str().unwrap().ends_with("beta2222"));
     }
 
-    // ── classify_exec_outcome ─────────────────────────────────────────
-
     #[test]
     fn classify_exec_outcome_clean_success_passes_through() {
         let outcome = classify_exec_outcome("[+] ScheduledTask created!\n", false);
@@ -993,8 +987,6 @@ mod tests {
         assert_eq!(outcome, GpoAbuseOutcome::NoEvidence);
     }
 
-    // ── format_failure_summary ────────────────────────────────────────
-
     #[test]
     fn format_failure_summary_dispatch_error_wins() {
         // Redis BRPOP timeout / queue full → dispatch error takes precedence
@@ -1014,8 +1006,6 @@ mod tests {
         let s = format_failure_summary(None, None);
         assert_eq!(s, "no success markers in pygpoabuse output");
     }
-
-    // ── try_build_gpo_work ────────────────────────────────────────────
 
     fn vuln_with(details: serde_json::Value) -> VulnerabilityInfo {
         VulnerabilityInfo {

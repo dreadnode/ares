@@ -260,7 +260,7 @@ async fn try_forge_golden_ticket(dispatcher: &Arc<Dispatcher>, domain: &str) {
         }
     };
 
-    // ── Resolve domain SID if not cached ────────────────────────────
+    // Resolve domain SID if not cached
     if inputs.domain_sid.is_none() {
         if let Some(ref target_ip) = inputs.dc_ip {
             let result = resolve_domain_sid(
@@ -483,8 +483,6 @@ mod tests {
         }
     }
 
-    // --- strip_ntlm_lm_prefix ---------------------------------------------
-
     #[test]
     fn strip_ntlm_lm_prefix_keeps_bare_ntlm() {
         let ntlm = "31d6cfe0d16ae931b73c59d7e0c089c0";
@@ -519,8 +517,6 @@ mod tests {
     fn strip_ntlm_lm_prefix_empty_string() {
         assert_eq!(strip_ntlm_lm_prefix(""), "");
     }
-
-    // --- collect_pending_golden_ticket_domains ----------------------------
 
     #[test]
     fn collect_pending_returns_empty_without_domain_admin() {
@@ -676,8 +672,6 @@ mod tests {
             .push(krbtgt_hash("MYSTERY", "31d6cfe0d16ae931b73c59d7e0c089c0"));
         assert!(collect_pending_golden_ticket_domains(&s).is_empty());
     }
-
-    // --- gather_golden_ticket_inputs --------------------------------------
 
     #[test]
     fn gather_inputs_returns_none_without_krbtgt() {
@@ -865,8 +859,6 @@ mod tests {
         assert!(inputs.lookup_cred.is_none());
     }
 
-    // --- resolve_admin_username -------------------------------------------
-
     #[test]
     fn resolve_admin_username_falls_back_to_default() {
         let s = StateInner::new("op-test".into());
@@ -880,8 +872,6 @@ mod tests {
             .insert("contoso.local".into(), "BuiltInAdmin".into());
         assert_eq!(resolve_admin_username(&s, "Contoso.Local"), "BuiltInAdmin");
     }
-
-    // --- build_golden_ticket_payload --------------------------------------
 
     fn baseline_inputs() -> GoldenTicketInputs {
         GoldenTicketInputs {

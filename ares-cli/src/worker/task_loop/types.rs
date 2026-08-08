@@ -3,8 +3,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-// ─── Agent result types ──────────────────────────────────────────────────────
-
 /// Result from running an agent task.
 #[derive(Debug, Clone)]
 pub struct AgentResult {
@@ -30,8 +28,6 @@ pub struct TokenUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
-
-// ─── Wire types ──────────────────────────────────────────────────────────────
 
 /// Task message from the queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]

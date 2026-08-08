@@ -453,10 +453,6 @@ impl Default for RedTeamReportGenerator {
     }
 }
 
-// ============================================================================
-// Executive summary generation
-// ============================================================================
-
 pub(crate) fn generate_executive_summary(
     state: &SharedRedTeamState,
     unique_users: &[User],

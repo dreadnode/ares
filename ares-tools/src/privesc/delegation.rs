@@ -1300,8 +1300,6 @@ mod tests {
         assert_eq!(val, "/tmp/admin.ccache");
     }
 
-    // --- mock executor tests ---
-
     use super::*;
     use crate::executor::mock;
 
@@ -1429,7 +1427,7 @@ mod tests {
         assert!(rbcd_write(&args).await.is_ok());
     }
 
-    // ── hash / ticket auth for the GenericAll→RBCD chain ────────────────
+    // hash / ticket auth for the GenericAll→RBCD chain
 
     const NT: &str = "0123456789abcdef0123456789abcdef";
     const LM: &str = "fedcba9876543210fedcba9876543210";

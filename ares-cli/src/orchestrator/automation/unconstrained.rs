@@ -1298,7 +1298,7 @@ mod tests {
         ));
     }
 
-    // ── helpers for select_unconstrained_work_items / payload builder tests ──
+    // helpers for select_unconstrained_work_items / payload builder tests
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -1346,8 +1346,6 @@ mod tests {
         }
     }
 
-    // --- find_host_ip_for_machine_account ------------------------------
-
     #[test]
     fn find_host_ip_short_hostname_match() {
         let mut s = StateInner::new("op-test".into());
@@ -1385,8 +1383,6 @@ mod tests {
             .push(make_host("dc011.contoso.local", "192.168.58.11"));
         assert!(find_host_ip_for_machine_account(&s, "DC01$").is_none());
     }
-
-    // --- select_unconstrained_work_items -------------------------------
 
     #[test]
     fn select_uc_skips_other_vuln_types() {
@@ -1683,8 +1679,6 @@ mod tests {
         assert!(select_unconstrained_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
     }
 
-    // --- payload builders ---------------------------------------------
-
     fn coerce_work() -> UnconstrainedWork {
         UnconstrainedWork {
             vuln_id: "v1".into(),
@@ -1791,7 +1785,7 @@ mod tests {
         assert!(p.get("credential").is_none());
     }
 
-    // ── Bug 2: credential-fallback tiers + inter-realm ccache visibility ──
+    // Bug 2: credential-fallback tiers + inter-realm ccache visibility
 
     #[test]
     fn pick_unconstrained_credential_prefers_same_domain() {

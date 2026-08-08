@@ -656,12 +656,10 @@ fn valid_credential_rejects_hash_body_password() {
     assert!(is_valid_credential("brian.davis", "letmein2025"));
 }
 
-// ---------------------------------------------------------------------------
 // Tool-provenance forgery guards. The following tests lock down the three
 // injection channels the trust-boundary analysis surfaced: attacker-controlled
 // AD attributes, attacker-controlled file content, and LLM-directed
 // `xp_cmdshell 'echo ...'` output.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn rpcclient_ad_description_cannot_forge_credential() {
@@ -819,7 +817,6 @@ fn tool_name_normalization_strips_path_and_ext() {
     assert!(ctx.is_authenticating_tool());
 }
 
-// ---------------------------------------------------------------------------
 // LLM-directed exec-shell forgery guards.
 //
 // Every tool name below is a REAL registered tool (see
@@ -829,7 +826,6 @@ fn tool_name_normalization_strips_path_and_ext() {
 // real tools (`mssql_command`, `evil_winrm`, `smbexec_kerberos`, …) stayed
 // ungated. These cover the credential (`[+]`, `Password :`, `DefaultPassword`),
 // hash, and cracked-password extractors driven through the actual shells.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn smbexec_echo_cannot_forge_plus_credential() {
@@ -1029,12 +1025,10 @@ fn all_registered_shells_gate_credentials_and_hashes() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Tiered gate: LLM-directed shells block ALL extractors including
 // users/hosts/shares. Attribute enumerators still populate those three.
 // The "honeypot steer" scenario is prevented by blocking hosts extraction
 // from smbexec/wmiexec/mssql_command/... stdout.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn smbexec_echo_cannot_forge_host_banner() {

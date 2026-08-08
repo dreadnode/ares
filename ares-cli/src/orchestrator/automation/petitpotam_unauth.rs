@@ -207,8 +207,6 @@ mod tests {
         assert_eq!(self_target_dc, listener, "Self-targeting should be skipped");
     }
 
-    // --- collect_petitpotam_unauth_work tests ---
-
     #[test]
     fn collect_empty_state_returns_no_work() {
         let state = StateInner::new("test-op".into());

@@ -78,8 +78,6 @@ mod tests {
     use crate::args::{optional_str, required_str};
     use serde_json::json;
 
-    // --- gmsa_dump_passwords ---
-
     #[test]
     fn gmsa_dump_passwords_requires_dc_ip() {
         let args = json!({
@@ -126,8 +124,6 @@ mod tests {
         assert_eq!(optional_str(&args, "password"), Some("P@ssw0rd!"));
         assert_eq!(optional_str(&args, "domain"), Some("contoso.local"));
     }
-
-    // --- unconstrained_tgt_dump ---
 
     #[test]
     fn unconstrained_tgt_dump_missing_domain() {
@@ -186,8 +182,6 @@ mod tests {
         );
     }
 
-    // --- unconstrained_coerce_and_capture ---
-
     #[test]
     fn unconstrained_coerce_missing_coerce_from() {
         let args = json!({
@@ -226,8 +220,6 @@ mod tests {
         let creds = format!("{domain}/{username}:{password}@{coerce_from}");
         assert_eq!(creds, "contoso.local/admin:P@ssw0rd!@dc01.contoso.local");
     }
-
-    // --- mock executor tests ---
 
     use super::*;
     use crate::executor::mock;

@@ -688,8 +688,6 @@ mod tests {
         }
     }
 
-    // --- collect_adcs_work tests ---
-
     #[test]
     fn collect_empty_state_returns_no_work() {
         let state = StateInner::new("test-op".into());
@@ -1166,8 +1164,6 @@ mod tests {
         assert!(selected.is_some());
         assert_eq!(selected.unwrap().domain, "fabrikam.local");
     }
-
-    // --- find_result_is_unauthenticated ---------------------------------
 
     #[test]
     fn enumerated_ca_with_no_vulnerable_template_stays_locked() {

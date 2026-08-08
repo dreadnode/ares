@@ -1238,8 +1238,6 @@ pub async fn auto_credential_access(
 mod tests {
     use super::*;
 
-    // --- asrep_dedup_key / asrep_dedup_keys ---
-
     #[test]
     fn asrep_dedup_key_is_lowercased_and_suffixed() {
         assert_eq!(
@@ -1276,8 +1274,6 @@ mod tests {
         );
     }
 
-    // --- kerberoast_dedup_key ---
-
     #[test]
     fn kerberoast_dedup_key_basic() {
         assert_eq!(
@@ -1299,8 +1295,6 @@ mod tests {
         assert_eq!(kerberoast_dedup_key("", ""), "krb::");
     }
 
-    // --- spray_dedup_key ---
-
     #[test]
     fn spray_dedup_key_basic() {
         assert_eq!(
@@ -1319,8 +1313,6 @@ mod tests {
         assert_eq!(spray_dedup_key("", ""), ":");
     }
 
-    // --- common_spray_dedup_key ---
-
     #[test]
     fn common_spray_dedup_key_basic() {
         assert_eq!(
@@ -1334,8 +1326,6 @@ mod tests {
         assert_eq!(common_spray_dedup_key(""), "common:");
     }
 
-    // --- low_hanging_dedup_key ---
-
     #[test]
     fn low_hanging_dedup_key_basic() {
         assert_eq!(
@@ -1348,8 +1338,6 @@ mod tests {
     fn low_hanging_dedup_key_empty() {
         assert_eq!(low_hanging_dedup_key("", ""), ":");
     }
-
-    // --- credential_secretsdump_dedup_key ---
 
     #[test]
     fn credential_secretsdump_dedup_key_basic() {
@@ -1372,8 +1360,6 @@ mod tests {
     fn credential_secretsdump_dedup_key_empty() {
         assert_eq!(credential_secretsdump_dedup_key("", "", ""), "::");
     }
-
-    // --- resolve_host_domain_from_fqdn ---
 
     #[test]
     fn resolve_host_domain_from_fqdn_typical() {
@@ -1408,8 +1394,6 @@ mod tests {
     fn resolve_host_domain_from_fqdn_empty() {
         assert_eq!(resolve_host_domain_from_fqdn(""), "");
     }
-
-    // --- is_host_domain_related ---
 
     #[test]
     fn is_host_domain_related_same_domain() {
@@ -1457,7 +1441,7 @@ mod tests {
         assert!(!is_host_domain_related("", ""));
     }
 
-    // ── helpers for select/build tests ─────────────────────────────────
+    // helpers for select/build tests
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -1522,8 +1506,6 @@ mod tests {
         }
     }
 
-    // --- select_asrep_work ----------------------------------------------
-
     #[test]
     fn select_asrep_emits_empty_key_when_no_users() {
         let mut s = StateInner::new("op".into());
@@ -1579,8 +1561,6 @@ mod tests {
         assert!(select_asrep_work(&s).is_empty());
     }
 
-    // --- collect_known_users_for_domain ---------------------------------
-
     #[test]
     fn collect_known_users_filters_machine_accounts() {
         let mut s = StateInner::new("op".into());
@@ -1611,8 +1591,6 @@ mod tests {
         );
     }
 
-    // --- build_asrep_payload -------------------------------------------
-
     #[test]
     fn build_asrep_cold_start_payload() {
         let p = build_asrep_payload("contoso.local", "192.168.58.10", &[], &[]);
@@ -1640,8 +1618,6 @@ mod tests {
         let instr = p["instructions"].as_str().unwrap();
         assert!(instr.contains("usernames already discovered"));
     }
-
-    // --- resolve_kerberoast_dc -----------------------------------------
 
     #[test]
     fn resolve_kerberoast_dc_exact_match() {
@@ -1679,8 +1655,6 @@ mod tests {
         assert!(resolve_kerberoast_dc(&s, "contoso.local").is_none());
     }
 
-    // --- select_kerberoast_work ----------------------------------------
-
     #[test]
     fn select_kerberoast_skips_quarantined() {
         let mut s = StateInner::new("op".into());
@@ -1717,8 +1691,6 @@ mod tests {
         );
         assert!(select_kerberoast_work(&s, 10).is_empty());
     }
-
-    // --- select_username_spray_work ------------------------------------
 
     #[test]
     fn select_spray_skips_disabled_built_in_accounts() {
@@ -1768,8 +1740,6 @@ mod tests {
         assert_eq!(select_username_spray_work(&s, 3).len(), 3);
     }
 
-    // --- select_low_hanging_work ---------------------------------------
-
     #[test]
     fn select_low_hanging_skips_empty_password() {
         let mut s = StateInner::new("op".into());
@@ -1801,8 +1771,6 @@ mod tests {
 
         assert!(select_low_hanging_work(&s, 10).is_empty());
     }
-
-    // --- select_credential_secretsdump_work ----------------------------
 
     #[test]
     fn select_sd_keeps_same_domain_host_cred_pairs() {
@@ -1868,8 +1836,6 @@ mod tests {
         assert_eq!(select_credential_secretsdump_work(&s, 10).len(), 1);
     }
 
-    // --- common_spray_prereqs_met --------------------------------------
-
     #[test]
     fn common_spray_prereqs_fail_without_asrep() {
         let s = StateInner::new("op".into());
@@ -1919,8 +1885,6 @@ mod tests {
         assert!(common_spray_prereqs_met(&s, "contoso.local"));
     }
 
-    // --- select_common_spray_work --------------------------------------
-
     #[test]
     fn select_common_spray_emits_when_prereqs_met() {
         let mut s = StateInner::new("op".into());
@@ -1949,8 +1913,6 @@ mod tests {
         assert!(select_common_spray_work(&s).is_empty());
     }
 
-    // --- payload builders -----------------------------------------------
-
     #[test]
     fn build_spray_payload_fields() {
         let p = build_username_spray_payload(
@@ -1976,7 +1938,7 @@ mod tests {
         assert_eq!(p["excluded_users"], "locked.user");
     }
 
-    // ── Bug 1: vuln-driven kerberoast dispatcher ───────────────────────
+    // Bug 1: vuln-driven kerberoast dispatcher
 
     fn make_kerberoastable_vuln(
         vuln_id: &str,

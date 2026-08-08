@@ -232,8 +232,6 @@ mod tests {
         assert_eq!(key2, "nopac:fabrikam.local:192.168.58.20");
     }
 
-    // --- collect_nopac_work tests ---
-
     use crate::orchestrator::state::StateInner;
 
     fn make_cred(username: &str, domain: &str) -> ares_core::models::Credential {

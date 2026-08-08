@@ -408,7 +408,7 @@ mod tests {
         assert_eq!(key, "fabrikam.local:gmsa_svc$");
     }
 
-    // ── tests for select_gmsa_work / build_gmsa_payload / gmsa_dedup_key ──
+    // tests for select_gmsa_work / build_gmsa_payload / gmsa_dedup_key
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -460,8 +460,6 @@ mod tests {
         }
     }
 
-    // --- gmsa_dedup_key ----------------------------------------------
-
     #[test]
     fn gmsa_dedup_key_lowercases_inputs() {
         assert_eq!(
@@ -469,8 +467,6 @@ mod tests {
             "contoso.local:gmsa_svc$"
         );
     }
-
-    // --- select_gmsa_work --------------------------------------------
 
     #[test]
     fn select_gmsa_empty_state() {
@@ -691,8 +687,6 @@ mod tests {
             .insert("contoso.local".into(), "192.168.58.10".into());
         assert!(select_gmsa_work(&s).is_empty());
     }
-
-    // --- build_gmsa_payload -------------------------------------------
 
     #[test]
     fn build_gmsa_payload_fields() {

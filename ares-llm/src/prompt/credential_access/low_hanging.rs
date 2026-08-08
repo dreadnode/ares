@@ -40,7 +40,7 @@ pub(super) fn generate_with_creds(
     render_template_with_context(TASK_CREDACCESS_LOW_HANGING_WITH_CREDS, &ctx)
 }
 
-/// Generate low-hanging fruit prompt WITHOUT credentials (Branch 6).
+/// Generate low-hanging fruit prompt WITHOUT credentials (Branch 5).
 pub(super) fn generate_without_creds(
     task_id: &str,
     p: &Params<'_>,

@@ -412,8 +412,6 @@ mod tests {
         assert_eq!((0..20).take(5).count(), 5);
     }
 
-    // --- collect_pth_work tests ---
-
     #[test]
     fn collect_empty_state_returns_none() {
         let state = StateInner::new("test".into());
@@ -867,8 +865,6 @@ mod tests {
         let work = collect_pth_work(&state).unwrap();
         assert_eq!(work.len(), 1);
     }
-
-    // ── build_pth_payload ─────────────────────────────────────────────
 
     #[test]
     fn build_pth_payload_emits_expected_fields() {

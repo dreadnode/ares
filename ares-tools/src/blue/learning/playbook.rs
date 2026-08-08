@@ -580,7 +580,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // -- load_op_collections tests (mock Redis) --
+    // load_op_collections tests (mock Redis)
 
     use super::load_op_collections;
     use ares_core::state::mock_redis::MockRedisConnection;
@@ -668,7 +668,7 @@ mod tests {
         assert_eq!(creds.len(), 2);
     }
 
-    // ── tests for build_playbook_text + extracted helpers ───────────────
+    // tests for build_playbook_text + extracted helpers
 
     use super::{
         build_playbook_text, detection_templates_for_technique, extract_techniques_from_loot,
@@ -679,8 +679,6 @@ mod tests {
     fn cred_json(user: &str, ip: &str) -> String {
         json!({ "username": user, "ip": ip }).to_string()
     }
-
-    // --- extract_users_and_ips_from_creds --------------------------------
 
     #[test]
     fn extract_users_ips_basic() {
@@ -728,8 +726,6 @@ mod tests {
         assert_eq!(ips, vec!["192.168.58.10"]);
     }
 
-    // --- extract_techniques_from_loot ------------------------------------
-
     #[test]
     fn extract_techniques_dedupes_and_preserves_order() {
         let loot = vec![
@@ -753,8 +749,6 @@ mod tests {
         assert_eq!(extract_techniques_from_loot(&loot), vec!["T1110"]);
     }
 
-    // --- normalize_technique_id ------------------------------------------
-
     #[test]
     fn normalize_lowercases_leading_t() {
         assert_eq!(normalize_technique_id("t1003"), "T1003");
@@ -768,8 +762,6 @@ mod tests {
         assert_eq!(normalize_technique_id("1003"), "1003");
         assert_eq!(normalize_technique_id(""), "");
     }
-
-    // --- detection_templates_for_technique -------------------------------
 
     #[test]
     fn detection_templates_exact_match() {
@@ -803,8 +795,6 @@ mod tests {
         // T1003 has detect_lsa_secrets_access; T1003.006 does not.
         assert!(!v.iter().any(|(n, _)| *n == "detect_lsa_secrets_access"));
     }
-
-    // --- build_playbook_text ---------------------------------------------
 
     fn empty_state() -> (
         Vec<String>,

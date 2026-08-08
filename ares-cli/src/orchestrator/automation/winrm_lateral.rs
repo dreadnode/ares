@@ -377,8 +377,6 @@ mod tests {
         assert!(!has_winrm, "Empty services should not detect WinRM");
     }
 
-    // --- collect_winrm_lateral_work tests ---
-
     #[test]
     fn collect_empty_state_returns_no_work() {
         let state = StateInner::new("test-op".into());

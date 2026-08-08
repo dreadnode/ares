@@ -415,8 +415,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
             .context("TaskQueue has no NATS broker configured")
     }
 
-    // === Key helpers ========================================================
-
     #[inline]
     fn heartbeat_key(agent: &str) -> String {
         format!("{HEARTBEAT_PREFIX}:{agent}")
@@ -427,7 +425,7 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         format!("{TASK_STATUS_PREFIX}:{task_id}")
     }
 
-    // === Queue methods (NATS JetStream) =====================================
+    // Queue methods (NATS JetStream)
 
     /// Submit a task to a role's queue.
     ///
@@ -538,7 +536,7 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         Ok(())
     }
 
-    // === Redis-backed state methods (unchanged) ============================
+    // Redis-backed state methods (unchanged)
 
     /// Read heartbeat data for an agent.
     pub async fn get_heartbeat(&self, agent: &str) -> Result<Option<HeartbeatData>> {
@@ -576,8 +574,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         debug!(agent, status, "Heartbeat sent");
         Ok(())
     }
-
-    // === Operation lock =====================================================
 
     /// Acquire the operation lock, reclaiming our own stale key across
     /// restarts and optionally taking over another holder's lock under
@@ -737,8 +733,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
             None => Ok(false),
         }
     }
-
-    // === Task status tracking ==============================================
 
     /// Update only status + timestamps; preserves any existing fields.
     pub async fn set_task_status(&self, task_id: &str, status: &str) -> Result<()> {

@@ -276,8 +276,6 @@ mod tests {
         assert!(key.contains("192.168.58.10"));
     }
 
-    // --- collect_ntlmv1_work tests ---
-
     use crate::orchestrator::state::StateInner;
 
     fn make_cred(username: &str, domain: &str) -> ares_core::models::Credential {

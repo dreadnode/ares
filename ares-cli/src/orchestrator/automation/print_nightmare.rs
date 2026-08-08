@@ -299,8 +299,6 @@ mod tests {
         assert_eq!(domain, "contoso.local");
     }
 
-    // --- collect_print_nightmare_work tests ---
-
     use crate::orchestrator::state::StateInner;
 
     fn make_cred(username: &str, domain: &str) -> ares_core::models::Credential {

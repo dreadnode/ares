@@ -39,7 +39,7 @@ async fn main() {
         process::exit(code);
     }
 
-    // ── Load secrets BEFORE clap parses ──
+    // Load secrets BEFORE clap parses
     // This ensures clap's `env = "..."` attributes and `collect_env_vars()`
     // see values from .env files or 1Password.
     let (env_file, secrets_from) = secrets::prescan_secrets_args();
@@ -58,7 +58,7 @@ async fn main() {
         secrets::try_load_default_env();
     }
 
-    // ── Initialize telemetry before using tracing macros ──
+    // Initialize telemetry before using tracing macros
     // Skip for orchestrator/worker subcommands — they init their own telemetry
     // with the correct service name.
     let is_service_subcommand = std::env::args()
@@ -89,7 +89,7 @@ async fn main() {
         }
     }
 
-    // ── Normal CLI parsing (env vars are now populated) ──
+    // Normal CLI parsing (env vars are now populated)
     let mut cli = Cli::parse();
 
     // Fall back to REDIS_URL if ARES_REDIS_URL wasn't set (K8s pods expose REDIS_URL)

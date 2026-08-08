@@ -280,8 +280,6 @@ mod tests {
         assert_eq!(work.listener, "192.168.58.100");
     }
 
-    // --- collect_mssql_coercion_work integration tests ---
-
     use crate::orchestrator::state::SharedState;
 
     fn make_cred(user: &str, domain: &str) -> ares_core::models::Credential {
