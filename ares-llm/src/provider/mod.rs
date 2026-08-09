@@ -221,6 +221,10 @@ pub struct LlmRequest {
     /// a cache breakpoint to the stable prefix (system + tools). Other
     /// providers ignore this flag.
     pub enable_prompt_cache: bool,
+    /// Reasoning effort for reasoning models (`minimal`/`low`/`medium`/`high`).
+    /// Providers forward it only to models that accept it; `None` leaves the
+    /// provider default in place.
+    pub reasoning_effort: Option<String>,
 }
 
 impl LlmRequest {
@@ -234,6 +238,7 @@ impl LlmRequest {
             temperature: None,
             seed: None,
             enable_prompt_cache: false,
+            reasoning_effort: None,
         }
     }
 }

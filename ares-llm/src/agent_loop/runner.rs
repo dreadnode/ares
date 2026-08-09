@@ -392,6 +392,9 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
         request.temperature = config.temperature;
         request.seed = config.seed;
         request.enable_prompt_cache = config.enable_prompt_cache;
+        request
+            .reasoning_effort
+            .clone_from(&config.reasoning_effort);
 
         debug!(
             task_id = task_id,

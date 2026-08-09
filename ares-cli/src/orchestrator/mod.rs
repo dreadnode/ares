@@ -571,12 +571,19 @@ async fn run_inner() -> Result<()> {
                     .as_ref()
                     .and_then(|c| c.agents.get(*yaml_key))
                     .and_then(|a| a.max_tokens),
+            )
+            .with_config_reasoning_effort(
+                ares_config
+                    .as_ref()
+                    .and_then(|c| c.agents.get(*yaml_key))
+                    .and_then(|a| a.reasoning_effort.as_deref()),
             );
         info!(
             role = %yaml_key,
             model = %spec,
             max_steps = cfg.max_steps,
             max_tokens = cfg.max_tokens,
+            reasoning_effort = cfg.reasoning_effort.as_deref().unwrap_or("provider-default"),
             "Per-role model"
         );
         providers.insert(

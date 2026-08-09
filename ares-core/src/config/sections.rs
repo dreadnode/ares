@@ -104,6 +104,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub max_tokens: Option<u32>,
     #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
     pub tools: Vec<String>,
 }
 

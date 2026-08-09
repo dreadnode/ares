@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use tracing::warn;
+
 /// Configuration for an agent loop execution.
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
@@ -14,6 +16,11 @@ pub struct AgentLoopConfig {
     /// Optional sampling seed. Threaded into `LlmRequest.seed`; providers
     /// that don't support seeded sampling silently drop it.
     pub seed: Option<u64>,
+    /// Optional reasoning effort (`minimal`/`low`/`medium`/`high`) for
+    /// reasoning models. Threaded into `LlmRequest.reasoning_effort`;
+    /// providers and models that do not support it drop it. `None` leaves the
+    /// provider default in place.
+    pub reasoning_effort: Option<String>,
     /// Retry configuration for transient LLM errors (rate limits, network).
     pub retry: RetryConfig,
     /// Context window management configuration.
@@ -44,6 +51,7 @@ impl Default for AgentLoopConfig {
             max_tokens: 4096,
             temperature: None,
             seed: None,
+            reasoning_effort: None,
             retry: RetryConfig::default(),
             context: ContextConfig::default(),
             budget: BudgetConfig::default(),
@@ -75,6 +83,9 @@ impl AgentLoopConfig {
             model,
             temperature,
             seed: parse_env_u64_opt("ARES_LLM_SEED"),
+            reasoning_effort: std::env::var("ARES_AGENT_REASONING_EFFORT")
+                .ok()
+                .and_then(|v| normalize_reasoning_effort(&v)),
             max_steps: parse_env_u32("ARES_AGENT_MAX_STEPS", defaults.max_steps),
             max_tokens: parse_env_u32("ARES_AGENT_MAX_TOKENS", defaults.max_tokens),
             max_tool_calls_per_name: parse_env_u32(
@@ -119,6 +130,33 @@ impl AgentLoopConfig {
         }
         self
     }
+
+    /// Layer a per-role `reasoning_effort` from YAML under the env override:
+    /// `ARES_AGENT_REASONING_EFFORT` > YAML > provider default. An
+    /// unrecognised value is dropped rather than forwarded, so a typo cannot
+    /// 400 every call the role makes.
+    pub fn with_config_reasoning_effort(mut self, reasoning_effort: Option<&str>) -> Self {
+        if std::env::var("ARES_AGENT_REASONING_EFFORT").is_ok() {
+            return self;
+        }
+        if let Some(raw) = reasoning_effort {
+            match normalize_reasoning_effort(raw) {
+                Some(effort) => self.reasoning_effort = Some(effort),
+                None => warn!(
+                    value = raw,
+                    "Ignoring unrecognised reasoning_effort; expected minimal, low, medium or high"
+                ),
+            }
+        }
+        self
+    }
+}
+
+/// Accept only the efforts the OpenAI reasoning models define, lowercased and
+/// trimmed. Returns `None` for anything else.
+fn normalize_reasoning_effort(raw: &str) -> Option<String> {
+    let effort = raw.trim().to_ascii_lowercase();
+    matches!(effort.as_str(), "minimal" | "low" | "medium" | "high").then_some(effort)
 }
 
 /// Context window management to prevent unbounded message growth.
@@ -671,6 +709,39 @@ mod tests {
         let env_wins = AgentLoopConfig::from_env("m".into(), None).with_config_max_steps(Some(300));
         assert_eq!(env_wins.max_steps, 13);
         std::env::remove_var("ARES_AGENT_MAX_STEPS");
+    }
+
+    #[test]
+    fn with_config_reasoning_effort_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ARES_AGENT_REASONING_EFFORT");
+
+        let base = AgentLoopConfig::from_env("m".into(), None);
+        assert_eq!(
+            base.reasoning_effort, None,
+            "unset must leave the provider default alone, not invent an effort"
+        );
+
+        let from_yaml =
+            AgentLoopConfig::from_env("m".into(), None).with_config_reasoning_effort(Some("low"));
+        assert_eq!(from_yaml.reasoning_effort.as_deref(), Some("low"));
+
+        let cased = AgentLoopConfig::from_env("m".into(), None)
+            .with_config_reasoning_effort(Some(" HIGH "));
+        assert_eq!(cased.reasoning_effort.as_deref(), Some("high"));
+
+        let bogus = AgentLoopConfig::from_env("m".into(), None)
+            .with_config_reasoning_effort(Some("supersonic"));
+        assert_eq!(
+            bogus.reasoning_effort, None,
+            "a typo must fall back to the provider default, not 400 every call the role makes"
+        );
+
+        std::env::set_var("ARES_AGENT_REASONING_EFFORT", "minimal");
+        let env_wins =
+            AgentLoopConfig::from_env("m".into(), None).with_config_reasoning_effort(Some("high"));
+        assert_eq!(env_wins.reasoning_effort.as_deref(), Some("minimal"));
+        std::env::remove_var("ARES_AGENT_REASONING_EFFORT");
     }
 
     #[test]

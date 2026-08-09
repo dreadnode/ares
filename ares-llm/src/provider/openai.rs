@@ -51,6 +51,10 @@ struct ApiRequest {
     /// See <https://platform.openai.com/docs/api-reference/chat/create#chat-create-seed>.
     #[serde(skip_serializing_if = "Option::is_none")]
     seed: Option<u64>,
+    /// Reasoning effort, sent only to reasoning models — a non-reasoning model
+    /// rejects the parameter outright.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -269,6 +273,13 @@ fn uses_max_completion_tokens(model: &str) -> bool {
     model.starts_with("gpt-5")
 }
 
+/// Only the reasoning models accept `reasoning_effort`; sending it to a
+/// non-reasoning model is a 400 on every call the role makes.
+fn supports_reasoning_effort(model: &str) -> bool {
+    let model = model.strip_prefix("openai/").unwrap_or(model);
+    model.starts_with("gpt-5")
+}
+
 fn reasoning_headroom_tokens() -> u32 {
     std::env::var("ARES_OPENAI_REASONING_HEADROOM_TOKENS")
         .ok()
@@ -313,6 +324,9 @@ impl LlmProvider for OpenAiProvider {
             tools: convert_tools(&request.tools),
             temperature: request.temperature,
             seed: request.seed,
+            reasoning_effort: supports_reasoning_effort(&request.model)
+                .then(|| request.reasoning_effort.clone())
+                .flatten(),
         };
 
         info!(
@@ -476,6 +490,36 @@ impl LlmProvider for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_effort_only_goes_to_reasoning_models() {
+        assert!(supports_reasoning_effort("gpt-5"));
+        assert!(supports_reasoning_effort("gpt-5.2"));
+        assert!(supports_reasoning_effort("openai/gpt-5-mini"));
+        assert!(
+            !supports_reasoning_effort("gpt-4o"),
+            "a non-reasoning model rejects reasoning_effort outright, so it must never be sent"
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_is_omitted_from_the_wire_when_unset() {
+        let request = ApiRequest {
+            model: "gpt-5".into(),
+            messages: Vec::new(),
+            max_tokens: None,
+            max_completion_tokens: Some(4096),
+            tools: Vec::new(),
+            temperature: None,
+            seed: None,
+            reasoning_effort: None,
+        };
+        let body = serde_json::to_string(&request).unwrap();
+        assert!(
+            !body.contains("reasoning_effort"),
+            "an unset effort must leave the provider default in place, not serialize null"
+        );
+    }
 
     #[test]
     fn convert_user_message() {

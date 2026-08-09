@@ -145,6 +145,7 @@ impl AresConfig {
                     model: model.to_string(),
                     max_steps: default_max_steps(),
                     max_tokens: None,
+                    reasoning_effort: None,
                     tools: Vec::new(),
                 },
             );

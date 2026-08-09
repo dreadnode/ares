@@ -160,6 +160,7 @@ agents:
     # gpt-5-mini is ~7x cheaper than gpt-5.2 with negligible quality loss here.
     model: "gpt-5-mini"
     max_steps: 100
+    reasoning_effort: low
     # Provisioned by: ansible/playbooks/ares/recon.yml → dreadnode.nimbus_range.recon_tools
 
   credential_access:
@@ -167,6 +168,7 @@ agents:
     # gpt-5 is ~29% cheaper than gpt-5.2 and handles this shape well.
     model: "gpt-5"
     max_steps: 100
+    reasoning_effort: low
     # Provisioned by: ansible/playbooks/ares/credential_access.yml → dreadnode.nimbus_range.credential_access_tools
 
   cracker:
@@ -174,6 +176,7 @@ agents:
     # gpt-5-mini is ~7x cheaper and sufficient for this mechanical role.
     model: "gpt-5-mini"
     max_steps: 150
+    reasoning_effort: low
     # Provisioned by: ansible/playbooks/ares/cracker.yml → dreadnode.nimbus_range.cracking_tools
 
   acl:
@@ -191,6 +194,7 @@ agents:
     # gpt-5 is ~29% cheaper than gpt-5.2 without sacrificing decision quality.
     model: "gpt-5"
     max_steps: 300
+    reasoning_effort: low
     # Provisioned by: ansible/playbooks/ares/lateral_movement.yml → dreadnode.nimbus_range.lateral_movement_tools
 
   coercion:
@@ -198,6 +202,7 @@ agents:
     # gpt-5-mini is ~7x cheaper than gpt-5.2 and handles this fine.
     model: "gpt-5-mini"
     max_steps: 30
+    reasoning_effort: low
     # Provisioned by: ansible/playbooks/ares/coercion.yml → dreadnode.nimbus_range.coercion_tools
 
 # Timeout configurations
