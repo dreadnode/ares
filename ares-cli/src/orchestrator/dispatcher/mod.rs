@@ -210,6 +210,39 @@ impl CrackInflight {
         Some(reserved)
     }
 
+    /// Record a reservation for a dispatch that has already been decided on.
+    ///
+    /// Unlike [`Self::try_reserve`] this never refuses: the submission layer
+    /// calls it after a task id exists, at which point declining to record
+    /// would leave a real hashcat run untracked — the exact hole that let the
+    /// same hash be queued twice. `active` may therefore briefly exceed
+    /// `max_active`, which reports the true state rather than a capped guess.
+    pub async fn reserve(&self, task_id: &str, dedup_keys: &[String]) {
+        let mut groups = self.groups.lock().await;
+        let now = Instant::now();
+        groups.retain(|_, r| now.duration_since(r.reserved_at) < CRACK_INFLIGHT_TTL);
+        let taken: HashSet<&String> = groups
+            .iter()
+            .filter(|(id, _)| *id != task_id)
+            .flat_map(|(_, r)| r.keys.iter())
+            .collect();
+        let keys: Vec<String> = dedup_keys
+            .iter()
+            .filter(|k| !taken.contains(*k))
+            .cloned()
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        groups.insert(
+            task_id.to_string(),
+            CrackReservation {
+                keys,
+                reserved_at: now,
+            },
+        );
+    }
+
     /// Release the reservation held by `task_id`. Idempotent, and a no-op for
     /// task ids that never reserved anything — so the completion path can call
     /// it unconditionally.

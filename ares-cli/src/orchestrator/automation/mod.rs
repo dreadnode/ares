@@ -144,17 +144,39 @@ pub use winrm_lateral::auto_winrm_lateral;
 pub use zerologon::auto_zerologon;
 
 pub(crate) fn crack_dedup_key(hash: &ares_core::models::Hash) -> String {
+    crack_dedup_key_parts(&hash.domain, &hash.username, &hash.hash_value)
+}
+
+/// [`crack_dedup_key`] for a submitted `crack` task payload, whose shape is
+/// fixed by `Dispatcher::request_crack`.
+///
+/// The submission layer only sees the payload, not the `Hash` it was built
+/// from, and it is the one place that observes *every* crack task id — the
+/// immediate submit and the deferred drain's re-submit alike. Reserving there
+/// rather than at the call site is what keeps a task that was deferred (and so
+/// returned no id to its caller) from coming back through the drain unguarded.
+pub(crate) fn crack_dedup_key_from_payload(payload: &serde_json::Value) -> Option<String> {
+    let hash_value = payload.get("hash_value")?.as_str()?;
+    let username = payload
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let domain = payload.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    Some(crack_dedup_key_parts(domain, username, hash_value))
+}
+
+fn crack_dedup_key_parts(domain: &str, username: &str, hash_value: &str) -> String {
     // secretsdump stores NTLM as `{LM}:{NT}` (32:32 hex). Naively slicing the
     // first 32 chars yields the constant blank-LM `aad3b435...` for every
     // user, collapsing all NTLM dedup keys for one user into one entry. Take
     // the NT half when the value looks like LM:NT; otherwise the value is
     // already a bare hash ($krb5tgs$, $krb5asrep$, raw NT) — use as-is.
-    let nt_only = extract_nt_from_lm_nt(&hash.hash_value).unwrap_or(&hash.hash_value);
-    let prefix = &nt_only[..32.min(nt_only.len())];
+    let nt_only = extract_nt_from_lm_nt(hash_value).unwrap_or(hash_value);
+    let prefix: String = nt_only.chars().take(32).collect();
     format!(
         "{}:{}:{}",
-        hash.domain.to_lowercase(),
-        hash.username.to_lowercase(),
+        domain.to_lowercase(),
+        username.to_lowercase(),
         prefix
     )
 }
@@ -191,6 +213,35 @@ mod tests {
             is_trust_key: false,
             trust_pair_label: None,
         }
+    }
+
+    #[test]
+    fn payload_dedup_key_matches_the_hash_it_was_built_from() {
+        for hash_value in [
+            "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$cifs/sql01*$abcdef0123456789",
+            "abc123",
+        ] {
+            let h = make_hash("Svc_SQL", "CONTOSO.LOCAL", hash_value);
+            let payload = serde_json::json!({
+                "hash_type": h.hash_type,
+                "hash_value": h.hash_value,
+                "username": h.username,
+                "domain": h.domain,
+            });
+            assert_eq!(
+                crack_dedup_key_from_payload(&payload),
+                Some(crack_dedup_key(&h)),
+                "payload key diverged for {hash_value}"
+            );
+        }
+    }
+
+    #[test]
+    fn payload_dedup_key_is_none_for_non_crack_payloads() {
+        let recon = serde_json::json!({"target_ip": "192.168.58.10", "domain": "contoso.local"});
+        assert_eq!(crack_dedup_key_from_payload(&recon), None);
+        assert_eq!(crack_dedup_key_from_payload(&serde_json::json!({})), None);
     }
 
     #[test]

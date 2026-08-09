@@ -392,13 +392,6 @@ impl OrchestratorCallbackHandler {
         let hash_type_label = hash.hash_type.clone();
         let task_id = dispatcher.request_crack(&hash).await?;
 
-        if let Some(ref id) = task_id {
-            dispatcher
-                .crack_inflight
-                .try_reserve(id, std::slice::from_ref(&dedup))
-                .await;
-        }
-
         info!(hash_type = %hash_type_label, "Dispatched crack task");
         Ok(CallbackResult::Continue(format!(
             "Crack task dispatched for {username}@{domain} ({hash_type_label}): {}",

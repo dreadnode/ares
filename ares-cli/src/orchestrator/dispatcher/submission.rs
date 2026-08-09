@@ -484,6 +484,13 @@ impl Dispatcher {
             &uuid::Uuid::new_v4().simple().to_string()[..12]
         );
 
+        if let Some(dedup) = crate::orchestrator::automation::crack_dedup_key_from_payload(&payload)
+        {
+            self.crack_inflight
+                .reserve(&task_id, std::slice::from_ref(&dedup))
+                .await;
+        }
+
         info!(
             task_id = %task_id,
             task_type = task_type,
