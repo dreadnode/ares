@@ -298,6 +298,28 @@ mod tests {
     }
 }
 
+/// Optional benchmark snapshot storage settings.
+///
+/// Buckets, regions and profiles are account-specific, so none are compiled
+/// into the binary. The shipped `ares.yaml` omits this section on purpose —
+/// the values belong in `.env`, which is untracked — but a locally-added
+/// section is honoured. `BENCHMARK_*` / `LOKI_S3_*` env vars win over it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BenchmarkConfig {
+    #[serde(default)]
+    pub s3_bucket: String,
+    #[serde(default)]
+    pub aws_profile: String,
+    #[serde(default)]
+    pub aws_region: String,
+    #[serde(default)]
+    pub loki_s3_bucket: String,
+    #[serde(default)]
+    pub loki_s3_region: String,
+    #[serde(default)]
+    pub loki_s3_profile: String,
+}
+
 /// Optional Grafana dashboard integration settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrafanaConfig {

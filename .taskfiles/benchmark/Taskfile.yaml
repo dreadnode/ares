@@ -83,8 +83,8 @@ vars:
   SECURITY_GROUP_ID: '{{.BENCHMARK_SECURITY_GROUP_ID | default (env "BENCHMARK_SECURITY_GROUP_ID") | default ""}}'
   INSTANCE_PROFILE: '{{.BENCHMARK_INSTANCE_PROFILE | default (env "BENCHMARK_INSTANCE_PROFILE") | default ""}}'
   SUBNET_ID: '{{.BENCHMARK_SUBNET_ID | default (env "BENCHMARK_SUBNET_ID") | default ""}}'
-  # S3 bucket for snapshot data.
-  S3_BUCKET: '{{.BENCHMARK_S3_BUCKET | default (env "BENCHMARK_S3_BUCKET") | default "ares-benchmark-us-west-1"}}'
+  # S3 bucket for snapshot data. No default — set BENCHMARK_S3_BUCKET in .env.
+  S3_BUCKET: '{{.BENCHMARK_S3_BUCKET | default (env "BENCHMARK_S3_BUCKET") | default ""}}'
   # Set BENCHMARK_REQUIRE_BAKED_AMI=1 to error out if no ares-replay-stack AMI
   # is published (skips the stock-AL2023 fallback path).
   REQUIRE_BAKED_AMI: '{{.BENCHMARK_REQUIRE_BAKED_AMI | default (env "BENCHMARK_REQUIRE_BAKED_AMI") | default "0"}}'
@@ -257,6 +257,8 @@ tasks:
         msg: "BENCHMARK_INSTANCE_PROFILE is required (see .env.example)"
       - sh: '[ -n "{{.SUBNET_ID}}" ]'
         msg: "BENCHMARK_SUBNET_ID is required (see .env.example)"
+      - sh: '[ -n "{{.S3_BUCKET}}" ]'
+        msg: "BENCHMARK_S3_BUCKET is required (see .env.example)"
     cmds:
       - |
         export AWS_PROFILE={{.AWS_PROFILE}}

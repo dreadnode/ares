@@ -69,8 +69,8 @@ RC=$?
 # clean apt caches before snapshot
 apt-get clean; rm -rf /var/lib/apt/lists/* /tmp/ansible* 2>/dev/null || true
 $AWS s3 cp /var/log/ares-golden-build.log $PFX/build.log --region "$REGION" || true
-echo "$RC" > /tmp/tools-install-rc && $AWS s3 cp /tmp/tools-install-rc $PFX/TOOLS_INSTALL_DONE --region "$REGION"
 systemctl disable ares-golden-tools-install.service
+echo "$RC" > /tmp/tools-install-rc && $AWS s3 cp /tmp/tools-install-rc $PFX/TOOLS_INSTALL_DONE --region "$REGION"
 TOOLS_INSTALL
 chmod +x /usr/local/bin/ares-golden-tools-install.sh
 

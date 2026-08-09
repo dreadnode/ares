@@ -33,8 +33,11 @@ The taskfile reads these from `.env` (copy `.env.example`) or the shell:
 | `BENCHMARK_SECURITY_GROUP_ID`   | yes      | SG opening 3000/3100/9090/3200 from the investigator host               |
 | `BENCHMARK_INSTANCE_PROFILE`    | yes      | IAM role granting S3 read on the snapshot bucket                        |
 | `BENCHMARK_SUBNET_ID`           | yes      | Subnet reachable from wherever `ares benchmark run` executes            |
-| `BENCHMARK_S3_BUCKET`           | no       | Snapshot bucket. Defaults to `ares-benchmark-us-west-1`                 |
-| `BENCHMARK_AWS_REGION`          | no       | Defaults to `us-west-1`                                                 |
+| `BENCHMARK_S3_BUCKET`           | yes      | Snapshot bucket. No default — set it in `.env`                          |
+| `BENCHMARK_AWS_REGION`          | yes      | Snapshot bucket region. No default — set it in `.env`                   |
+| `LOKI_S3_BUCKET`                | yes      | Bucket Loki writes chunks to (capture only). No default                 |
+| `LOKI_S3_REGION`                | yes      | Region of the Loki chunk bucket (capture only). No default              |
+| `LOKI_S3_PROFILE`               | no       | AWS profile for the Loki bucket. Defaults to the credential chain       |
 | `BENCHMARK_INSTANCE_TYPE`       | no       | Defaults to `t3.medium`                                                 |
 | `BENCHMARK_AMI_ID`              | no       | Pin a specific AMI (bypasses tag lookup and stock fallback)             |
 | `BENCHMARK_REQUIRE_BAKED_AMI`   | no       | Set to `1` to fail if no `ares-replay-stack` AMI exists (skip fallback) |

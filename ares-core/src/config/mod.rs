@@ -45,6 +45,8 @@ pub struct AresConfig {
     pub grafana: Option<GrafanaConfig>,
     #[serde(default)]
     pub observability: Option<ObservabilityConfig>,
+    #[serde(default)]
+    pub benchmark: Option<BenchmarkConfig>,
 }
 
 impl AresConfig {

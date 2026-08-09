@@ -156,7 +156,7 @@ pub(crate) async fn run_replay(p: ReplayParams) -> Result<()> {
     );
     ensure_llm_secrets();
 
-    let snapshot_config = SnapshotConfig::from_env();
+    let snapshot_config = SnapshotConfig::from_env()?;
     let (snapshot_path, _is_temp) =
         resolve_snapshot(&p.snapshot, p.snapshot_dir.as_deref(), &snapshot_config)?;
 

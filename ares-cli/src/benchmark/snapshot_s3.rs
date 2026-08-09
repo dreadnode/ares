@@ -13,13 +13,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use tracing::{info, warn};
 
-/// Default S3 bucket for benchmark snapshots in the labs account.
-pub(crate) const DEFAULT_S3_BUCKET: &str = "ares-benchmark-us-west-1";
-/// Default AWS region for the labs account.
-pub(crate) const DEFAULT_AWS_REGION: &str = "us-west-1";
-/// Default AWS CLI profile. Empty means use the default credential chain
-/// (e.g. instance role on EC2). Set `BENCHMARK_AWS_PROFILE=lab` on laptops.
-pub(crate) const DEFAULT_AWS_PROFILE: &str = "";
+use ares_core::config::{AresConfig, BenchmarkConfig};
 
 /// Where the snapshot-read helpers look — a slim replacement for the old
 /// `ReplayConfig` that only tracks S3 access, since provisioning left the Rust
@@ -31,16 +25,51 @@ pub(crate) struct SnapshotConfig {
 }
 
 impl SnapshotConfig {
-    pub fn from_env() -> Self {
-        Self {
-            s3_bucket: std::env::var("BENCHMARK_S3_BUCKET")
-                .unwrap_or_else(|_| DEFAULT_S3_BUCKET.to_string()),
-            aws_profile: std::env::var("BENCHMARK_AWS_PROFILE")
-                .unwrap_or_else(|_| DEFAULT_AWS_PROFILE.to_string()),
-            aws_region: std::env::var("BENCHMARK_AWS_REGION")
-                .unwrap_or_else(|_| DEFAULT_AWS_REGION.to_string()),
-        }
+    pub fn from_env() -> Result<Self> {
+        let cfg = benchmark_section();
+        Ok(Self {
+            s3_bucket: require("BENCHMARK_S3_BUCKET", "benchmark.s3_bucket", &cfg.s3_bucket)?,
+            aws_profile: resolve("BENCHMARK_AWS_PROFILE", &cfg.aws_profile),
+            aws_region: require(
+                "BENCHMARK_AWS_REGION",
+                "benchmark.aws_region",
+                &cfg.aws_region,
+            )?,
+        })
     }
+}
+
+/// The `benchmark:` section of the resolved `ares.yaml`, or an empty one when
+/// no config file is reachable — env vars alone are then expected to supply it.
+pub(crate) fn benchmark_section() -> BenchmarkConfig {
+    AresConfig::from_env()
+        .ok()
+        .and_then(|c| c.benchmark)
+        .unwrap_or_default()
+}
+
+/// Resolve a setting from `var`, falling back to the config value.
+///
+/// Empty is indistinguishable from unset: an empty `aws_profile` means "use
+/// the default credential chain", which is what an absent value should do.
+pub(crate) fn resolve(var: &str, from_config: &str) -> String {
+    match std::env::var(var) {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => from_config.to_string(),
+    }
+}
+
+/// Resolve a setting that has no sane fallback.
+///
+/// Buckets and regions are deployment-specific, so nothing is compiled in —
+/// an unset value is an error naming both the env var and the config key
+/// rather than a silent fallback to whichever account this was written against.
+pub(crate) fn require(var: &str, config_key: &str, from_config: &str) -> Result<String> {
+    let resolved = resolve(var, from_config);
+    if resolved.trim().is_empty() {
+        bail!("{var} is not set and {config_key} is empty in ares.yaml — set either one");
+    }
+    Ok(resolved)
 }
 
 /// Append `--profile <p> --region <r>` to a command.

@@ -24,25 +24,10 @@ use ares_core::state::RedisStateReader;
 use crate::redis_conn::{connect_redis, resolve_operation_id};
 
 use super::manifest::{FiredAlert, SnapshotManifest, MANIFEST_VERSION};
+use super::snapshot_s3::{benchmark_section, require, resolve};
 
-/// Default S3 bucket where Loki stores chunks and index (infra account).
-const DEFAULT_LOKI_S3_BUCKET: &str = "dev-argonaut-loki";
-/// Default AWS region for the Loki S3 bucket.
-const DEFAULT_LOKI_S3_REGION: &str = "us-west-2";
-/// Default AWS CLI profile for infrastructure account access.
-const DEFAULT_LOKI_S3_PROFILE: &str = "infrastructure";
-
-/// Default benchmark S3 bucket in the labs account.
-const DEFAULT_BENCHMARK_BUCKET: &str = "ares-benchmark-us-west-1";
-/// Default AWS profile for the labs account.
-const DEFAULT_BENCHMARK_PROFILE: &str = "lab";
-/// Default AWS region for the labs account.
-const DEFAULT_BENCHMARK_REGION: &str = "us-west-1";
-
-/// Where the source Loki actually stores its chunks — overridable via
-/// `LOKI_S3_BUCKET` / `LOKI_S3_REGION` / `LOKI_S3_PROFILE` for non-lab
-/// environments. Defaults match dev-argonaut, which is where the ares
-/// benchmark ops currently ship logs.
+/// Where the source Loki actually stores its chunks — from `LOKI_S3_*` in the
+/// environment or `.env`, falling back to an optional `benchmark:` section.
 struct LokiS3 {
     bucket: String,
     region: String,
@@ -50,15 +35,21 @@ struct LokiS3 {
 }
 
 impl LokiS3 {
-    fn from_env() -> Self {
-        Self {
-            bucket: std::env::var("LOKI_S3_BUCKET")
-                .unwrap_or_else(|_| DEFAULT_LOKI_S3_BUCKET.to_string()),
-            region: std::env::var("LOKI_S3_REGION")
-                .unwrap_or_else(|_| DEFAULT_LOKI_S3_REGION.to_string()),
-            profile: std::env::var("LOKI_S3_PROFILE")
-                .unwrap_or_else(|_| DEFAULT_LOKI_S3_PROFILE.to_string()),
-        }
+    fn from_env() -> Result<Self> {
+        let cfg = benchmark_section();
+        Ok(Self {
+            bucket: require(
+                "LOKI_S3_BUCKET",
+                "benchmark.loki_s3_bucket",
+                &cfg.loki_s3_bucket,
+            )?,
+            region: require(
+                "LOKI_S3_REGION",
+                "benchmark.loki_s3_region",
+                &cfg.loki_s3_region,
+            )?,
+            profile: resolve("LOKI_S3_PROFILE", &cfg.loki_s3_profile),
+        })
     }
 }
 
@@ -277,12 +268,14 @@ pub(crate) async fn run_capture(
     eprintln!(" done");
 
     if !no_upload {
-        let bucket = std::env::var("BENCHMARK_S3_BUCKET")
-            .unwrap_or_else(|_| DEFAULT_BENCHMARK_BUCKET.to_string());
-        let profile = std::env::var("BENCHMARK_AWS_PROFILE")
-            .unwrap_or_else(|_| DEFAULT_BENCHMARK_PROFILE.to_string());
-        let region = std::env::var("BENCHMARK_AWS_REGION")
-            .unwrap_or_else(|_| DEFAULT_BENCHMARK_REGION.to_string());
+        let cfg = benchmark_section();
+        let bucket = require("BENCHMARK_S3_BUCKET", "benchmark.s3_bucket", &cfg.s3_bucket)?;
+        let profile = resolve("BENCHMARK_AWS_PROFILE", &cfg.aws_profile);
+        let region = require(
+            "BENCHMARK_AWS_REGION",
+            "benchmark.aws_region",
+            &cfg.aws_region,
+        )?;
 
         let s3_dest = format!("s3://{bucket}/snapshots/{op_id}/");
         eprint!("[5/5] Uploading snapshot to {s3_dest}...");
@@ -327,8 +320,8 @@ pub(crate) async fn run_capture(
     println!("  Credentials:  {}", manifest.credential_count);
     println!("  Hosts:        {}", manifest.host_count);
     if !no_upload {
-        let bucket = std::env::var("BENCHMARK_S3_BUCKET")
-            .unwrap_or_else(|_| DEFAULT_BENCHMARK_BUCKET.to_string());
+        let cfg = benchmark_section();
+        let bucket = require("BENCHMARK_S3_BUCKET", "benchmark.s3_bucket", &cfg.s3_bucket)?;
         println!("  S3:           s3://{bucket}/snapshots/{op_id}/");
     }
 
@@ -438,7 +431,7 @@ fn latest_flushed_chunk_end(
     let end_ms = end.timestamp_millis();
     let list_start = start.format("%Y-%m-%d").to_string();
     let list_end = (end + Duration::days(1)).format("%Y-%m-%d").to_string();
-    let loki = LokiS3::from_env();
+    let loki = LokiS3::from_env()?;
 
     let output = std::process::Command::new("aws")
         .args([
@@ -511,7 +504,7 @@ async fn sync_loki_s3(
     start: chrono::DateTime<chrono::Utc>,
     end: chrono::DateTime<chrono::Utc>,
 ) -> Result<(u64, u64)> {
-    let loki = LokiS3::from_env();
+    let loki = LokiS3::from_env()?;
     let chunks_dir = loki_dir.join("fake");
     let index_dir = loki_dir.join("index");
     fs::create_dir_all(&chunks_dir).context("create chunks dir")?;

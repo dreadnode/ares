@@ -161,7 +161,7 @@ aws eks update-kubeconfig --profile infrastructure --region <obs-region> \
   the node isn't approved by the tailnet admin. Sign in to Tailscale or add
   a `/etc/hosts` override for the EKS API endpoint.
 - `task ec2:deploy` must use an S3 bucket in the **same account** as
-  `kali-ares` (currently the lab account). Pass `S3_BUCKET=ares-benchmark-us-west-1`
+  `kali-ares` (currently the lab account). Pass `S3_BUCKET=<your-bucket>`
   when deploying, or set it in `.env`.
 
 **Run an op:**

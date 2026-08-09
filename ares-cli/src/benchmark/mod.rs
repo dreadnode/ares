@@ -89,7 +89,7 @@ pub(crate) async fn run_benchmark(cmd: BenchmarkCommands, redis_url: Option<Stri
 
 /// List available benchmark snapshots from S3.
 fn run_list() -> Result<()> {
-    let config = snapshot_s3::SnapshotConfig::from_env();
+    let config = snapshot_s3::SnapshotConfig::from_env()?;
     let snapshots =
         snapshot_s3::list_snapshots(&config.aws_profile, &config.aws_region, &config.s3_bucket)?;
 

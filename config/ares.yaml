@@ -302,6 +302,11 @@ grafana:
   api_key: "${GRAFANA_SERVICE_ACCOUNT_TOKEN}"
   dashboard_uid: "ares-redteam"
 
+# Benchmark snapshot storage (BENCHMARK_* / LOKI_S3_*) is deliberately NOT a
+# section here — this file is tracked, and bucket names are account-specific.
+# Set them in .env (untracked, see .env.example). An optional `benchmark:`
+# section is still honoured if you add one locally.
+
 # Observability backends (for blue team log/metric queries)
 # In K8s: use cluster-internal URLs
 #   loki_url: "http://loki-gateway.observability.svc.cluster.local"
