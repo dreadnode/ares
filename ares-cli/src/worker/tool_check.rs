@@ -211,6 +211,7 @@ mod tests {
             "impacket-ticketer",
             "impacket-secretsdump",
             "impacket-psexec",
+            "impacket-mssqlclient",
         ] {
             assert!(
                 tools.contains(expected),

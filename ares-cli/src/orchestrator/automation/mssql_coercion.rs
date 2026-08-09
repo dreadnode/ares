@@ -18,6 +18,8 @@ use tracing::{debug, info, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
+const MSSQL_COERCION_TARGET_ROLE: &str = "privesc";
+
 /// Monitors for MSSQL servers and dispatches xp_dirtree NTLM coercion.
 /// Interval: 45s.
 pub async fn auto_mssql_coercion(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
@@ -61,7 +63,7 @@ pub async fn auto_mssql_coercion(dispatcher: Arc<Dispatcher>, mut shutdown: watc
 
             let priority = dispatcher.effective_priority("mssql_coercion");
             match dispatcher
-                .throttled_submit("coercion", "coercion", payload, priority)
+                .throttled_submit("coercion", MSSQL_COERCION_TARGET_ROLE, payload, priority)
                 .await
             {
                 Ok(Some(task_id)) => {
@@ -236,6 +238,45 @@ mod tests {
         assert_eq!(payload["target_ip"], "192.168.58.22");
         assert_eq!(payload["listener_ip"], "192.168.58.100");
         assert_eq!(payload["credential"]["username"], "sa");
+    }
+
+    #[test]
+    fn target_role_registry_exposes_mssql_ntlm_coerce() {
+        use ares_llm::tool_registry::{tools_for_role, AgentRole};
+        let role = AgentRole::parse(MSSQL_COERCION_TARGET_ROLE)
+            .expect("target role must parse to an AgentRole");
+        let names: std::collections::HashSet<String> =
+            tools_for_role(role).into_iter().map(|t| t.name).collect();
+        assert!(
+            names.contains("mssql_ntlm_coerce"),
+            "role '{MSSQL_COERCION_TARGET_ROLE}' registry missing 'mssql_ntlm_coerce'"
+        );
+    }
+
+    #[test]
+    fn coercion_role_still_lacks_mssql_ntlm_coerce() {
+        use ares_llm::tool_registry::{tools_for_role, AgentRole};
+        let names: std::collections::HashSet<String> = tools_for_role(AgentRole::Coercion)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert!(
+            !names.contains("mssql_ntlm_coerce"),
+            "coercion role gained 'mssql_ntlm_coerce' — re-check whether the coercion worker also ships impacket-mssqlclient before routing back to it"
+        );
+    }
+
+    #[test]
+    fn coercion_task_type_still_renders_the_coercion_prompt() {
+        let payload = json!({
+            "technique": "mssql_ntlm_coercion",
+            "target_ip": "192.168.58.22",
+            "listener_ip": "192.168.58.100",
+        });
+        let prompt =
+            ares_llm::prompt::generate_task_prompt("coercion", "task-1", &payload, None).unwrap();
+        assert!(prompt.contains("- mssql_ntlm_coercion"));
+        assert!(prompt.contains("192.168.58.22"));
     }
 
     #[test]

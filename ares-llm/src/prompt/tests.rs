@@ -127,6 +127,81 @@ fn generate_coercion_prompt() {
 }
 
 #[test]
+fn coercion_prompt_renders_singular_technique_key() {
+    let payload = serde_json::json!({
+        "technique": "mssql_ntlm_coercion",
+        "target_ip": "192.168.58.22",
+        "listener_ip": "192.168.58.100",
+        "credential": {
+            "username": "svc_sql",
+            "password": "P@ssw0rd!",
+            "domain": "contoso.local",
+        },
+    });
+    let prompt = generate_task_prompt("coercion", "task-006b", &payload, None).unwrap();
+    assert!(prompt.contains("- mssql_ntlm_coercion"));
+    assert!(prompt.contains("192.168.58.22"));
+}
+
+#[test]
+fn coercion_prompt_singular_technique_distinguishes_sibling_drivers() {
+    for technique in [
+        "ntlm_relay_ldap",
+        "ntlm_relay_adcs",
+        "share_coercion",
+        "dfs_coercion",
+        "searchconnector_coercion",
+    ] {
+        let payload = serde_json::json!({
+            "technique": technique,
+            "target_ip": "192.168.58.10",
+            "listener_ip": "192.168.58.100",
+        });
+        let prompt = generate_task_prompt("coercion", "task-006c", &payload, None).unwrap();
+        assert!(
+            prompt.contains(&format!("- {technique}")),
+            "{technique} missing from rendered prompt"
+        );
+    }
+}
+
+#[test]
+fn coercion_prompt_falls_back_to_relay_target() {
+    let payload = serde_json::json!({
+        "technique": "ntlm_relay_adcs",
+        "relay_target": "192.168.58.240",
+        "listener_ip": "192.168.58.100",
+    });
+    let prompt = generate_task_prompt("coercion", "task-006d", &payload, None).unwrap();
+    assert!(prompt.contains("**Target:** 192.168.58.240"));
+    assert!(!prompt.contains("**Target:** unknown"));
+}
+
+#[test]
+fn coercion_prompt_plural_key_wins_over_singular() {
+    let payload = serde_json::json!({
+        "technique": "ignored_singular",
+        "techniques": ["petitpotam", "dfscoerce"],
+        "target_ip": "192.168.58.10",
+        "listener_ip": "192.168.58.100",
+    });
+    let prompt = generate_task_prompt("coercion", "task-006e", &payload, None).unwrap();
+    assert!(prompt.contains("- petitpotam"));
+    assert!(prompt.contains("- dfscoerce"));
+    assert!(!prompt.contains("ignored_singular"));
+}
+
+#[test]
+fn coercion_prompt_target_still_unknown_without_any_target_key() {
+    let payload = serde_json::json!({
+        "technique": "petitpotam",
+        "listener_ip": "192.168.58.100",
+    });
+    let prompt = generate_task_prompt("coercion", "task-006f", &payload, None).unwrap();
+    assert!(prompt.contains("**Target:** unknown"));
+}
+
+#[test]
 fn generate_privesc_prompt() {
     let payload = serde_json::json!({
         "technique": "find_delegation",
