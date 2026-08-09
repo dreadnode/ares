@@ -297,6 +297,10 @@ pub fn empty_harvest_advisory(tool_name: &str, discoveries: Option<&Value>) -> O
 pub fn parse_tool_output(tool_name: &str, output: &str, params: &Value) -> Value {
     let mut discoveries = json!({});
 
+    if output.trim().is_empty() {
+        return discoveries;
+    }
+
     match tool_name {
         "nmap_scan" => {
             set_if_nonempty(&mut discoveries, "hosts", parse_nmap_output(output, params))
@@ -1152,6 +1156,164 @@ pub fn looks_like_ip_pub(s: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    const EVIDENCE_KEYS: &[&str] = &[
+        "credentials",
+        "hashes",
+        "hosts",
+        "shares",
+        "vulnerabilities",
+        "delegations",
+        "trusts",
+        "users",
+        "spns",
+    ];
+
+    const PARSED_TOOLS: &[&str] = &[
+        "add_computer",
+        "adidnsdump",
+        "asrep_roast",
+        "certipy_auth",
+        "certipy_esc1_full_chain",
+        "certipy_esc13_full_chain",
+        "certipy_esc3_full_chain",
+        "certipy_esc4_full_chain",
+        "certipy_esc7_full_chain",
+        "certipy_find",
+        "certipy_find_anon",
+        "certipy_shadow",
+        "coercer",
+        "crack_with_hashcat",
+        "crack_with_john",
+        "dfscoerce",
+        "enumerate_domain_trusts",
+        "enumerate_shares",
+        "enumerate_users",
+        "esc8_relay_probe",
+        "evil_winrm",
+        "find_delegation",
+        "forge_inter_realm_and_dump",
+        "generate_silver_ticket",
+        "get_tgt",
+        "gmsa_dump_passwords",
+        "gmsa_read_password_bloodyad",
+        "kerberoast",
+        "kerberos_user_enum_noauth",
+        "laps_dump",
+        "ldap_acl_enumeration",
+        "ldap_search_descriptions",
+        "lsassy",
+        "mssql_command",
+        "mssql_enum_impersonation",
+        "mssql_enum_linked_servers",
+        "mssql_far_host_secretsdump",
+        "mssql_ntlm_coerce",
+        "netexec_auth_check",
+        "nmap_scan",
+        "nopac",
+        "ntds_dit_extract",
+        "ntlmrelayx_multirelay",
+        "ntlmrelayx_to_adcs",
+        "ntlmrelayx_to_ldaps",
+        "ntlmrelayx_to_smb",
+        "owner_edit",
+        "password_policy",
+        "password_spray",
+        "petitpotam",
+        "printnightmare",
+        "psexec",
+        "psexec_kerberos",
+        "pth_rpcclient",
+        "pth_smbclient",
+        "pth_winexe",
+        "pth_wmic",
+        "pywhisker",
+        "relay_and_coerce",
+        "responder",
+        "run_bloodhound",
+        "secretsdump",
+        "secretsdump_kerberos",
+        "smb_local_auth_check",
+        "smb_login_check",
+        "smb_signing_check",
+        "smb_sweep",
+        "smbclient_spider",
+        "smbexec",
+        "smbexec_kerberos",
+        "start_mitm6",
+        "start_responder",
+        "sysvol_script_search",
+        "targeted_kerberoast",
+        "username_as_password",
+        "wmiexec",
+        "wmiexec_kerberos",
+        "xfreerdp",
+        "zerologon_check",
+    ];
+
+    fn fully_populated_params() -> Value {
+        json!({
+            "target": "192.168.58.30",
+            "target_ip": "192.168.58.30",
+            "target_dn": "CN=bob,DC=contoso,DC=local",
+            "target_user": "bob",
+            "target_host": "sql01.contoso.local",
+            "listener_ip": "192.168.58.5",
+            "relay_target": "192.168.58.240",
+            "coerce_from": "192.168.58.240",
+            "dc_ip": "192.168.58.240",
+            "ca_host": "ca01.contoso.local",
+            "hostname": "sql01.contoso.local",
+            "domain": "contoso.local",
+            "username": "alice",
+            "password": "P@ssw0rd!",
+            "principal": "alice",
+            "new_owner": "alice",
+            "account_name": "bob",
+            "linked_server": "WEB01",
+            "spn": "cifs/dc01.contoso.local",
+            "interface": "eth0",
+            "template": "User",
+            "ca": "CONTOSO-CA",
+        })
+    }
+
+    #[test]
+    fn no_parser_arm_mints_evidence_from_params_alone() {
+        let params = fully_populated_params();
+
+        let mut offenders: Vec<String> = Vec::new();
+        for tool in PARSED_TOOLS {
+            let disc = parse_tool_output(tool, "", &params);
+            for key in EVIDENCE_KEYS {
+                let minted = disc
+                    .get(*key)
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| !a.is_empty());
+                if minted {
+                    offenders.push(format!("{tool} -> {key}"));
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these parser arms built {:?} from params with no tool output to support it, which \
+             hands result_has_parser_evidence a marker the orchestrator then accepts as proof an \
+             exploit succeeded: {offenders:#?}",
+            EVIDENCE_KEYS
+        );
+    }
+
+    #[test]
+    fn evidence_key_list_matches_the_orchestrator_gate() {
+        assert_eq!(
+            EVIDENCE_KEYS.len(),
+            9,
+            "EVIDENCE_KEYS mirrors result_has_parser_evidence in \
+             ares-cli/src/orchestrator/result_processing/mod.rs — update both together"
+        );
+    }
 
     #[test]
     fn empty_harvest_advisory_fires_on_zero_yield_spray() {
