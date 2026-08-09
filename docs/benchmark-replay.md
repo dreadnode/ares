@@ -54,8 +54,10 @@ ares benchmark capture op-20260706-123045 \
   --flush-timeout-mins 60 \
   --attacker-ips 192.168.58.240
 
-# Auto-capture at the end of an EC2 op (opt-in via CAPTURE=true on the wait task)
-task ec2:wait EC2_NAME=kali-ares OPERATION_ID=op-20260706-123045 CAPTURE=true
+# Auto-capture at the end of an EC2 op. CAPTURE is a knob on the launch path,
+# not on a wait task — it implies WAIT, since capture needs a completed op.
+task run WAIT=true CAPTURE=true
+task ec2:launch EC2_NAME=kali-ares WAIT=true CAPTURE=true
 ```
 
 Capture writes to `benchmarks/<op-id>/` by default and uploads to

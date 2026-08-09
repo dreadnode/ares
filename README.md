@@ -174,6 +174,25 @@ task run WAIT=true CAPTURE=true       # wait + capture Loki snapshot to S3 (wait
                                       #   prints the exact benchmark:replay command
 ```
 
+**Run an op with the code you just wrote:**
+
+`task run` launches against whatever binary is already on the box. When you are
+testing a change, use `ec2:e2e` instead — it builds and deploys, proves the
+deployed binary came from this build (and, with `GATE_STRING`, that it contains
+your edit), restarts the workers, clears stale ops, launches, waits for both
+teams to finish, and fetches the red and blue reports.
+
+```bash
+task ec2:e2e                                    # blind start against dreadgoad
+task ec2:e2e GATE_STRING='a log line you added' # also assert your edit shipped
+task ec2:e2e CRED_USER=alice CRED_PASS='...'    # assumed-breach start
+task ec2:e2e SKIP_DEPLOY=true                   # reuse the on-box binary
+```
+
+It refuses to build from a checkout behind its upstream (`ALLOW_STALE=true` to
+override) and refuses to target a host whose Name tag contains `prod`
+(`ALLOW_PROD=true`). Full knob list: `.taskfiles/ec2/scripts/e2e-op.sh`.
+
 **Evaluate blue via replay:**
 
 ```bash
@@ -381,6 +400,9 @@ task blue:once LATEST=true
 # Or via K8s multi-agent orchestrator
 task blue:multi:remote LATEST=true
 
+# Or submit one alert by hand (BLUE_TRANSPORT picks the backend)
+task blue:submit ALERT=alert.json
+
 # Monitor progress
 task blue:multi:status LATEST=true
 task blue:multi:operation-status LATEST=true WATCH=10
@@ -393,20 +415,23 @@ task blue:reports:consolidate LATEST=true
 
 ### Key Tasks
 
-| Task                       | Description                              |
-| -------------------------- | ---------------------------------------- |
-| `blue:once`                | Single investigation from red op (local) |
-| `blue:once:remote`         | Single investigation (K8s)               |
-| `blue:multi:remote`        | Multi-agent investigation (K8s)          |
-| `blue:investigate`         | Submit a specific alert JSON file        |
-| `blue:poll`                | Continuous poll mode                     |
-| `blue:multi:status`        | Investigation status                     |
-| `blue:multi:evidence`      | Collected evidence                       |
-| `blue:multi:techniques`    | MITRE techniques identified              |
-| `blue:multi:logs`          | Follow blue team logs                    |
-| `blue:reports:consolidate` | Generate report from Redis state         |
-| `blue:playbook`            | Export detection playbook                |
-| `blue:multi:cleanup`       | Clean up old investigations              |
+| Task                       | Description                                  |
+| -------------------------- | -------------------------------------------- |
+| `blue:once`                | Single investigation from red op (local)     |
+| `blue:multi:remote`        | Multi-agent investigation (K8s)              |
+| `blue:submit`              | Submit a specific alert JSON file            |
+| `blue:poll`                | Continuous poll mode                         |
+| `blue:multi:status`        | Investigation status                         |
+| `blue:multi:evidence`      | Collected evidence                           |
+| `blue:multi:techniques`    | MITRE techniques identified                  |
+| `blue:multi:logs`          | Follow blue team logs                        |
+| `blue:reports:consolidate` | Generate report from Redis state             |
+| `blue:playbook`            | Export the detection playbook as JSON        |
+| `blue:multi:cleanup`       | Clean up old investigations                  |
+
+Every `blue:*` task picks its backend from `BLUE_TRANSPORT` — `ec2` (default,
+proxied over SSM), `k8s` (`kubectl exec`), or `local` (this host, which needs
+Redis and NATS port-forwarded here).
 
 See [Blue Team Documentation](docs/blue.md) for full command reference.
 
@@ -512,14 +537,22 @@ task rust:test               # tests
 task rust:check              # compile check
 
 # Deploy to K8s
-task remote:rust:deploy              # cross-compile + kubectl cp
+task remote:rust:build               # cross-compile for the cluster's arch
+task remote:rust:deploy              # kubectl cp the binary onto the pods
+task remote:rust:deploy:quick        # build + deploy in one step
 task remote:rust:deploy:config       # push config YAML as ConfigMap
 task remote:check                    # verify binary sync
 
 # Deploy to EC2
-task ec2:deploy                      # cross-compile + S3 + SSM install
+task ec2:deploy                      # build + S3 + SSM install
 task ec2:deploy:config               # push config.yaml
 ```
+
+`remote:rust:build` prefers `cargo-zigbuild` on every host and falls back to
+`cross`. Install it (`cargo install cargo-zigbuild`) before deploying to K8s
+from an Apple Silicon Mac — `cross` runs the toolchain under qemu-user
+emulation there, where rustc frequently crashes, and unlike `ec2:deploy` there
+is no on-cluster build box to fall back to.
 
 ### Container Images
 

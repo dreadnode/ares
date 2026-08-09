@@ -1,5 +1,5 @@
 ---
-# Remote development tasks - sync code to running K8s pods
+# Remote development tasks - deploy binaries to and inspect running K8s pods
 version: "3"
 
 vars:
@@ -9,9 +9,6 @@ vars:
   WARN: '\033[1;33m[WARN]\033[0m'
   ORCH_CONTAINER: '{{.ORCH_CONTAINER | default "orchestrator"}}'
   WORKER_CONTAINER: '{{.WORKER_CONTAINER | default ""}}'
-  PARALLELISM: '{{.PARALLELISM | default "10"}}'
-  PVC_PATH: '/ares'
-  VERIFY_PVC_DIFF: '{{.VERIFY_PVC_DIFF | default "true"}}'
   # Team selector: red, blue, or all (default: all)
   TEAM: '{{.TEAM | default "all"}}'
   # Pod labels by team
@@ -21,346 +18,6 @@ vars:
   BLUE_ORCH_LABEL: 'app.kubernetes.io/name=ares-blue-orchestrator'
 
 tasks:
-  # ============================================================================
-  # SYNC: Copy files to pods
-  # ============================================================================
-  sync:
-    desc: "Sync local code to pods (usage: task remote:sync [FILES=src/ares/core/worker.py] [TEAM=red|blue|all])"
-    silent: true
-    vars:
-      FILES: '{{.FILES | default ""}}'
-    cmds:
-      - |
-        echo -e "{{.INFO}} Syncing code to pods in {{.K8S_NAMESPACE}} (team={{.TEAM}})"
-
-        ORCH_PODS=""
-        WORKER_PODS=""
-
-        # Get red team pods if TEAM=red or TEAM=all
-        if [ "{{.TEAM}}" = "red" ] || [ "{{.TEAM}}" = "all" ]; then
-          RED_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l {{.RED_ORCH_LABEL}} \
-            --field-selector=status.phase=Running \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-          if [ -n "$RED_ORCH" ]; then
-            ORCH_PODS="$ORCH_PODS $RED_ORCH"
-          fi
-
-          RED_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l {{.RED_COMPONENT_LABEL}} \
-            --field-selector=status.phase=Running \
-            -o json | jq -r --arg orch "$RED_ORCH" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
-          WORKER_PODS="$WORKER_PODS $RED_WORKERS"
-        fi
-
-        # Get blue team pods if TEAM=blue or TEAM=all
-        if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
-          BLUE_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l {{.BLUE_ORCH_LABEL}} \
-            --field-selector=status.phase=Running \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-          if [ -n "$BLUE_ORCH" ]; then
-            ORCH_PODS="$ORCH_PODS $BLUE_ORCH"
-          fi
-
-          BLUE_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l {{.BLUE_COMPONENT_LABEL}} \
-            --field-selector=status.phase=Running \
-            -o json | jq -r --arg orch "$BLUE_ORCH" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
-          WORKER_PODS="$WORKER_PODS $BLUE_WORKERS"
-        fi
-
-        # Trim whitespace
-        ORCH_PODS=$(echo "$ORCH_PODS" | xargs)
-        PODS=$(echo "$WORKER_PODS" | xargs)
-
-        if [ -z "$PODS" ] && [ -z "$ORCH_PODS" ]; then
-          echo -e "{{.ERROR}} No running pods found for team={{.TEAM}}"
-          exit 1
-        fi
-
-        # Determine files to sync
-        if [ -n "{{.FILES}}" ]; then
-          FILES_TO_SYNC="{{.FILES}}"
-        else
-          # Default: sync all ares source files
-          FILES_TO_SYNC=$(find src/ares -name "*.py" -type f)
-        fi
-
-        for f in $FILES_TO_SYNC; do
-          if [ ! -f "$f" ]; then
-            echo -e "{{.WARN}} Skipping (not found): $f"
-            continue
-          fi
-
-          relative_path="${f#src/ares/}"
-          echo -e "{{.INFO}} $relative_path"
-
-          # Sync to worker pods (PVC only - PYTHONPATH=/ares/src handles imports)
-          if [ -n "$PODS" ]; then
-            printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
-              pod="$1"
-              file="$2"
-              rel="$3"
-              verify="{{.VERIFY_PVC_DIFF}}"
-              worker_container="{{.WORKER_CONTAINER}}"
-              if [ -z "$worker_container" ]; then
-                worker_container=$(kubectl get pod -n {{.K8S_NAMESPACE}} "$pod" \
-                  -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
-              fi
-              if [ -n "$worker_container" ]; then
-                container_flag=(-c "$worker_container")
-              else
-                container_flag=()
-              fi
-              if kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
-                  -n {{.K8S_NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
-                echo -e "{{.SUCCESS}}   -> $pod"
-              elif kubectl cp "$file" "$pod:{{.PVC_PATH}}/src/ares/$rel" \
-                  -n {{.K8S_NAMESPACE}} 2>/dev/null; then
-                echo -e "{{.SUCCESS}}   -> $pod"
-              else
-                echo -e "{{.WARN}}   x $pod"
-              fi
-              if [ "$verify" = "true" ]; then
-                local_hash=$(shasum -a 256 "$file" 2>/dev/null | awk "{print \$1}")
-                remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
-                  sha256sum "/ares/src/ares/$rel" 2>/dev/null | awk "{print \$1}")
-                if [ -z "$remote_hash" ]; then
-                  remote_hash="MISSING"
-                fi
-                if [ "$remote_hash" = "__ERR__" ] || [ "$local_hash" = "__ERR__" ]; then
-                  echo -e "{{.WARN}}   x $pod (pvc-verify failed)"
-                elif [ "$remote_hash" = "MISSING" ]; then
-                  echo -e "{{.WARN}}   x $pod (pvc missing)"
-                elif [ "$remote_hash" = "$local_hash" ]; then
-                  echo -e "{{.SUCCESS}}   -> $pod (pvc verified)"
-                else
-                  echo -e "{{.WARN}}   x $pod (pvc differs)"
-                fi
-              fi
-              exit 0
-            ' _ {} "$f" "$relative_path"
-          fi
-
-          # Sync to orchestrator(s) (PVC only)
-          for ORCH_POD in $ORCH_PODS; do
-            if kubectl cp "$f" "$ORCH_POD:{{.PVC_PATH}}/src/ares/$relative_path" \
-                -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD"
-            else
-              echo -e "{{.WARN}}   x $ORCH_POD"
-            fi
-            if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
-              local_hash=$(shasum -a 256 "$f" 2>/dev/null | awk "{print \$1}")
-              remote_hash=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
-                sha256sum "/ares/src/ares/$relative_path" 2>/dev/null | awk "{print \$1}")
-              if [ -z "$remote_hash" ]; then
-                remote_hash="MISSING"
-              fi
-              if [ "$remote_hash" = "__ERR__" ] || [ "$local_hash" = "__ERR__" ]; then
-                echo -e "{{.WARN}}   x $ORCH_POD (pvc-verify failed)"
-              elif [ "$remote_hash" = "MISSING" ]; then
-                echo -e "{{.WARN}}   x $ORCH_POD (pvc missing)"
-              elif [ "$remote_hash" = "$local_hash" ]; then
-                echo -e "{{.SUCCESS}}   -> $ORCH_POD (pvc verified)"
-              else
-                echo -e "{{.WARN}}   x $ORCH_POD (pvc differs)"
-              fi
-            fi
-          done
-        done
-
-        echo ""
-        echo -e "{{.SUCCESS}} Sync complete"
-
-  # ============================================================================
-  # SYNC:FULL: Copy full src/ares tree to pods
-  # ============================================================================
-  sync:full:
-    desc: "Sync full src/ares tree to pods (usage: task remote:sync:full [TEAM=red|blue|all])"
-    silent: true
-    cmds:
-      - |
-        echo -e "{{.INFO}} Full sync to pods in {{.K8S_NAMESPACE}} (team={{.TEAM}})"
-
-        ORCH_PODS=""
-        WORKER_PODS=""
-
-        # Get red team pods if TEAM=red or TEAM=all
-        if [ "{{.TEAM}}" = "red" ] || [ "{{.TEAM}}" = "all" ]; then
-          RED_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l {{.RED_ORCH_LABEL}} \
-            --field-selector=status.phase=Running \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-          if [ -n "$RED_ORCH" ]; then
-            ORCH_PODS="$ORCH_PODS $RED_ORCH"
-          fi
-
-          RED_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l {{.RED_COMPONENT_LABEL}} \
-            --field-selector=status.phase=Running \
-            -o json | jq -r --arg orch "$RED_ORCH" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
-          WORKER_PODS="$WORKER_PODS $RED_WORKERS"
-        fi
-
-        # Get blue team pods if TEAM=blue or TEAM=all
-        if [ "{{.TEAM}}" = "blue" ] || [ "{{.TEAM}}" = "all" ]; then
-          BLUE_ORCH=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l {{.BLUE_ORCH_LABEL}} \
-            --field-selector=status.phase=Running \
-            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-          if [ -n "$BLUE_ORCH" ]; then
-            ORCH_PODS="$ORCH_PODS $BLUE_ORCH"
-          fi
-
-          BLUE_WORKERS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-            -l {{.BLUE_COMPONENT_LABEL}} \
-            --field-selector=status.phase=Running \
-            -o json | jq -r --arg orch "$BLUE_ORCH" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
-          WORKER_PODS="$WORKER_PODS $BLUE_WORKERS"
-        fi
-
-        # Trim whitespace
-        ORCH_PODS=$(echo "$ORCH_PODS" | xargs)
-        PODS=$(echo "$WORKER_PODS" | xargs)
-
-        if [ -z "$PODS" ] && [ -z "$ORCH_PODS" ]; then
-          echo -e "{{.ERROR}} No running pods found for team={{.TEAM}}"
-          exit 1
-        fi
-
-        # Show what we found
-        POD_COUNT=$(echo $PODS | wc -w | tr -d ' ')
-        ORCH_COUNT=$(echo $ORCH_PODS | wc -w | tr -d ' ')
-        ORCH_MSG=""
-        if [ -n "$ORCH_PODS" ]; then
-          ORCH_MSG=" + $ORCH_COUNT orchestrator(s)"
-        fi
-        echo -e "{{.INFO}} Found $POD_COUNT worker pods${ORCH_MSG}, syncing..."
-
-        # Sync to worker pods
-        if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
-          MANIFEST=$(mktemp /tmp/ares-sha256.XXXX)
-          (cd src/ares && find . -type d -name __pycache__ -prune -o -type f ! -name "*.pyc" -print0 | sort -z | xargs -0 shasum -a 256) > "$MANIFEST"
-        else
-          MANIFEST=""
-        fi
-        if [ -n "$PODS" ]; then
-          printf '%s\n' $PODS | xargs -n1 -P {{.PARALLELISM}} -I{} bash -c '
-            pod="$1"
-            manifest="$2"
-            worker_container="{{.WORKER_CONTAINER}}"
-            if [ -z "$worker_container" ]; then
-              worker_container=$(kubectl get pod -n {{.K8S_NAMESPACE}} "$pod" \
-                -o jsonpath="{.spec.containers[0].name}" 2>/dev/null)
-            fi
-            if [ -n "$worker_container" ]; then
-              container_flag=(-c "$worker_container")
-            else
-              container_flag=()
-            fi
-            sync_ok="false"
-            if kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
-                mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null && \
-              kubectl cp src/ares/. "$pod":{{.PVC_PATH}}/src/ares \
-                -n {{.K8S_NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
-              sync_ok="true"
-            elif kubectl cp src/ares/. "$pod":{{.PVC_PATH}}/src/ares \
-                -n {{.K8S_NAMESPACE}} 2>/dev/null; then
-              sync_ok="true"
-            fi
-            if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
-              if [ "$sync_ok" = "true" ] && kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
-                  mkdir -p {{.PVC_PATH}}/tmp 2>/dev/null && \
-                kubectl cp "$manifest" "$pod:{{.PVC_PATH}}/tmp/ares.sha256" \
-                  -n {{.K8S_NAMESPACE}} "${container_flag[@]}" 2>/dev/null; then
-                set +e
-                verify_out=$(kubectl exec -n {{.K8S_NAMESPACE}} "${container_flag[@]}" "$pod" -- \
-                  sh -c "cd {{.PVC_PATH}}/src/ares && sha256sum -c {{.PVC_PATH}}/tmp/ares.sha256" 2>&1)
-                verify_rc=$?
-                set -e
-                if [ $verify_rc -eq 0 ]; then
-                  echo -e "{{.SUCCESS}}   -> $pod (synced, pvc verified)"
-                else
-                  echo -e "{{.WARN}}   x $pod (synced, pvc differs)"
-                  failed_lines=$(printf "%s\n" "$verify_out" | grep -E "FAILED|No such file" || true)
-                  failed_count=$(printf "%s\n" "$failed_lines" | sed "/^$/d" | wc -l | tr -d " ")
-                  if [ "$failed_count" -gt 0 ]; then
-                    if [ "$failed_count" -gt 20 ]; then
-                      echo -e "{{.INFO}}   showing first 20 of $failed_count failures"
-                    fi
-                    printf "%s\n" "$failed_lines" | head -n 20
-                  else
-                    printf "%s\n" "$verify_out" | head -n 5
-                  fi
-                fi
-              else
-                echo -e "{{.WARN}}   x $pod (sync failed)"
-              fi
-            else
-              if [ "$sync_ok" = "true" ]; then
-                echo -e "{{.SUCCESS}}   -> $pod (synced)"
-              else
-                echo -e "{{.WARN}}   x $pod (sync failed)"
-              fi
-            fi
-            exit 0
-          ' _ {} "$MANIFEST"
-        fi
-
-        # Sync to orchestrator(s)
-        for ORCH_POD in $ORCH_PODS; do
-          sync_ok="false"
-          if kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
-              mkdir -p {{.PVC_PATH}}/src/ares 2>/dev/null && \
-            kubectl cp src/ares/. "$ORCH_POD":{{.PVC_PATH}}/src/ares \
-              -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-            sync_ok="true"
-          fi
-          if [ "{{.VERIFY_PVC_DIFF}}" = "true" ]; then
-            if [ "$sync_ok" = "true" ] && kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
-                mkdir -p {{.PVC_PATH}}/tmp 2>/dev/null && \
-              kubectl cp "$MANIFEST" "$ORCH_POD:{{.PVC_PATH}}/tmp/ares.sha256" \
-                -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-              set +e
-              verify_out=$(kubectl exec -n {{.K8S_NAMESPACE}} -c {{.ORCH_CONTAINER}} "$ORCH_POD" -- \
-                sh -c "cd {{.PVC_PATH}}/src/ares && sha256sum -c {{.PVC_PATH}}/tmp/ares.sha256" 2>&1)
-              verify_rc=$?
-              set -e
-              if [ $verify_rc -eq 0 ]; then
-                echo -e "{{.SUCCESS}}   -> $ORCH_POD (synced, pvc verified)"
-              else
-                echo -e "{{.WARN}}   x $ORCH_POD (synced, pvc differs)"
-                failed_lines=$(printf "%s\n" "$verify_out" | grep -E "FAILED|No such file" || true)
-                failed_count=$(printf "%s\n" "$failed_lines" | sed "/^$/d" | wc -l | tr -d " ")
-                if [ "$failed_count" -gt 0 ]; then
-                  if [ "$failed_count" -gt 20 ]; then
-                    echo -e "{{.INFO}}   showing first 20 of $failed_count failures"
-                  fi
-                  printf "%s\n" "$failed_lines" | head -n 20
-                else
-                  printf "%s\n" "$verify_out" | head -n 5
-                fi
-              fi
-            else
-              echo -e "{{.WARN}}   x $ORCH_POD (sync failed)"
-            fi
-          else
-            if [ "$sync_ok" = "true" ]; then
-              echo -e "{{.SUCCESS}}   -> $ORCH_POD (synced)"
-            else
-              echo -e "{{.WARN}}   x $ORCH_POD (sync failed)"
-            fi
-          fi
-        done
-
-        echo ""
-        echo -e "{{.SUCCESS}} Full sync complete"
-        if [ -n "$MANIFEST" ]; then
-          rm -f "$MANIFEST"
-        fi
-
   # ============================================================================
   # ROLLOUT: Restart pods
   # ============================================================================
@@ -551,15 +208,22 @@ tasks:
         export CARGO_BUILD_JOBS="{{.CARGO_BUILD_JOBS}}"
         echo -e "{{.INFO}} cargo build jobs: $CARGO_BUILD_JOBS"
 
-        # Cross-compile: prefer cross on macOS (aws-lc-sys breaks under
-        # zigbuild's Zig ar wrapper on Darwin), prefer zigbuild on Linux,
-        # fall back to raw cargo
-        if [ "$(uname)" = "Darwin" ] && command -v cross >/dev/null 2>&1; then
-          export AWS_LC_SYS_CMAKE_BUILDER=1
-          cross build --release --target {{.RUST_TARGET}}
-        elif command -v cargo-zigbuild >/dev/null 2>&1; then
+        # zigbuild first on every host. This used to prefer cross on Darwin to
+        # dodge an aws-lc-sys failure under Zig's AR wrapper; that no longer
+        # reproduces (aws-lc-sys 0.40 builds clean under zigbuild on arm64
+        # macOS, with or without AWS_LC_SYS_CMAKE_BUILDER). cross is the worse
+        # default there: rustc crashes under qemu-user emulation, which is why
+        # ec2:deploy defaults to building on the box. K8s has no build box, so
+        # a wedged local toolchain here has nothing to fall back to.
+        if command -v cargo-zigbuild >/dev/null 2>&1; then
           cargo zigbuild --release --target {{.RUST_TARGET}}
         elif command -v cross >/dev/null 2>&1; then
+          if [ "$(uname)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+            echo -e "{{.WARN}} cargo-zigbuild not found; falling back to cross on an arm64"
+            echo -e "{{.WARN}} Mac, where rustc often crashes under emulation."
+            echo -e "{{.INFO}} Prefer: cargo install cargo-zigbuild"
+          fi
+          export AWS_LC_SYS_CMAKE_BUILDER=1
           cross build --release --target {{.RUST_TARGET}}
         else
           echo -e "{{.WARN}} No cross-compilation tool found, trying cargo with target..."

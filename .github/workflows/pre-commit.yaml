@@ -135,7 +135,7 @@ jobs:
           # the dedicated 🦀 Rust workflow with their own caches. Skipping them
           # here trims ~11 minutes off this job without losing coverage.
           SKIP: cargo-fmt,cargo-clippy,cargo-check,cargo-test
-        run: task -y --timeout=60s run-pre-commit
+        run: task -y --timeout=60s pre-commit:run-pre-commit
 
       - name: Capture autofix patch
         id: capture

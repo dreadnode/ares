@@ -98,6 +98,13 @@ includes:
   obs:
     taskfile: .taskfiles/obs/Taskfile.yaml
     optional: true
+  proxmox:
+    taskfile: .taskfiles/proxmox/Taskfile.yaml
+    optional: true
+    vars:
+      ARES_CLI: '{{.ARES_CLI}}'
+      ARES_CONFIG: '{{.ARES_CONFIG}}'
+      MODEL: '{{.MODEL}}'
 
 vars:
   API_DIR: "."
@@ -237,14 +244,6 @@ tasks:
     cmds:
       - cp -n .env.example .env || true
 
-  get-dotenv-value:
-    internal: true
-    silent: true
-    vars:
-      KEY: '{{.CLI_ARGS}}'
-    cmds:
-      - grep '^{{.KEY}}=' .env | sed 's/^{{.KEY}}=//;s/^"//;s/"$//'
-
   setup-git-hooks:
     desc: Set up Git hooks
     silent: true
@@ -264,17 +263,8 @@ tasks:
       - task: setup-env
       - task: setup-git-hooks
       - cargo build
-      - task: pre-commit:install
+      - task: pre-commit:install-pc-hooks
       - echo "Project is ready to go!"
-
-  # Tools and pre-commit tasks
-  run-pre-commit:
-    desc: Run pre-commit hooks on all files
-    silent: true
-    cmds:
-      - task: pre-commit:update-hooks
-      - task: pre-commit:clear-cache
-      - task: pre-commit:run-hooks
 
   clean:
     desc: Clean build artifacts
@@ -309,12 +299,6 @@ tasks:
     cmds:
       - cargo check
 
-  rust:clean:
-    desc: Clean Rust build artifacts
-    silent: true
-    cmds:
-      - cargo clean
-
   rust:deploy:
     desc: "Cross-compile and deploy Rust binaries to K8s pods"
     cmds:
@@ -345,11 +329,12 @@ tasks:
         echo "Configuration:"
         echo "  Platform: {{.DREADNODE_SERVER_URL}}"
         echo "  Project: {{.DREADNODE_PROJECT}}"
-        echo "  Model (override): {{.MODEL}}"
         echo "  Config: {{.ARES_CONFIG}}"
+        echo "  Model (override): {{.MODEL}}"
+        echo "  Max steps (red/blue/blue-once): {{.MAX_STEPS_RED}}/{{.MAX_STEPS_BLUE}}/{{.MAX_STEPS_BLUE_ONCE}}"
+        echo "  Poll interval: {{.POLL_INTERVAL}}s"
+        echo "  Reports: {{.REPORT_DIR}}"
         echo "  Grafana: {{.GRAFANA_URL}}"
-        echo "  Loki: {{.LOKI_URL}}"
-        echo "  Prometheus: {{.PROMETHEUS_URL}}"
         echo ""
         echo "Checking 1Password CLI access..."
 
@@ -389,36 +374,11 @@ tasks:
         else
           echo "  ⚠️  Anthropic API key not found in 1Password"
           echo "     Item: 'Dreadnode Claude'"
-          echo "     Field: 'dreadnode-personal-api-key'"
+          echo "     Field: 'api-key'"
         fi
 
         echo ""
         echo "Configuration check complete"
-
-  ares:config:show:
-    desc: Show current configuration (without secrets)
-    silent: true
-    cmds:
-      - |
-        echo "Ares Configuration:"
-        echo "===================="
-        echo "Platform Settings:"
-        echo "  Server: {{.DREADNODE_SERVER_URL}}"
-        echo "  Project: {{.DREADNODE_PROJECT}}"
-        echo ""
-        echo "Agent Settings:"
-        echo "  Model: {{.MODEL}}"
-        echo "  Max Steps (Blue): {{.MAX_STEPS_BLUE}}"
-        echo "  Max Steps (Blue Once): {{.MAX_STEPS_BLUE_ONCE}}"
-        echo "  Max Steps (Red): {{.MAX_STEPS_RED}}"
-        echo "  Poll Interval: {{.POLL_INTERVAL}}s"
-        echo ""
-        echo "Data Sources:"
-        echo "  Grafana: {{.GRAFANA_URL}}"
-        echo "  Query Method: Grafana MCP (requires mcp-grafana binary)"
-        echo ""
-        echo "Output:"
-        echo "  Reports: {{.REPORT_DIR}}"
 
   ares:version:
     desc: Show Ares version information
@@ -447,42 +407,3 @@ tasks:
     silent: true
     cmds:
       - '{{.ARES_CLI}} config set-model --all {{.CLI_ARGS}}'
-
-  # ===========================================================================
-  # Ares Red Team Agent Tasks
-  # ===========================================================================
-
-  check-aws-auth:
-    internal: true
-    silent: true
-    vars:
-      PROFILE: '{{.PROFILE | default (env "AWS_PROFILE") | default "lab"}}'
-      REGION: '{{.REGION | default (env "AWS_REGION") | default (env "AWS_DEFAULT_REGION") | default "us-west-1"}}'
-    cmds:
-      - |
-        # Check if AWS CLI is installed
-        if ! command -v aws >/dev/null 2>&1; then
-          echo "❌ Error: AWS CLI is not installed"
-          echo ""
-          echo "The red team orchestration tasks require AWS CLI to access the infrastructure account."
-          echo "Install it from: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
-          exit 1
-        fi
-
-        # Check if credentials are configured and valid for the profile
-        if ! aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" >/dev/null 2>&1; then
-          echo "❌ Error: AWS authentication failed for profile '{{.PROFILE}}'"
-          echo ""
-          echo "You need to authenticate to the infrastructure account before running this task."
-          echo ""
-          echo "Troubleshooting:"
-          echo "  1. Verify your AWS credentials are configured: aws configure --profile {{.PROFILE}}"
-          echo "  2. If using SSO, authenticate: aws sso login --profile {{.PROFILE}}"
-          echo "  3. Check your profile exists: aws configure list --profile {{.PROFILE}}"
-          echo "  4. Verify your credentials are not expired"
-          exit 1
-        fi
-
-        # Success - show caller identity
-        echo "✅ AWS authentication verified"
-        aws sts get-caller-identity --profile "{{.PROFILE}}" --region "{{.REGION}}" --output table

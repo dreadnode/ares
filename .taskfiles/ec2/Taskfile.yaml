@@ -712,11 +712,12 @@ tasks:
         run_ssm_cmd "$INSTANCE_ID" "$(cat .taskfiles/ec2/scripts/hashcat-status.sh)" 30
 
   logs:
-    desc: "Tail ares logs on EC2 via SSM session (usage: task ec2:logs [EC2_NAME=ares-tools] [ROLE=orchestrator] [LINES=50])"
+    desc: "Tail ares logs on EC2 via SSM session (usage: task ec2:logs [EC2_NAME=ares-tools] [ROLE=orchestrator] [LINES=50] [FILTER='blue|inv-'])"
     silent: true
     vars:
       ROLE: '{{.ROLE | default "orchestrator"}}'
       LINES: '{{.LINES | default "50"}}'
+      FILTER: '{{.FILTER | default ""}}'
     cmds:
       - |
         {{.AWS_PROFILE_EXPORT}}
@@ -725,14 +726,18 @@ tasks:
         INSTANCE_ID=$(resolve_instance_id "{{.EC2_NAME}}") || exit 1
 
         LOG_FILE="{{.ARES_LOG_DIR}}/{{.ROLE}}.log"
-        echo -e "{{.INFO}} Tailing $LOG_FILE on $INSTANCE_ID (Ctrl+C to stop)..."
+        # --line-buffered, or grep holds the tail in a 4K block buffer and the
+        # stream arrives in bursts minutes apart.
+        TAIL_CMD="tail -n {{.LINES}} -f $LOG_FILE"
+        {{if ne .FILTER ""}}TAIL_CMD="$TAIL_CMD | grep --line-buffered -aiE '{{.FILTER}}'"{{end}}
+        echo -e "{{.INFO}} Tailing $LOG_FILE on $INSTANCE_ID{{if ne .FILTER ""}} (filter: {{.FILTER}}){{end}} (Ctrl+C to stop)..."
 
         aws ssm start-session \
           {{.AWS_PROFILE_ARG}} \
           --region "{{.AWS_REGION}}" \
           --target "$INSTANCE_ID" \
           --document-name "AWS-StartInteractiveCommand" \
-          --parameters "command=[\"tail -n {{.LINES}} -f $LOG_FILE\"]"
+          --parameters "command=[\"$TAIL_CMD\"]"
 
   logs:fetch:
     desc: "Fetch ares logs from EC2 to a local file for programmatic reading (usage: task ec2:logs:fetch [ROLE=orchestrator|recon|all] [LINES=2000] [OP_ID=op-YYYYMMDD-HHMMSS] [SINCE=2026-07-02T15:00])"
@@ -1472,6 +1477,63 @@ tasks:
             kill "$PF_PID" 2>/dev/null || true
           fi
         fi
+
+  # ============================================================================
+  # End-to-End Operation Run
+  # ============================================================================
+  e2e:
+    desc: "Deploy, gate the binary against this build, run a full red(+blue) op and fetch both reports (usage: task ec2:e2e [TARGET=dreadgoad] [GATE_STRING='...'] [CRED_USER=... CRED_PASS=...] [SKIP_DEPLOY=true] [BLUE=1])"
+    silent: true
+    vars:
+      TARGET: '{{.TARGET | default "dreadgoad"}}'
+      DOMAIN: '{{.DOMAIN | default ""}}'
+      CRED_USER: '{{.CRED_USER | default ""}}'
+      CRED_PASS: '{{.CRED_PASS | default ""}}'
+      CRED_DOMAIN: '{{.CRED_DOMAIN | default ""}}'
+      GATE_STRING: '{{.GATE_STRING | default ""}}'
+      BLUE: '{{.BLUE | default "1"}}'
+      BLUE_MODEL: '{{.BLUE_MODEL | default ""}}'
+      SKIP_DEPLOY: '{{.SKIP_DEPLOY | default ""}}'
+      SKIP_RESTART: '{{.SKIP_RESTART | default ""}}'
+      SKIP_KILL: '{{.SKIP_KILL | default ""}}'
+      ALLOW_STALE: '{{.ALLOW_STALE | default ""}}'
+      ALLOW_PROD: '{{.ALLOW_PROD | default ""}}'
+      POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
+      MAX_WAIT: '{{.MAX_WAIT | default "7200"}}'
+      BLUE_SETTLE_WAIT: '{{.BLUE_SETTLE_WAIT | default "1800"}}'
+      BLUE_STALL_WAIT: '{{.BLUE_STALL_WAIT | default "900"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+    env:
+      EC2_NAME: '{{.EC2_NAME}}'
+      AWS_REGION: '{{.AWS_REGION}}'
+      S3_BUCKET: '{{.S3_BUCKET}}'
+      ARES_CLI: '{{.ARES_CLI}}'
+      BUILD_TOOL: '{{.BUILD_TOOL}}'
+      TARGET: '{{.TARGET}}'
+      DOMAIN: '{{.DOMAIN}}'
+      CRED_USER: '{{.CRED_USER}}'
+      CRED_PASS: '{{.CRED_PASS}}'
+      CRED_DOMAIN: '{{.CRED_DOMAIN}}'
+      GATE_STRING: '{{.GATE_STRING}}'
+      BLUE: '{{.BLUE}}'
+      BLUE_MODEL: '{{.BLUE_MODEL}}'
+      SKIP_DEPLOY: '{{.SKIP_DEPLOY}}'
+      SKIP_RESTART: '{{.SKIP_RESTART}}'
+      SKIP_KILL: '{{.SKIP_KILL}}'
+      ALLOW_STALE: '{{.ALLOW_STALE}}'
+      ALLOW_PROD: '{{.ALLOW_PROD}}'
+      POLL_INTERVAL: '{{.POLL_INTERVAL}}'
+      MAX_WAIT: '{{.MAX_WAIT}}'
+      BLUE_SETTLE_WAIT: '{{.BLUE_SETTLE_WAIT}}'
+      BLUE_STALL_WAIT: '{{.BLUE_STALL_WAIT}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR}}'
+    preconditions:
+      - sh: test -x .taskfiles/ec2/scripts/e2e-op.sh
+        msg: ".taskfiles/ec2/scripts/e2e-op.sh missing or not executable"
+    cmds:
+      - |
+        {{.AWS_PROFILE_EXPORT}}
+        exec .taskfiles/ec2/scripts/e2e-op.sh
 
   # ============================================================================
   # Post-AMI Tool Setup

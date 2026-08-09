@@ -598,23 +598,28 @@ All blue team tasks are invoked via `task blue:<command>`. Most accept
 task blue:once OPERATION_ID=op-xxx
 task blue:once LATEST=true
 
-# Single investigation from a red team operation (K8s remote)
-task blue:once:remote LATEST=true
-
 # Submit a specific alert JSON file
-task blue:investigate ALERT=alert.json
+task blue:submit ALERT=alert.json
+task blue:submit ALERT=alert.json INVESTIGATION_ID=inv-xxx MULTI_AGENT=true
 
 # Continuous poll mode (re-checks every POLL_INTERVAL seconds)
 task blue:poll
 
-# Multi-agent investigation via K8s orchestrator
-task blue:multi ALERT=alert.json
-task blue:multi ALERT=alert.json INVESTIGATION_ID=inv-xxx MULTI_AGENT=true
-
 # Multi-agent from red team operation (K8s remote)
 task blue:multi:remote LATEST=true
 task blue:multi:remote OPERATION_ID=op-xxx
+task blue:multi:remote LATEST=true MAX_STEPS=15   # short run
 ```
+
+`blue:submit` reads `BLUE_TRANSPORT` like every other blue task: `ec2`
+(default, over SSM), `k8s` (`kubectl exec` into the blue orchestrator), or
+`local`. The alert is passed by value rather than by path, since under the
+remote transports a local file path does not resolve on the far side.
+
+It deliberately does not forward `--grafana-api-key`: the EC2 transport ships
+argv through SSM `send-command`, which would persist the token in SSM command
+history and CloudTrail. `blue submit` falls back to the remote's own
+`GRAFANA_SERVICE_ACCOUNT_TOKEN`, which is what the investigation reads anyway.
 
 #### Monitoring Investigations
 
@@ -636,11 +641,20 @@ task blue:multi:runtime LATEST=true
 # Triage decision audit trail
 task blue:multi:triage-status LATEST=true
 
-# Follow logs
-task blue:multi:logs                          # orchestrator only
-task blue:multi:logs ALL=true                 # all blue pods
-task blue:multi:logs ROLE=threat-hunter       # specific role
+# Follow logs (transport-aware)
+task blue:multi:logs                          # EC2: blue lines in the orchestrator log
+task blue:multi:logs ALL=true                 # EC2: the whole orchestrator log (red+blue)
+task blue:multi:logs BLUE_TRANSPORT=k8s ROLE=threat-hunter   # K8s: one role's pods
+task blue:multi:logs BLUE_TRANSPORT=k8s ALL=true             # K8s: all blue pods
 ```
+
+On EC2 blue is not a separate process: `ec2:launch` runs the orchestrator with
+`ARES_BLUE_ENABLED=1` and systemd appends both streams to
+`/var/log/ares/orchestrator.log`, so blue lines are interleaved with red and
+there are no per-role blue pods to select. The default view greps for
+`blue|investigation|inv-`, because log lines carry no module target
+(telemetry defaults to `show_target=false`).
+
 
 #### Viewing Results
 
@@ -660,9 +674,14 @@ task blue:multi:techniques LATEST=true
 task blue:reports:consolidate LATEST=true
 task blue:reports:consolidate OPERATION_ID=op-xxx OUTPUT_DIR=./reports
 
-# Export detection playbook (runs on red orchestrator pod)
+# Export detection playbook as JSON to ./reports/blue/ (reads RED operation
+# state, so under BLUE_TRANSPORT=k8s it targets the red orchestrator)
 task blue:playbook LATEST=true
-task blue:playbook OPERATION_ID=op-xxx JSON=true
+task blue:playbook OPERATION_ID=op-xxx
+
+# The markdown variant is written by the CLI itself, on the box:
+#   ares ops export-detection op-xxx --output-dir <dir>
+#     -> <dir>/op-xxx/detection_playbook.{json,md}
 
 # List / view local reports
 task blue:reports:list
