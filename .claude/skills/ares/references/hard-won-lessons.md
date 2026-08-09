@@ -9,14 +9,14 @@ Companion files: `SKILL.md` (system map, task surface) and `.claude/skills/ares-
 These are the ones an agent can violate inside its first three tool calls.
 
 **1. Never attribute an op result to your change until you have grepped a NEW literal out of `/usr/local/bin/ares` on the box.** `[repeated x21, critical]`
-*Operator sees:* your "fix verified / the change is live" report, then an op whose behaviour is identical to before — or the question "does testes.sh upload the latest binary each time?"
-*Check:* `bash /Users/l/dreadnode/ares/testes.sh` with `GATE_STRING='<literal from your change>'` (testes.sh:215-221), or directly:
+*Operator sees:* your "fix verified / the change is live" report, then an op whose behaviour is identical to before — or the question "does the e2e harness upload the latest binary each time?"
+*Check:* `task ec2:e2e GATE_STRING='<literal from your change>'` (.taskfiles/ec2/scripts/e2e-op.sh:270-275), or directly:
 
 ```bash
 task ec2:exec EC2_NAME=<pinned> CMD="grep -ac -- '<literal>' /usr/local/bin/ares"   # must be >= 1
 ```
 
-**Outer double quotes, inner single.** The inverted shape (`CMD='… "<literal>" …'`) dies with `task: CMD required` / `precondition not met`, exit 201, the moment the literal contains a space — go-task splices `{{.CMD}}` raw into `sh: test -n "{{.CMD}}"` (`.taskfiles/ec2/Taskfile.yaml:1477-1479`). Gate literals are normally log sentences, so this bites every time. `testes.sh:217` uses the correct shape.
+**Outer double quotes, inner single.** The inverted shape (`CMD='… "<literal>" …'`) dies with `task: CMD required` / `precondition not met`, exit 201, the moment the literal contains a space — go-task splices `{{.CMD}}` raw into `sh: test -n "{{.CMD}}"` (`.taskfiles/ec2/Taskfile.yaml:1477-1479`). Gate literals are normally log sentences, so this bites every time. .taskfiles/ec2/scripts/e2e-op.sh uses the correct shape.
 
 Pick the literal from a `contains("…")` argument, a `format!`/`bail!`/`panic!` fragment, or an `.arg("…")` value. **Never** from `starts_with` / `ends_with` / `==` — the optimizer folds all three out of the shipping profile (`[profile.dev-deploy]`, Cargo.toml:54-61) and a correct deploy greps negative.
 
@@ -47,7 +47,7 @@ The branch and dirty-file list in your session snapshot are already stale by you
 *Check:* `cargo test`, `cargo clippy`, `--help`, "the API imports" and a green CI run are **never** verification. Ship it, then exercise the failure:
 
 ```bash
-S3_BUCKET=<staging bucket> GATE_STRING='<literal>' bash /Users/l/dreadnode/ares/testes.sh
+S3_BUCKET=<staging bucket> task ec2:e2e GATE_STRING='<literal>'
 ```
 
 Anything whose verdict lives in Redis or a generated report needs a **fresh live op** — `ares ops report --regenerate` on an older op can never surface a key that did not exist when that state was written.
@@ -69,7 +69,7 @@ Non-optional. "Claimed success without evidence" is the single most-repeated cor
 
 ### The change shipped
 
-1. A `Build SHA:`/`Deploy SHA:` pair from *this* run, plus `GATE_STRING` found in the deployed binary — `bash testes.sh` (steps 2b at testes.sh:175-206, 2c at :215-221). A failed gate means "your change did not ship", never "flaky script".
+1. A `Build SHA:`/`Deploy SHA:` pair from *this* run, plus `GATE_STRING` found in the deployed binary — `task ec2:e2e` (steps 2b at .taskfiles/ec2/scripts/e2e-op.sh:242-262, 2c at :270-275). A failed gate means "your change did not ship", never "flaky script".
 2. Binary mtime newer than the commit, and the op started *after* the deploy finished — `task ec2:exec CMD='stat -c %y /usr/local/bin/ares'`. If the op predates the deploy, kill and relaunch.
 3. If the change touches a worker role: that role's unit actually restarted — read deploy's restart block (`restarting: ares@…` vs `no ares@ worker units active — skipping restart`) then `task ec2:status`.
 
@@ -110,7 +110,7 @@ Non-optional. "Claimed success without evidence" is the single most-repeated cor
 **Do this.**
 
 ```bash
-S3_BUCKET=<staging bucket> GATE_STRING='<literal from your change>' bash /Users/l/dreadnode/ares/testes.sh
+S3_BUCKET=<staging bucket> task ec2:e2e GATE_STRING='<literal from your change>'
 # or, standalone:
 task ec2:exec EC2_NAME=<pinned> CMD="grep -ac -- '<literal>' /usr/local/bin/ares"   # outer double, inner single
 task ec2:exec EC2_NAME=<pinned> CMD='stat -c %y /usr/local/bin/ares'
@@ -126,7 +126,7 @@ task ec2:exec EC2_NAME=<pinned> CMD='stat -c %y /usr/local/bin/ares'
 
 Real artifact proof: `"exploit attempted but failed"` exists in the tree only as a `starts_with` argument (`ares-cli/src/benchmark/capture.rs:369`); `grep -acF` finds it in `target/release/ares` and `target/debug/ares` but **0** times in `target/x86_64-unknown-linux-gnu/dev-deploy/ares` — the profile that actually ships. Sanity-check candidate literals against `dev-deploy` or the deployed binary only; a local `target/release` grep is a false green.
 
-Two more ways a gate lies: (a) grep the **pre-fix** binary for the same string and discard it if already present; (b) never gate on a string your fix *removed* — `include_str!` embeds comments too, so a comment quoting the old pattern keeps it alive. And note `testes.sh` is **untracked** (operator-local to this checkout, absent from git and from `.gitignore`); in a fresh clone you must recreate the SHA and string gates yourself around `ec2:deploy` → `ec2:launch` → `ec2:watch`.
+Two more ways a gate lies: (a) grep the **pre-fix** binary for the same string and discard it if already present; (b) never gate on a string your fix *removed* — `include_str!` embeds comments too, so a comment quoting the old pattern keeps it alive. And note the harness is now **tracked**: `testes.sh` became `task ec2:e2e` (`.taskfiles/ec2/scripts/e2e-op.sh`) on 2026-08-08, so a fresh clone gets the SHA and `GATE_STRING` gates for free — you no longer have to recreate them around `ec2:deploy` → `ec2:launch` → `ec2:watch`.
 
 A local `cargo build --release` changes nothing about `task ec2:*`: `BUILD_PROFILE` defaults to `dev-deploy` (.taskfiles/ec2/Taskfile.yaml:75) and the shipped artifact is `target/x86_64-unknown-linux-gnu/dev-deploy/ares`. `target/release/ares` is only the host-native `--ec2` proxy CLI that `ec2:kill/watch/report/loot/runtime/ops/stop-op/teardown` and `ec2:launch WAIT=true` require.
 
@@ -174,16 +174,16 @@ AWS_PROFILE=lab AWS_REGION=us-west-1 S3_BUCKET=<staging bucket> task -y ec2:depl
 - `ec2:deploy` tars the **working tree from disk**, not git (:196-199) — uncommitted work ships, and conflict markers surface remotely as `error: key with no value, expected '='`. Confirm no merge in progress first.
 - Remote build dir is `/var/tmp/ares-build` (`:82`; never `/tmp`, which is a tmpfs swept daily); artifact `/var/tmp/ares-build/target/dev-deploy/ares`. `BUILD_PROFILE` is ignored on the remote path (`:218` hardcodes `--profile dev-deploy`).
 - Field-observed: if a build was killed mid-flight, `rm -rf /var/tmp/ares-build/target` before retrying, or the reused partial target link-fails with undefined `core::`/`anon.llvm` symbols.
-- Never background a deploy through `| tail`/`| head`; `tee` to a log and poll it (testes.sh:174).
+- Never background a deploy through `| tail`/`| head`; `tee` to a log and poll it (.taskfiles/ec2/scripts/e2e-op.sh:228).
 - You do **not** need LLM keys in `.env` to launch: `ec2:launch` fetches them from the `ares/api-keys` secret over SSM and fails loudly if absent (:1181-1189).
-- A non-zero `testes.sh`/`ec2:watch` exit is usually the watcher hitting `MAX_WAIT` (default 7200s) on a healthy op. `ec2:watch` breaks only on `completed|stopped`, so a **failed** op also polls to timeout.
-- Two stale strings will misdirect you: `testes.sh:60-63` claims `BUILD_TOOL` defaults to local cross-compile, and `ec2:deploy`'s `desc:` still says "Cross-compile Rust binaries" (:119).
+- A non-zero `ec2:e2e`/`ec2:watch` exit is usually the watcher hitting `MAX_WAIT` (default 7200s) on a healthy op. `ec2:watch` breaks only on `completed|stopped`, so a **failed** op also polls to timeout.
+- One stale string still misdirects you (the `BUILD_TOOL` one was fixed in `.taskfiles/ec2/scripts/e2e-op.sh`): `ec2:deploy`'s `desc:` still says "Cross-compile Rust binaries" (:119).
 
-### `testes.sh` is the harness, not a probe `[repeated x11, high]`
+### `task ec2:e2e` is the harness, not a probe `[repeated x11, high]`
 
-**Read `testes.sh` before running or diagnosing anything about a live op, obey its printed warnings, and fix the script when it lacks a gate/region pin/knob — never hand-roll a sequence of discrete task commands, and never invoke `ec2:deploy`/`ec2:launch` as a verification probe.**
+**Read `.taskfiles/ec2/scripts/e2e-op.sh` before running or diagnosing anything about a live op, obey its printed warnings, and fix the script when it lacks a gate/region pin/knob — never hand-roll a sequence of discrete task commands, and never invoke `ec2:deploy`/`ec2:launch` as a verification probe.**
 
-**Symptom.** "Is it deploying from the worktree as per testes.sh which you're too lazy or illiterate to read?"; "you should fix the script so it works"; two deploys racing and the loser aborting with `S3 staged binary sha mismatch` (they collide on the single fixed key `s3://$S3_BUCKET/ares-deploy/ares` and on `target/.deploy/ares.sha256`; nothing serializes them).
+**Symptom.** "Is it deploying from the worktree as per the e2e harness which you're too lazy or illiterate to read?"; "you should fix the script so it works"; two deploys racing and the loser aborting with `S3 staged binary sha mismatch` (they collide on the single fixed key `s3://$S3_BUCKET/ares-deploy/ares` and on `target/.deploy/ares.sha256`; nothing serializes them).
 
 **Why.** The script is untracked, so it reads as private scratch — producing both refusals to edit it and refusals to read it. Its output carries load-bearing warnings (which worktree it is deploying, that blue will DETECT but not CONTAIN). It pins `AWS_REGION=us-west-1` (:89), dies without `S3_BUCKET` unless `SKIP_DEPLOY=1` (:113), and refuses `*prod*`-named hosts without `ALLOW_PROD=1` (:129) — all of which you lose by hand-rolling.
 
@@ -346,7 +346,7 @@ For full-forest ops both `stop_on_*` flags must be false (validation rejects bot
 
 **Why.** `ops kill` = SETEX `stop_requested` (120s TTL) + SCAN-DEL `ares:op:<id>:*`; `ops stop` = SETEX only. **Only the orchestrator polls `stop_requested`** — the `ares@<role>` workers have zero stop-signal awareness and keep draining durable NATS JetStream consumers (`ARES_TASKS`, WorkQueue, 24h max_age, 30-min ack_wait). Nothing — not `ops kill`, not `ops stop`, not `FLUSHDB` — ever purges that stream. So a "killed" op can run ~30 more minutes with no orchestrator attached.
 
-**Do this.** Read the kill's exit code yourself — `testes.sh:253` swallows failure into a warn line and launches anyway.
+**Do this.** Read the kill's exit code yourself — .taskfiles/ec2/scripts/e2e-op.sh:308 swallows failure into a warn line and launches anyway.
 
 | Exit | Meaning |
 |---|---|
@@ -360,7 +360,7 @@ task ec2:hashcat EC2_NAME=<pinned>
 task ec2:exec EC2_NAME=<pinned> CMD='systemctl stop ares@*.service'   # the only way to stop worker-side work
 ```
 
-`FLUSH_REDIS` defaults true on `ec2:launch` and testes.sh never overrides it, so `SKIP_KILL=1` alone will not protect an in-flight sweep — FLUSHDB wipes the cross-op novelty key `ares:novelty:{scope}:steps` that `ops kill` would have spared. Never kill an op you still need to debug: `delete_operation` SCAN-DELs every `ares:op:<id>:*` key, destroying its state and report. Log loss is on the **next** launch (`ec2:launch` truncates with `> orchestrator.log`), not at kill time. And never `pkill -f "ares orchestrator"` from an interactive remote shell — the exec string contains the pattern, so you kill your own session.
+`FLUSH_REDIS` defaults true on `ec2:launch` and `ec2:e2e` never overrides it, so `SKIP_KILL=1` alone will not protect an in-flight sweep — FLUSHDB wipes the cross-op novelty key `ares:novelty:{scope}:steps` that `ops kill` would have spared. Never kill an op you still need to debug: `delete_operation` SCAN-DELs every `ares:op:<id>:*` key, destroying its state and report. Log loss is on the **next** launch (`ec2:launch` truncates with `> orchestrator.log`), not at kill time. And never `pkill -f "ares orchestrator"` from an interactive remote shell — the exec string contains the pattern, so you kill your own session.
 
 ## Debugging and evidence
 
@@ -374,7 +374,7 @@ task ec2:exec EC2_NAME=<pinned> CMD='systemctl stop ares@*.service'   # the only
 
 **Do this.** Name precisely what was and was not exercised, then:
 
-1. **Prove the edit shipped** — `bash testes.sh` with `GATE_STRING`; see [Gate the deployed binary](#gate-the-deployed-binary-before-trusting-any-op-repeated-x21-critical).
+1. **Prove the edit shipped** — `task ec2:e2e` with `GATE_STRING`; see [Gate the deployed binary](#gate-the-deployed-binary-before-trusting-any-op-repeated-x21-critical).
 2. **Reproduce the exact command string the wrapper builds**, with argument forms taken from state — impacket/bloodyAD get `-hashes LMHASH:NTHASH` normalized by `lm_nt_hash_pair` (ares-tools/src/credentials.rs:219), so hand-testing a bare 32-hex NT hash is a *different* command. Same `KRB5CCNAME`/ccache, same flags, and read the tool's own error:
 
    ```bash
@@ -487,7 +487,7 @@ redis-cli lrange "ares:op:<id>:timeline" 0 -1           # per-domain provenance
 task ec2:exec EC2_NAME=<pinned> CMD='…'
 task ec2:logs:fetch ROLE=orchestrator OP_ID=op-… LINES=2000
 task ec2:runtime EC2_NAME=<pinned> OPERATION_ID=op-…
-S3_BUCKET=… GATE_STRING='…' bash testes.sh
+S3_BUCKET=… GATE_STRING='…' task ec2:e2e
 ```
 
 Export what the harness needs and run it yourself instead of "re-run it and tell me what happens". After a root cause, go straight to the fix and keep going through your own remaining findings — do not claim you "closed the loop" while items from your own audit are open. Backgrounding a long wait (`Monitor`, `Bash(run_in_background)`) is fine; what is banned is backgrounding it and having nothing else to say. If you truly cannot proceed, state the hard blocker in one sentence rather than asking a question you can answer yourself.
@@ -733,7 +733,7 @@ There is still no `rust-toolchain.toml`; the local pin is `mise.toml` (`rust = "
 
 **Give every fan-out `Agent` dispatch `isolation: "worktree"`, the exact crate paths, and `AWS_PROFILE=lab` + region + the fully-qualified EC2 Name tag; a subagent must never commit, push, open a PR, deploy a binary, restart services, or mutate the cluster.**
 
-**Symptom.** "did you run using testes.sh" after a 49-minute k8s subagent run; operator frustration at a subagent launched for a one-liner; unauthorized commits/PRs/binaries appearing on the box; a session reporting "Current branch: main" while the shared checkout is on someone else's feature branch.
+**Symptom.** "did you run using the e2e harness" after a 49-minute k8s subagent run; operator frustration at a subagent launched for a one-liner; unauthorized commits/PRs/binaries appearing on the box; a session reporting "Current branch: main" while the shared checkout is on someone else's feature branch.
 
 **Why.** "READONLY — do not modify any files" in a prompt is not enforcement: all three project agents grant Bash, the only project hook is a Write|Edit banned-strings check, and the global Bash hooks block just `--no-verify` and commit trailers. Delegation also feels like the safe default for anything with more than one step, which turns a one-line `kubectl rollout restart` into multiple aborted dispatches.
 
@@ -744,7 +744,7 @@ There is still no `rust-toolchain.toml`; the local pin is `mise.toml` (`rust = "
 - For EC2, state `AWS_PROFILE=lab`, the region, and the **fully-qualified Name tag** (no instance id is pinned anywhere in the repo, and none is needed). `kali-ares` is a substring match and exists in more than one region.
 - Read the DreadGOAD docs directly (`/Users/l/dreadnode/DreadOps/apps/DreadGOAD/docs/`, plus `docs/goad-checklist.md`) instead of spawning `dreadgoad-expert`, which fails on every call via model-level safeguards. Never reword a prompt or rewrite an agent definition to get past a refusal.
 - Run single commands inline — the operator agent's own description says "DO NOT use for one-shot kubectl/task commands … Spawn this agent only when the work needs ≥3 dependent commands".
-- Keep reports purely technical — no commentary on the user's tone. Decide the target environment from working-tree signals (an untracked `testes.sh` means EC2 kali-ares, staging us-west-1) before dispatching any deploy or op, and audit `git branch --show-current` + `git worktree list` + box state before trusting anything a background session left behind.
+- Keep reports purely technical — no commentary on the user's tone. Decide the target environment from working-tree signals (a tracked `ec2:e2e` task means EC2 kali-ares, staging us-west-1) before dispatching any deploy or op, and audit `git branch --show-current` + `git worktree list` + box state before trusting anything a background session left behind.
 
 ## Rules that expired
 
@@ -777,6 +777,6 @@ Do not resurrect these from an old transcript, memory note, or the docs listed. 
 - **"`stop_on_golden_ticket` stops once the GT is forged AND all forest roots are dominated"** (`docs/red.md:450-456`) — the GT branch never checks forests; it stops at the first hit.
 - **"Correlate 4768/4769 with `label_format` + `count(A unless B)`"** — neither construct exists in the repo; `sweep.rs` runs two metric queries and diffs in Rust.
 - **"`localhost:3100` is always the wrong Loki endpoint"** — on the laptop with `task obs:forward` it is correct; it is wrong only on the EC2 box.
-- **"`BUILD_TOOL` defaults to `auto` (local cross-compile) and remote OOMs"** (`testes.sh:60-63`) — the default is `remote`, and testes.sh never sets it.
+- **"`BUILD_TOOL` defaults to `auto` (local cross-compile) and remote OOMs"** — this was wrong in `testes.sh:60-63`; corrected when it became `.taskfiles/ec2/scripts/e2e-op.sh` (the header now states the real default, `remote`). `ec2:e2e` still never sets it.
 - **"`ec2:deploy`'s `desc:` says cross-compile, so it cross-compiles"** — the description is stale; the default path builds natively on the box.
 - **"A GATE_STRING failure means the script is flaky"** — it means your change did not ship. There is no other reading.

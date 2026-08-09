@@ -83,18 +83,12 @@ aws ec2 describe-instances \
 
 **Preconditions bite out of the box — but only where something provisions.** The repo `.env` declares `BENCHMARK_SECURITY_GROUP_ID` / `BENCHMARK_INSTANCE_PROFILE` / `BENCHMARK_SUBNET_ID` with empty values. All three `preconditions:` blocks sit on `replay:provision` alone (`:253-259`); the only other `preconditions:` key in the file is `generalize`'s holdout/`yq`/`jq` gate (`:413`). So `benchmark:replay:provision` exits 201 directly, and `benchmark:replay` / `:loop` / `benchmark:generalize` fail through it. `replay:run`, `replay:teardown` and `replay:ami:current` declare none and are unaffected — the warm-stack loop above needs only `STACK_IP`. Verified with `--dry`: `provision` → 201 (`task: BENCHMARK_SECURITY_GROUP_ID is required (see .env.example)`), `replay:run STACK_IP=… OP_ID=…` → 0, `replay:teardown INSTANCE_ID=…` → 0, `replay:ami:current` → 0.
 
-## Red-side replay recording is a dead surface
+## Red-side replay recording was a dead surface — the tasks are gone
 
-Asked to "record and replay" a red op, you will find these four before `benchmark capture`. They are k8s-only and nothing produces their input.
+Asked to "record and replay" a red op, you may still find references to four `red:multi:replay:*` tasks (`copy`, `cat`, `list`, `clear`). They were removed on 2026-08-08. They `kubectl cp`/`exec`'d `/ares/replay/recording.jsonl` on `ares-<role>-agent-0` pods, and **nothing in the tree ever wrote that path** — `rg 'recording\.jsonl'` and `rg 'ares/replay'` matched only `.taskfiles/red/Taskfile.yaml` itself, no Rust. `red:multi:replay:copy` defaulted to `./recordings`, which is why that directory shows up empty.
 
-| Task | Lines | Does |
-|---|---|---|
-| `red:multi:replay:copy` | `.taskfiles/red/Taskfile.yaml:931-973` | `kubectl cp ares-<role>-agent-0:/ares/replay/recording.jsonl` → `{{.OUTPUT_DIR}}/<role>-recording.jsonl`, default `./recordings` (`:936`) |
-| `red:multi:replay:cat` | `:975-988` | `kubectl exec … cat /ares/replay/recording.jsonl` |
-| `red:multi:replay:list` | `:990-1010` | `ls -lh` the same path on all seven agent pods |
-| `red:multi:replay:clear` | `:1012-1048` | `rm -f` it; gated on `CONFIRM=true` (`:1019-1021`) |
+The real replay surface is `benchmark capture` → `benchmark:replay`, below.
 
-**Nothing in the tree writes `/ares/replay/recording.jsonl`.** `rg -l 'recording\.jsonl'` and `rg 'ares/replay'` across the repo match `.taskfiles/red/Taskfile.yaml` and nothing else — no Rust, no chart, no manifest. Every invocation degrades to `✗ No recording for <role>` (`:967`) or `(no recording)` (`:1008`), which reads like a missing pod rather than a feature that was never built. Blue replay via `ares benchmark capture` / `benchmark:replay` is the only working record-and-playback path.
 
 ## `ares benchmark` CLI surface
 
@@ -356,7 +350,8 @@ reports/                      # root Taskfile.yaml:113 REPORT_DIR
   blue/<op_id>.md             operation-scoped blue report — the ONLY one with the red-vs-blue scorecard
   blue/investigations/<inv_id>.md   per-investigation report, no coverage section
   blue/<op_id>/<inv_id>.md    investigation nested under its op (when op_id is supplied)
-  <op_id>_detection_playbook.json|.md   task blue:playbook — at the reports ROOT, not under blue/
+  blue/<op_id>_detection_playbook.json  task blue:playbook (JSON only, under blue/ since 2026-08-08;
+                                        the .md is written only where the CLI runs, via --output-dir)
   diversity/<CAMPAIGN>/
     coverage.csv              header: op_id,step_index,technique,target
     ops.txt                   one op- per completed op, or "op-… FAILED submit" / "op-… FAILED <status>"
@@ -372,8 +367,8 @@ logs/                         # root Taskfile.yaml:114 LOG_DIR
   red-ec2-<op_id>-<ts>.log    side effect of red:ec2:multi, NOT in the campaign dir
   red-multi-<op_id>-<ts>.log
   blue-<ts>.log               task blue:once (`.taskfiles/blue/Taskfile.yaml:68`, LOGFILE at :81). There is no blue:poll:local; the polling task is blue:poll (:49) and it writes no logfile
-recordings/                   # NOT gitignored. default OUTPUT_DIR of red:multi:replay:copy (.taskfiles/red/Taskfile.yaml:936)
-  <role>-recording.jsonl      always empty in practice — see "Red-side replay recording is a dead surface"
+recordings/                   # NOT gitignored. Leftover from red:multi:replay:copy, removed 2026-08-08;
+                              # always empty — nothing ever wrote the recordings it copied
 /var/log/ares/session/<op_id>/<run_id>.jsonl    blue transcripts, team=blue
 ```
 

@@ -580,7 +580,7 @@ ares config set-model --all <any-role> <model>
 
 `config validate` checks exactly three things (`config.rs:148-197`): every agent has a non-empty `model`, all 8 expected role names are present, and `operation_timeout >= task_timeout`. It never validates that a model exists, nor weights, nor technique spellings — and **it returns `Ok(())` even with warnings**, so it is never a CI gate. Success output has a cosmetic double space: `Config OK: ./config/ares.yaml (8  agent roles)`.
 
-`task ares:config:show` is a **different command** — it echoes Taskfile variables (`Taskfile.yaml:398-421`) and never reads `config/ares.yaml`. For real per-role models use `task config:models`.
+`task ares:config:check` echoes Taskfile variables and probes 1Password; it never reads `config/ares.yaml`. For real per-role models use `task config:models`. (`ares:config:show` was folded into `ares:config:check` on 2026-08-08.)
 
 ## Compile-time guards on the shipped values
 

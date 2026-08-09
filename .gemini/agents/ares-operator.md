@@ -383,7 +383,8 @@ ares-cli --k8s ares-blue blue report --investigation-id inv-xxx  # Single report
 
 ```bash
 task blue:once LATEST=true                 # Single investigation from latest red operation
-task blue:multi LATEST=true                # Multi-agent investigation
+task blue:multi:remote LATEST=true         # Multi-agent investigation
+task blue:submit ALERT=alert.json           # Submit one alert (was blue:multi/blue:investigate)
 task blue:multi:status LATEST=true         # Check investigation status
 task blue:multi:evidence LATEST=true       # View evidence (Pyramid of Pain)
 task blue:multi:techniques LATEST=true     # MITRE ATT&CK techniques

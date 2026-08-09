@@ -315,7 +315,7 @@ pre-commit run actionlint --all-files
 
 Both mutate the working tree — `markdownlint --fix`, `shfmt -w`, `prettier --write`, `end-of-file-fixer`, `trailing-whitespace`, `docsible` all rewrite in place. A "failed" run usually means "files were rewritten"; re-run and it passes.
 
-**Do not run `task -y --timeout=60s run-pre-commit` locally** (the literal CI command, `pre-commit.yaml:138`) unless you are debugging the wrapper. The root `Taskfile.yaml:271-277` chains `pre-commit:update-hooks` → `pre-commit:clear-cache` → `pre-commit:run-hooks`. Those three live in the remote CowDogMoo `pre-commit/Taskfile.yaml` include (`Taskfile.yaml:13-15`) and are, verbatim: `pre-commit autoupdate` (`:33` — rewrites every `rev:` pin), `pre-commit clean` (`:14` — wipes `~/.cache/pre-commit`, so the next run re-downloads every env), and `pre-commit run --all-files --show-diff-on-failure` (`:19`). CI therefore never validates the pinned revs renovate maintains, and a fresh upstream hook release can turn the required check red with zero repo changes.
+**Do not run `task -y --timeout=60s pre-commit:run-pre-commit` locally** (the literal CI command, `pre-commit.yaml:138`) unless you are debugging the wrapper. It chains `pre-commit:update-hooks` → `pre-commit:clear-cache` → `pre-commit:run-hooks`. (Until 2026-08-08 CI called a root `run-pre-commit` task that re-implemented the identical chain; the duplicate was removed and CI repointed at the upstream one.) Those three live in the remote CowDogMoo `pre-commit/Taskfile.yaml` include (`Taskfile.yaml:13-15`) and are, verbatim: `pre-commit autoupdate` (`:33` — rewrites every `rev:` pin), `pre-commit clean` (`:14` — wipes `~/.cache/pre-commit`, so the next run re-downloads every env), and `pre-commit run --all-files --show-diff-on-failure` (`:19`). CI therefore never validates the pinned revs renovate maintains, and a fresh upstream hook release can turn the required check red with zero repo changes.
 
 **`--timeout=60s` is go-task's remote-Taskfile *download* timeout, not a run cap** — `task --help`: `--timeout duration   Timeout for downloading remote Taskfiles. (default 10s)`.
 
@@ -453,7 +453,7 @@ echo "<pr title>" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|
 ### Deploy-side gotchas that masquerade as gate failures
 
 - **`ec2:deploy` bounces only `--state=active` `ares@*` units; `ec2:restart` bounces none** — full semantics in `references/deployment.md`. The gate-relevant part: `SKIP_RESTART` matches the literal string `true` (`.taskfiles/ec2/Taskfile.yaml:250`, `:447`; default `"false"` at `:134`) — `SKIP_RESTART=1` does **not** match. Any note telling you to follow a deploy with `ec2:restart` to clear the per-process ENOENT cache is inverted.
-- **`task init` fails**: `Taskfile.yaml:267` calls `pre-commit:install`, but the remote taskfile exposes only `install-pc-hooks`, `clear-cache`, `run-hooks`, `run-pre-commit`, `update-hooks` — there is no `install`.
+- **`task init` used to fail** on a call to `pre-commit:install`, which the remote taskfile does not expose (it has `install-pc-hooks`, `clear-cache`, `run-hooks`, `run-pre-commit`, `update-hooks`). Fixed 2026-08-08 — it now calls `pre-commit:install-pc-hooks`.
 
 ### UNVERIFIED
 

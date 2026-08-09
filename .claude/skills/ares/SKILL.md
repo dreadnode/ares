@@ -132,4 +132,5 @@ Skip step 1 only if you stay on `ec2:exec` / `ec2:ops:ids` / `ec2:status` / `ec2
 | `docs/` | `red.md`, `blue.md`, `strategy.md`, `infrastructure.md`, `attack-path-diversity.md`, `benchmark-replay.md`, `goad-checklist.md` (the lab spec). Several are stale — verify against HEAD |
 | `reports/` (gitignored) | `red/<op>.md`, `blue/<op>.md` (the only file with the red-vs-blue scorecard), `blue/investigations/`, `diversity/<campaign>/coverage.csv`, `generalize/` |
 | `logs/` (gitignored) | `red-ec2-<op>-<ts>.log`, `red-multi-…`, `blue-<ts>.log` — launcher-side transcripts, not the box's `/var/log/ares/` |
-| `GAPS.md`, `testes.sh` | **untracked**, operator-local. `GAPS.md` holds the `### Claimed work` table (only a `Verified: op` marker closes a row); `testes.sh` is the deploy→gate→launch→watch harness — read it before diagnosing an op, and fix it rather than hand-rolling its sequence |
+| `GAPS.md` | **untracked**, operator-local. Holds the `### Claimed work` table (only a `Verified: op` marker closes a row) |
+| `task ec2:e2e` | The deploy→gate→launch→watch harness (`.taskfiles/ec2/scripts/e2e-op.sh`; was the untracked `testes.sh` until 2026-08-08). Read it before diagnosing an op, and fix it rather than hand-rolling its sequence |

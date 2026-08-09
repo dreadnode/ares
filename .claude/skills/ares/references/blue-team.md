@@ -11,7 +11,7 @@ Routing map: `SKILL.md`. Nearest neighbour: live-op triage of a stuck operation 
 3. **Coverage is an ID join with no sibling matching.** `red_parent == blue_parent && (red == red_parent || blue == blue_parent)` (`ares-core/src/correlation/redblue/engine.rs:70-72`). T1003 ↔ T1003.006 hits in both directions. T1558.001 vs T1558.003 is a **permanent miss** no matter how well blue detected the behaviour. Prefer base IDs on templates.
 4. **`detect_golden_ticket` and `detect_silver_ticket` cannot fire, on purpose.** They exist only so T1558.001 / T1558.002 survive the grounding gate. The real rules are absence-of-partner-event correlations in `sweep.rs`. `detections.yaml:461-471` spells out that dropping a stage to "fix" silver turns it into a rule matching every SMB/LDAP/MSSQL/WinRM access in the domain.
 5. **Auto-submit is the only path that writes an operation coverage scorecard.** The runner reads `operation_id` from the request's *top level* (`ares-cli/src/orchestrator/blue/runner.rs:264-267`) and never falls back to the alert — inside blue, `alert.operation_context` is read only for `attack_window_start` (`sweep.rs:495`). Only `auto_submit.rs:298` sets it at the top level. `blue from-operation` buries it in `alert.operation_context` (`ares-cli/src/blue/submit.rs:180-181`); red's own completion submitter does the same (`orchestrator/completion.rs:907-913`) and its published request has no `operation_id` key at all (`completion.rs:953-965`); `benchmark replay` omits it too (`ares-cli/src/benchmark/replay.rs:527-537`). `operation_id = None` skips `generate_operation_coverage_report` (`investigation.rs:410-412`). Symptom: the investigation report lands in `blue/investigations/` and no `blue/{op}.md` appears. Fix: run `ares blue report --operation-id <op>` (or `task blue:reports:consolidate`) by hand.
-6. **Submits go one place, queries go another, by default.** `blue:multi` / `blue:multi:remote` / `blue:once:remote` hardwire `kubectl exec … deploy/ares-blue-orchestrator` (`.taskfiles/blue/Taskfile.yaml:363,403,131`); every read task uses `{{.TRANSPORT_ARGS}}`, default `--ec2 kali-ares` (`:16-28`). Symptom: "Investigation submitted: inv-…" then `task blue:multi:list` shows nothing.
+6. **Submits and queries can still land on different backends — but only via `blue:multi:remote`.** As of 2026-08-08 `blue:submit` uses `{{.TRANSPORT_ARGS}}` like every read task (default `--ec2 kali-ares`), so it agrees with them. `blue:multi:remote` and `blue:multi:logs` remain hardwired to `kubectl exec … deploy/ares-blue-orchestrator`. Symptom of the mismatch: "Investigation submitted: inv-…" then `task blue:multi:list` shows nothing — you submitted to K8s and queried EC2. `BLUE_TRANSPORT` now also accepts `local`.
 7. **`ares blue delete` leaves the lock and the queued request.** See [Redis keys and the resurrection trap](#redis-keys-and-the-resurrection-trap).
 
 ## Pipeline
@@ -38,7 +38,7 @@ Four submitters publish to the queue. Only one is scorecard-capable:
 | red completion (`orchestrator/completion.rs:953-965`) | no | none |
 | `benchmark replay` (`ares-cli/src/benchmark/replay.rs:527-537`) | no | none |
 
-`multi_agent` and `auto_route` are in every request body and **the runner reads neither** (`rg -n 'auto_route\|multi_agent' ares-cli/src/orchestrator/blue/` hits only `auto_submit.rs:295-296`). `task blue:multi MULTI_AGENT=true` and `ares blue submit --no-auto-route` (`ares-cli/src/cli/blue.rs:154-156`, no task exposes it) therefore change nothing about how the investigation runs.
+`multi_agent` and `auto_route` are in every request body and **the runner reads neither** (`rg -n 'auto_route\|multi_agent' ares-cli/src/orchestrator/blue/` hits only `auto_submit.rs:295-296`). `task blue:submit MULTI_AGENT=true` and `ares blue submit --no-auto-route` (`ares-cli/src/cli/blue.rs:154-156`, no task exposes it) therefore change nothing about how the investigation runs.
 
 Auto-submit milestone levels (`auto_submit.rs:48-59`; `INITIAL_DELAY_SECS = 90`, `CHECK_INTERVAL_SECS = 30` at `:30,33`):
 
@@ -369,10 +369,8 @@ Only the `escalation_triage` sub-agent has `confirm_escalation` (`ares-llm/src/t
 |---|---|---|---|
 | `blue:poll` | LOCAL | `ares blue watch` | Infinite loop, no dedup — resubmits every `POLL_INTERVAL` (default 30) |
 | `blue:once` | LOCAL | `blue from-operation` | No precondition guard; tees to `{{.LOG_DIR}}/blue-<ts>.log` |
-| `blue:investigate ALERT=x.json` | LOCAL | `blue submit <path>` | preconditions `test -n` / `test -f` |
-| `blue:once:remote` | `kubectl exec` | `blue from-operation` | K8s-hardwired, ignores `BLUE_TRANSPORT` |
-| `blue:multi ALERT=x.json` | `kubectl exec` | `blue submit "$(cat …)"` | **Only task that honors `MULTI_AGENT`** |
-| `blue:multi:remote` | `kubectl exec` | `blue from-operation` | K8s-hardwired |
+| `blue:submit ALERT=x.json` | TRANSPORT | `blue submit "$(cat …)"` | Replaced `blue:investigate` + `blue:multi` (2026-08-08). Honors `MULTI_AGENT`; alert passed by value so it resolves on the far side. Does **not** send `--grafana-api-key` — SSM would persist it in CloudTrail |
+| `blue:multi:remote` | `kubectl exec` | `blue from-operation` | K8s-hardwired. `MAX_STEPS` now overridable (absorbed `blue:once:remote`, which was identical bar `--max-steps`) |
 | `blue:multi:list` | TRANSPORT | `blue list` | Hides `--latest` / `--operation-id` / `--json` |
 | `blue:multi:status` | TRANSPORT | `blue status` | `--latest` prefers a **locked** (running) investigation |
 | `blue:multi:evidence` | TRANSPORT | `blue evidence` | `JSON=true` |
@@ -383,9 +381,9 @@ Only the `escalation_triage` sub-agent has `confirm_escalation` (`ares-llm/src/t
 | `blue:multi:delete` | TRANSPORT | `blue delete --force` | **Always `--force`.** Leaves lock + NATS + op-set |
 | `blue:multi:delete-operation` | TRANSPORT | `blue delete-operation --force` | **Deletes every investigation's state plus the op→inv index.** No prompt, no dry-run |
 | `blue:multi:cleanup` | TRANSPORT | `blue cleanup` | `ALL=true` ⇒ `--all --force`, purges JetStream, no prompt |
-| `blue:multi:logs` | `kubectl logs -f` | — | **Blocks.** Label selectors are not defined in this repo |
+| `blue:multi:logs` | TRANSPORT | `kubectl logs -f` (k8s) / `ec2:logs` (ec2) / `tail -f` (local) | **Blocks.** Transport-aware since 2026-08-08. On EC2 blue has no process of its own — it runs inside the orchestrator (`ARES_BLUE_ENABLED=1`), so the task tails `/var/log/ares/orchestrator.log` filtered to `blue|investigation|inv-`;`ALL=true` drops the filter and `ROLE` is K8s-only. K8s label selectors are still not defined in this repo |
 | `blue:reports:consolidate` | TRANSPORT + fetch-back | `blue report` | **The scorecard task.** `REGENERATE` is a no-op |
-| `blue:playbook` | `kubectl exec` (**red** deploy) | `ops export-detection` | Red-side playbook; **saves nothing locally in either mode** — see below |
+| `blue:playbook` | TRANSPORT (**red** deploy under k8s) | `ops export-detection --json` | Red-side playbook. Rewritten 2026-08-08 to stream JSON over stdout into `{{.OUTPUT_DIR}}/blue/<op>_detection_playbook.json`; the `JSON` var is gone |
 | `blue:reports:list` / `:latest` | local fs | — | Read `REPORT_DIR`, not `OUTPUT_DIR` |
 | `blue:reports:clean` | local fs | — | Interactive `read -p`; **hangs under `task -y`** |
 
@@ -414,7 +412,7 @@ Task-surface traps:
 - **Empty `GRAFANA_URL` fails differently per task.** Local tasks pass it unquoted and last ⇒ clap "a value is required". Remote tasks quote it ⇒ `Some("")`, which slips past the `Grafana URL required` bail (`ares-cli/src/blue/submit.rs:157`) and then returns zero Loki hits with no error.
 - **`EC2_NAME` defaults differ by namespace.** Blue's own default is `kali-ares` (`.taskfiles/blue/Taskfile.yaml:17`); the root `Taskfile.yaml`'s default differs and is **not** forwarded into the blue include (root `Taskfile.yaml:80-97` forwards neither `EC2_NAME` nor `LOKI_URL`).
 - **`PROFILE` / `REGION` at `.taskfiles/blue/Taskfile.yaml:9-10` are dead** — never referenced. Use `EC2_PROFILE` / `EC2_REGION`. `DREADNODE_API_KEY` is computed at file scope and used by zero tasks.
-- **`blue:playbook` fetches nothing back, silently.** The task `kubectl cp`s `/tmp/reports/{op}_detection_playbook.{json,md}` (`.taskfiles/blue/Taskfile.yaml:237-238`) but the CLI writes `/tmp/reports/{op}/detection_playbook.{json,md}` — a per-op subdirectory (`ares-cli/src/detection/mod.rs:39-56`). The paths never match, both `cp`s end in `2>/dev/null || true`, and the `saved to` echo at `:239-242` never fires. `JSON=true` additionally makes the CLI print to stdout and write no files at all (`mod.rs:35-38`).
+- **`blue:playbook` used to fetch nothing back, silently — fixed 2026-08-08.** The task `kubectl cp`'d `/tmp/reports/{op}_detection_playbook.{json,md}` while the CLI wrote `/tmp/reports/{op}/detection_playbook.{json,md}` (a per-op subdirectory, `ares-cli/src/detection/mod.rs:39-56`); the paths never matched, both `cp`s ended in `2>/dev/null || true`, and the `saved to` echo never fired. It now uses `--json`, which prints to stdout and writes no files (`mod.rs:35-38`) — so it rides any transport and the task writes the file locally. The markdown variant still only exists where the CLI runs: `ares ops export-detection <op> --output-dir <dir>`.
 - **`blue:reports:consolidate` screen-scrapes stdout** with `sed -n 's/.* saved to //p' | tail -1`, keyed on the literals `Operation report saved to {path}` / `Investigation report saved to {path}` (`report.rs:27,32,43,53`). Change either message and the fetch-back dies with "could not determine remote report path".
 - **Both transports pin `RUST_LOG=error` remotely** (`ares-cli/src/transport.rs`) — no local `RUST_LOG` makes `task blue:multi:*` verbose.
 - **Investigation IDs are second-resolution** (`inv-%Y%m%d-%H%M%S`, `submit.rs:51,226`) — two submits inside one second collide on the same keyspace.

@@ -372,7 +372,6 @@ Source: `ares-cli/src/cli/ops.rs:37-473`, `ares-cli/src/cli/mod.rs:28-62`. Sibli
 | `task ec2:teardown` | **DESTRUCTIVE to the lab** | writes to the target DC; run `DRY_RUN=true` first |
 | `task ec2:deploy` | **interrupts a live op** | restarts every **active** `ares@*.service` unless `SKIP_RESTART=true` (`.taskfiles/ec2/Taskfile.yaml:249-256`, `:447-453`); prints `no ares@ worker units active — skipping restart` when none are up |
 | `task k8s:reset` | **DESTRUCTIVE, shared** | `pkill`s local `red:multi` shells (`.taskfiles/k8s/Taskfile.yaml:50-64`), then wipes cluster Redis |
-| `task red:multi:replay:clear CONFIRM=true` | **DESTRUCTIVE** | `rm -f` the recording on one or all agent pods |
 | `ares ops claim-next` | **DESTRUCTIVE** | BRPOPs a queued request out from under the dispatcher |
 | `ares ops sanitize` | **DESTRUCTIVE to the attacker workspace** | deletes the hashcat potfile, `~/.nxc` DBs / spider_plus downloads / screenshots, `/tmp/ares-tickets` ccaches (`ares-tools/src/sanitize.rs:1-34`); `ARES_KEEP_WORKSPACE=1` opts out |
 | `ares ops delete` (raw, no `--force`) | **INTERACTIVE** | stdin `[y/N]`; over `--ec2` it reads EOF and prints `Cancelled` with exit 0 |
@@ -442,18 +441,18 @@ task -y k8s:reset && task -y k8s:deploy && task -y red:multi TARGET=dreadgoad
 
 **Always append `IPS=<ips>`** — that part is not in CLAUDE.md. Without it the task adds `--resolve-targets`, which shells out to `aws` inside the orchestrator pod, and the pod has no `aws` CLI (`.taskfiles/red/Taskfile.yaml:79-80`).
 
-`k8s:reset` kills local `red:multi` shells and wipes shared Redis — a shared-cluster nuke; coordinate first. `.claude/CLAUDE.md` also prescribes `task remote:sync:full TEAM=blue` for blue; `references/deployment.md` records that task as dead in the current tree.
+`k8s:reset` kills local `red:multi` shells and wipes shared Redis — a shared-cluster nuke; coordinate first. `.claude/CLAUDE.md` used to prescribe `task remote:sync:full TEAM=blue` for blue; that task was removed on 2026-08-08 (it synced the long-gone `src/ares` Python tree) and the guidance is now `task -y remote:rust:build && task -y remote:rust:deploy TEAM=blue` — see `references/deployment.md`.
 
-### `testes.sh` — the untracked one-shot harness
+### `task ec2:e2e` — the one-shot harness
 
-`/Users/l/dreadnode/ares/testes.sh` runs the whole sequence above with a two-stage binary-freshness gate (`target/.deploy/ares.sha256` mtime, else a `Deploy SHA:` grep, compared to `sha256sum /usr/local/bin/ares`) plus an optional `GATE_STRING` presence check. Knobs: `EC2_NAME`, `AWS_REGION`, `TARGET`, `DOMAIN`, `SKIP_DEPLOY`, `SKIP_RESTART`, `SKIP_KILL`, `BLUE`, `BLUE_MODEL` (forwarded as `BLUE_LLM_MODEL`, `testes.sh:271`), `CRED_USER`/`CRED_PASS`/`CRED_DOMAIN`, `GATE_STRING`, `ALLOW_PROD`, `POLL_INTERVAL`, `MAX_WAIT`, `OUTPUT_DIR`, `ARES_CLI`, `BUILD_TOOL`, and **`S3_BUCKET` — required unless `SKIP_DEPLOY=1`; the script hard-fails without it** (`testes.sh:113-114`). Traps:
+`.taskfiles/ec2/scripts/e2e-op.sh` (was the untracked `testes.sh` until 2026-08-08) runs the whole sequence above with a two-stage binary-freshness gate (`target/.deploy/ares.sha256` mtime, else a `Deploy SHA:` grep, compared to `sha256sum /usr/local/bin/ares`) plus an optional `GATE_STRING` presence check. Knobs: `EC2_NAME`, `AWS_REGION`, `TARGET`, `DOMAIN`, `SKIP_DEPLOY`, `SKIP_RESTART`, `SKIP_KILL`, `BLUE`, `BLUE_MODEL` (forwarded as `BLUE_LLM_MODEL`), `CRED_USER`/`CRED_PASS`/`CRED_DOMAIN`, `GATE_STRING`, `ALLOW_PROD`, `ALLOW_STALE`, `POLL_INTERVAL`, `MAX_WAIT`, `BLUE_SETTLE_WAIT`/`BLUE_STALL_WAIT`, `OUTPUT_DIR`, `ARES_CLI`, `BUILD_TOOL`, and **`S3_BUCKET` — required unless `SKIP_DEPLOY`; it hard-fails without it**. Booleans accept `1|true|yes|on`. Traps:
 
-- **`BLUE=0` does not disable blue.** It is passed as `BLUE_ENABLED=` to `ec2:launch`, which declares no such var and hardcodes `export ARES_BLUE_ENABLED=1` (`.taskfiles/ec2/Taskfile.yaml:1330`). `BLUE=0` only skips the script's own blue reporting.
-- **The "blind start" default is not blind.** Empty `CRED_USER`/`CRED_PASS`/`DOMAIN` let `ec2:launch`'s hardcoded lab credential and domain defaults through.
-- Its step-3 `ec2:restart` does **not** drop the workers' in-memory unavailable-tool cache; only `ec2:deploy`'s `ares@*.service` restart does. `SKIP_DEPLOY=1` therefore keeps a poisoned cache — and skips `deploy:config`.
-- `SKIP_RESTART=1` does not reach `ec2:deploy`'s opt-out, which compares against the literal string `"true"`.
-- **Its header comment on `BUILD_TOOL` is stale.** `testes.sh:60-61` says the default is `auto` (local cross-compile); the real default is `remote` (`.taskfiles/ec2/Taskfile.yaml:73`), which is why no local `./target/release/ares` appears after a deploy.
+- **`BLUE=0` does not disable blue — and the script now refuses it outright.** It was passed as `BLUE_ENABLED=` to `ec2:launch`, which declares no such var and hardcodes `export ARES_BLUE_ENABLED=1`, so `BLUE=0` only skipped the script's own blue reporting while blue ran anyway. It now dies with that explanation and points at `task red:ec2:multi BLUE_ENABLED=0`.
+- **The "blind start" default is not blind.** Empty `CRED_USER`/`CRED_PASS`/`DOMAIN` let `ec2:launch`'s hardcoded lab domain default (`sevenkingdoms.local`) through.
+- Its step-3 `ec2:restart` does **not** drop the workers' in-memory unavailable-tool cache; only `ec2:deploy`'s `ares@*.service` restart does. `SKIP_DEPLOY` therefore keeps a poisoned cache — and skips `deploy:config`.
+- **`SKIP_RESTART` now reaches `ec2:deploy` too.** go-task resolves environment variables as template vars, and `ec2:e2e` exports its knobs, so setting it suppresses both the script's own restart step *and* `ec2:deploy`'s internal one. (Empty values fall through to each task's own default, verified.)
 - It uses `ec2:launch`, so **every run FLUSHDBs the box's Redis**.
+- It refuses to build from a checkout behind its upstream (`ALLOW_STALE`) and refuses a host whose Name tag contains `prod` (`ALLOW_PROD`).
 
 ## Worker roles, units, logs
 
