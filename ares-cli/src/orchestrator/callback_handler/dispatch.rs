@@ -5,6 +5,7 @@ use ares_llm::provider::ToolCall;
 use ares_llm::CallbackResult;
 
 use super::OrchestratorCallbackHandler;
+use crate::orchestrator::state::DEDUP_CRACK_REQUESTS;
 
 fn find_usable_credential(
     credentials: &[ares_core::models::Credential],
@@ -301,7 +302,7 @@ impl OrchestratorCallbackHandler {
         let domain = call.arguments["domain"].as_str().unwrap_or("");
         let hash_type = call.arguments["hash_type"].as_str();
 
-        let (hash, dominated) = {
+        let (hash, dominated, attempts, given_up) = {
             let state = self.state.read().await;
             let dominated: std::collections::HashSet<String> = state
                 .dominated_domains
@@ -320,7 +321,17 @@ impl OrchestratorCallbackHandler {
                             .unwrap_or(true)
                 })
                 .cloned();
-            (hash, dominated)
+            let dedup = hash
+                .as_ref()
+                .map(crate::orchestrator::automation::crack_dedup_key);
+            let attempts = dedup
+                .as_ref()
+                .and_then(|k| state.crack_attempts.get(k).copied())
+                .unwrap_or(0);
+            let given_up = dedup
+                .as_ref()
+                .is_some_and(|k| state.is_processed(DEDUP_CRACK_REQUESTS, k));
+            (hash, dominated, attempts, given_up)
         };
 
         let Some(hash) = hash else {
@@ -345,8 +356,48 @@ impl OrchestratorCallbackHandler {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Dispatcher not configured"))?;
 
+        let dedup = crate::orchestrator::automation::crack_dedup_key(&hash);
+
+        let max_attempts = crate::orchestrator::automation::MAX_CRACK_ATTEMPTS;
+        if given_up || attempts >= max_attempts {
+            let runs = attempts.max(max_attempts);
+            return Ok(CallbackResult::Continue(format!(
+                "Refused: {username}@{} ({}) has already had {runs} full hashcat runs against \
+                 the wordlist and did not crack. Re-running it cannot produce a different result \
+                 and costs a crack slot that another hash needs. Treat this password as \
+                 unrecoverable and pursue a non-cracking path for this principal.",
+                hash.domain, hash.hash_type
+            )));
+        }
+
+        if dispatcher.crack_inflight.is_inflight(&dedup).await {
+            return Ok(CallbackResult::Continue(format!(
+                "Already running: a hashcat run for {username}@{} ({}) is in flight right now. \
+                 Its result lands in state automatically. Do not re-dispatch it — call \
+                 get_all_hashes() later to see whether it cracked.",
+                hash.domain, hash.hash_type
+            )));
+        }
+
+        if dispatcher.crack_inflight.at_capacity().await {
+            return Ok(CallbackResult::Continue(format!(
+                "Deferred: all {} crack slots are busy (hashcat serializes on one GPU). \
+                 {username}@{} is uncracked and the crack automation will pick it up \
+                 automatically as soon as a slot frees. No action needed.",
+                dispatcher.crack_inflight.max_active(),
+                hash.domain
+            )));
+        }
+
         let hash_type_label = hash.hash_type.clone();
         let task_id = dispatcher.request_crack(&hash).await?;
+
+        if let Some(ref id) = task_id {
+            dispatcher
+                .crack_inflight
+                .try_reserve(id, std::slice::from_ref(&dedup))
+                .await;
+        }
 
         info!(hash_type = %hash_type_label, "Dispatched crack task");
         Ok(CallbackResult::Continue(format!(

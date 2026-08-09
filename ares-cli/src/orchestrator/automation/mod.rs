@@ -82,7 +82,7 @@ pub use bloodhound::auto_bloodhound;
 pub use certipy_auth::auto_certipy_auth;
 pub use coercion::auto_coercion;
 pub use crack::auto_crack_dispatch;
-pub(crate) use crack::is_owned_domain_ntlm;
+pub(crate) use crack::{is_owned_domain_ntlm, MAX_CRACK_ATTEMPTS};
 pub use credential_access::auto_credential_access;
 pub use credential_expansion::auto_credential_expansion;
 pub use credential_reuse::auto_credential_reuse;

@@ -845,6 +845,8 @@ pub async fn process_completed_task(
         }
     }
 
+    dispatcher.crack_inflight.release(task_id).await;
+
     dispatcher.credential_access_notify.notify_waiters();
     dispatcher.delegation_notify.notify_waiters();
     dispatcher.planning_notify.notify_waiters();

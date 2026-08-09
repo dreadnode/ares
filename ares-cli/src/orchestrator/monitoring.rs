@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::orchestrator::config::OrchestratorConfig;
-use crate::orchestrator::dispatcher::CredentialInflight;
+use crate::orchestrator::dispatcher::{CrackInflight, CredentialInflight, Dispatcher};
 use crate::orchestrator::routing::{is_non_llm_task, ActiveTaskTracker};
 use crate::orchestrator::state::SharedState;
 use crate::orchestrator::task_queue::TaskQueue;
@@ -234,12 +234,14 @@ pub fn spawn_heartbeat_monitor(
     queue: TaskQueue,
     registry: AgentRegistry,
     tracker: ActiveTaskTracker,
-    credential_inflight: CredentialInflight,
+    dispatcher: Arc<Dispatcher>,
     state: SharedState,
     config: Arc<OrchestratorConfig>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let credential_inflight = dispatcher.credential_inflight.clone();
+        let crack_inflight = dispatcher.crack_inflight.clone();
         let mut interval = tokio::time::interval(config.heartbeat_interval);
         let mut consecutive_failures: u32 = 0;
 
@@ -265,8 +267,15 @@ pub fn spawn_heartbeat_monitor(
             }
 
             // Clean up stale tasks (salvage any pending results first)
-            if let Err(e) =
-                cleanup_stale_tasks(&tracker, &queue, &credential_inflight, &state, &config).await
+            if let Err(e) = cleanup_stale_tasks(
+                &tracker,
+                &queue,
+                &credential_inflight,
+                &crack_inflight,
+                &state,
+                &config,
+            )
+            .await
             {
                 warn!(err = %e, "Stale task cleanup failed");
             }
@@ -341,10 +350,12 @@ fn stale_threshold_for(
 async fn release_reaped_task(
     reaped: &crate::orchestrator::routing::ActiveTask,
     credential_inflight: &CredentialInflight,
+    crack_inflight: &CrackInflight,
 ) {
     if let Some(ref key) = reaped.credential_key {
         credential_inflight.release(key).await;
     }
+    crack_inflight.release(&reaped.task_id).await;
     if let Some(ref abort) = reaped.abort {
         abort.abort();
     }
@@ -355,6 +366,7 @@ async fn cleanup_stale_tasks(
     tracker: &ActiveTaskTracker,
     queue: &TaskQueue,
     credential_inflight: &CredentialInflight,
+    crack_inflight: &CrackInflight,
     state: &SharedState,
     config: &OrchestratorConfig,
 ) -> Result<()> {
@@ -399,7 +411,7 @@ async fn cleanup_stale_tasks(
         // every subsequent task with the same credential gets deferred
         // until the future eventually returns.
         if let Some(removed) = tracker.remove(&task.task_id).await {
-            release_reaped_task(&removed, credential_inflight).await;
+            release_reaped_task(&removed, credential_inflight, crack_inflight).await;
         }
 
         let age_secs = task.submitted_at.elapsed().as_secs();
@@ -662,7 +674,12 @@ mod tests {
         tracker.set_abort("hung", spawned.abort_handle()).await;
 
         let removed = tracker.remove("hung").await.expect("task was tracked");
-        release_reaped_task(&removed, &CredentialInflight::new(1)).await;
+        release_reaped_task(
+            &removed,
+            &CredentialInflight::new(1),
+            &CrackInflight::new(1),
+        )
+        .await;
 
         let joined = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
             .await

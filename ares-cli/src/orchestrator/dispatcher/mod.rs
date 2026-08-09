@@ -7,9 +7,10 @@
 pub(crate) mod submission;
 pub(crate) mod task_builders;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
 use crate::orchestrator::config::OrchestratorConfig;
@@ -70,6 +71,153 @@ impl CredentialInflight {
     }
 }
 
+/// How long a crack reservation survives without an explicit release. Purely a
+/// backstop for a run whose completion never reported (worker OOM, pod
+/// eviction, reaped task): both producers release explicitly on completion.
+/// Sits above `CRACK_TASK_STALL_TTL` so it never fires ahead of the stall path,
+/// and well below an op's runtime so a missed release self-heals in-op instead
+/// of blocking the hash until the op ends.
+pub const CRACK_INFLIGHT_TTL: Duration = Duration::from_secs(45 * 60);
+
+/// Default ceiling on concurrently running crack tasks. hashcat serializes on
+/// the GPU, so anything above this queues behind an already-saturated device.
+pub const DEFAULT_MAX_ACTIVE_CRACK_TASKS: usize = 2;
+
+/// Shared crack-scheduling guard: which hash dedup keys currently have a
+/// hashcat run outstanding, and how many crack tasks that adds up to.
+///
+/// This lives on [`Dispatcher`] rather than inside `auto_crack_dispatch`
+/// because there are two independent producers of crack work — the automation
+/// tick and the orchestrator's `dispatch_crack` LLM tool — and a guard held in
+/// one producer's local state cannot be enforced against the other. While this
+/// was a local `HashMap` in the automation loop, the LLM path re-queued hashes
+/// the automation already had running, so one hash held both hashcat slots for
+/// ~50 minutes across five redundant runs while crackable hashes waited.
+///
+/// Reservations are grouped per dispatch and carry a timestamp, so `active` is
+/// *derived* from the live groups rather than tracked in a separate counter. A
+/// dispatch that dies without releasing therefore cannot wedge the cap
+/// permanently — the group ages out at [`CRACK_INFLIGHT_TTL`].
+#[derive(Clone)]
+pub struct CrackInflight {
+    groups: Arc<Mutex<HashMap<String, CrackReservation>>>,
+    max_active: usize,
+}
+
+struct CrackReservation {
+    keys: Vec<String>,
+    reserved_at: Instant,
+}
+
+impl CrackInflight {
+    pub fn new(max_active: usize) -> Self {
+        Self {
+            groups: Arc::new(Mutex::new(HashMap::new())),
+            max_active: max_active.max(1),
+        }
+    }
+
+    /// Read `ARES_MAX_ACTIVE_CRACK_TASKS`, falling back to the default cap.
+    pub fn from_env() -> Self {
+        let max_active = std::env::var("ARES_MAX_ACTIVE_CRACK_TASKS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MAX_ACTIVE_CRACK_TASKS);
+        Self::new(max_active)
+    }
+
+    pub fn max_active(&self) -> usize {
+        self.max_active
+    }
+
+    /// Drop reservation groups whose dispatch never reported completion.
+    pub async fn expire_stale(&self) {
+        let now = Instant::now();
+        self.groups
+            .lock()
+            .await
+            .retain(|_, r| now.duration_since(r.reserved_at) < CRACK_INFLIGHT_TTL);
+    }
+
+    /// Number of crack dispatches currently holding a reservation.
+    pub async fn active(&self) -> usize {
+        let now = Instant::now();
+        self.groups
+            .lock()
+            .await
+            .values()
+            .filter(|r| now.duration_since(r.reserved_at) < CRACK_INFLIGHT_TTL)
+            .count()
+    }
+
+    pub async fn at_capacity(&self) -> bool {
+        self.active().await >= self.max_active
+    }
+
+    /// Snapshot of every reserved key, for filtering a work list without
+    /// holding this lock across the whole scan.
+    pub async fn live_keys(&self) -> HashSet<String> {
+        let now = Instant::now();
+        self.groups
+            .lock()
+            .await
+            .values()
+            .filter(|r| now.duration_since(r.reserved_at) < CRACK_INFLIGHT_TTL)
+            .flat_map(|r| r.keys.iter().cloned())
+            .collect()
+    }
+
+    pub async fn is_inflight(&self, dedup_key: &str) -> bool {
+        let now = Instant::now();
+        self.groups.lock().await.values().any(|r| {
+            now.duration_since(r.reserved_at) < CRACK_INFLIGHT_TTL
+                && r.keys.iter().any(|k| k == dedup_key)
+        })
+    }
+
+    /// Reserve the not-yet-in-flight subset of `dedup_keys` under `task_id` and
+    /// take one of the `max_active` slots.
+    ///
+    /// The capacity check, the duplicate check and the reservation all happen
+    /// under one lock, so two producers racing the same hash cannot both win.
+    /// Keys another dispatch already holds are left with their original owner.
+    /// Returns the keys actually reserved, or `None` when the cap is reached or
+    /// every key was already in-flight.
+    pub async fn try_reserve(&self, task_id: &str, dedup_keys: &[String]) -> Option<Vec<String>> {
+        let mut groups = self.groups.lock().await;
+        let now = Instant::now();
+        groups.retain(|_, r| now.duration_since(r.reserved_at) < CRACK_INFLIGHT_TTL);
+        if groups.len() >= self.max_active {
+            return None;
+        }
+        let taken: HashSet<&String> = groups.values().flat_map(|r| r.keys.iter()).collect();
+        let reserved: Vec<String> = dedup_keys
+            .iter()
+            .filter(|k| !taken.contains(*k))
+            .cloned()
+            .collect();
+        if reserved.is_empty() {
+            return None;
+        }
+        groups.insert(
+            task_id.to_string(),
+            CrackReservation {
+                keys: reserved.clone(),
+                reserved_at: now,
+            },
+        );
+        Some(reserved)
+    }
+
+    /// Release the reservation held by `task_id`. Idempotent, and a no-op for
+    /// task ids that never reserved anything — so the completion path can call
+    /// it unconditionally.
+    pub async fn release(&self, task_id: &str) {
+        self.groups.lock().await.remove(task_id);
+    }
+}
+
 /// Result of a submission attempt that distinguishes between "deferred and
 /// safely enqueued" vs "dropped due to overflow / no role mapping".
 ///
@@ -121,6 +269,10 @@ pub struct Dispatcher {
     pub llm_runner: Arc<LlmTaskRunner>,
     /// Per-credential concurrency limiter.
     pub credential_inflight: CredentialInflight,
+    /// Crack-scheduling guard shared by `auto_crack_dispatch` and the
+    /// orchestrator's `dispatch_crack` tool, so neither can re-queue a hash the
+    /// other already has running.
+    pub crack_inflight: CrackInflight,
     /// Single-slot mutex shared by every dispatcher that submits a
     /// coercion-or-relay-bearing task. ntlmrelayx binds the loopback
     /// port-445 mutex on the listener host, so concurrent dispatches
@@ -178,6 +330,7 @@ impl Dispatcher {
             llm_runner,
             // Allow up to 3 concurrent tasks per credential
             credential_inflight: CredentialInflight::new(3),
+            crack_inflight: CrackInflight::from_env(),
             relay_slot: Arc::new(Mutex::new(())),
             red_draining: Arc::new(AtomicBool::new(false)),
             proposals: Arc::new(crate::orchestrator::proposals::ProposalPool::from_env()),
@@ -211,6 +364,99 @@ pub struct DispatcherDeps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keys(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn reserve_blocks_a_second_producer_on_the_same_hash() {
+        let inflight = CrackInflight::new(2);
+        let k = keys(&["contoso.local:svc_sql:abc"]);
+
+        assert!(inflight.try_reserve("crack_direct_1", &k).await.is_some());
+        assert!(inflight.is_inflight(&k[0]).await);
+        assert!(
+            inflight.try_reserve("crack_llm_1", &k).await.is_none(),
+            "the LLM dispatch_crack path must not re-queue a hash the automation is running"
+        );
+
+        inflight.release("crack_direct_1").await;
+        assert!(!inflight.is_inflight(&k[0]).await);
+        assert!(inflight.try_reserve("crack_llm_1", &k).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn reserve_enforces_the_active_task_cap() {
+        let inflight = CrackInflight::new(2);
+        assert!(inflight
+            .try_reserve("t1", &keys(&["contoso.local:alice:a"]))
+            .await
+            .is_some());
+        assert!(inflight
+            .try_reserve("t2", &keys(&["contoso.local:bob:b"]))
+            .await
+            .is_some());
+        assert_eq!(inflight.active().await, 2);
+        assert!(inflight.at_capacity().await);
+        assert!(
+            inflight
+                .try_reserve("t3", &keys(&["contoso.local:carol:c"]))
+                .await
+                .is_none(),
+            "a third concurrent run would oversubscribe the single hashcat GPU"
+        );
+
+        inflight.release("t1").await;
+        assert!(!inflight.at_capacity().await);
+        assert!(inflight
+            .try_reserve("t3", &keys(&["contoso.local:carol:c"]))
+            .await
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn reserve_takes_only_the_free_subset_of_a_batch() {
+        let inflight = CrackInflight::new(2);
+        inflight
+            .try_reserve("t1", &keys(&["contoso.local:alice:a"]))
+            .await
+            .unwrap();
+
+        let reserved = inflight
+            .try_reserve(
+                "t2",
+                &keys(&["contoso.local:alice:a", "contoso.local:bob:b"]),
+            )
+            .await
+            .expect("a batch with one free key still dispatches");
+        assert_eq!(reserved, keys(&["contoso.local:bob:b"]));
+
+        inflight.release("t2").await;
+        assert!(inflight.is_inflight("contoso.local:alice:a").await);
+    }
+
+    #[tokio::test]
+    async fn release_is_idempotent_and_ignores_unknown_tasks() {
+        let inflight = CrackInflight::new(2);
+        inflight
+            .try_reserve("t1", &keys(&["contoso.local:alice:a"]))
+            .await
+            .unwrap();
+
+        inflight.release("recon_task_unrelated").await;
+        assert_eq!(inflight.active().await, 1);
+
+        inflight.release("t1").await;
+        inflight.release("t1").await;
+        assert_eq!(inflight.active().await, 0);
+    }
+
+    #[test]
+    fn inflight_ttl_outlives_the_stall_ceiling() {
+        assert!(CRACK_INFLIGHT_TTL > Duration::from_secs(30 * 60));
+        assert!(CRACK_INFLIGHT_TTL < Duration::from_secs(2 * 60 * 60));
+    }
 
     #[test]
     fn credential_key_basic() {
