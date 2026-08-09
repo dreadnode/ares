@@ -1859,7 +1859,10 @@ mod tests {
             super::token_category("mssql_impersonation_192.168.58.51"),
             "mssql_exploit"
         );
-        assert_eq!(super::token_category("mssql_10_1_2_51"), "mssql_exploit");
+        assert_eq!(
+            super::token_category("mssql_192_168_58_51"),
+            "mssql_exploit"
+        );
     }
 
     #[test]

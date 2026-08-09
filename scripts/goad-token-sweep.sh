@@ -24,9 +24,10 @@ names='sevenkingdoms|essos\.|braavos|meereen|kingslanding|castelblack|winterfell
 leaks='59hv\.local|win-mvbxbx7jbs6'
 placeholders='test\.local|example\.com|corp\.local|domain\.local|contoso\.com'
 ips='10\.1\.[0-9]{1,3}\.[0-9]{1,3}|10\.0\.[0-9]{1,3}\.[0-9]{1,3}|172\.16\.[0-9]{1,3}\.[0-9]{1,3}'
+ips_underscore='10_1_[0-9]{1,3}_[0-9]{1,3}|10_0_[0-9]{1,3}_[0-9]{1,3}|172_16_[0-9]{1,3}_[0-9]{1,3}'
 passwords='Heartsbane|iseedeadpeople|iknownothing|sexywolfy|s3xywolfy|FightP3aceAndH[0o]nor|L0ngCl@w|H0nnor|fr3edom|BurnThemAll|dracarys|Drag0nst0ne|iamthekingoftheworld|il0vejaime|lorastyrell|littlefinger|MaesterOfMaesters|powerkingftw135|robbsansabradonaryarickon|1killerlion|345ertdfg|Alc00L|W1sper|GoldCrown|Winter2022|YouWillNotKerboroast'
 
-banned="${names}|${leaks}|${placeholders}|${ips}|${passwords}"
+banned="${names}|${leaks}|${placeholders}|${ips}|${ips_underscore}|${passwords}"
 
 # Paths that may legitimately carry real lab tokens: CLI wrappers that drive the
 # range, the lab spec itself, operator-facing config comments, local agent
