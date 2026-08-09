@@ -44,13 +44,13 @@ instance with a 20 GB volume.
   `EC2InstanceProfileForImageBuilder` policy (grants SSM + S3 read on the
   staging bucket).
 - An S3 bucket for warpgate's file-provisioner staging. The lab account
-  already has `ec2imagebuilder-warpgate-381491903301-us-west-1`.
+  already has `ec2imagebuilder-warpgate-<account-id>-us-west-1`.
 
 Point the global warpgate config at them (once):
 
 ```bash
 warpgate config set aws.ami.instance_profile_name warpgate-imagebuilder
-warpgate config set aws.ami.file_staging_bucket   ec2imagebuilder-warpgate-381491903301-us-west-1
+warpgate config set aws.ami.file_staging_bucket   ec2imagebuilder-warpgate-<account-id>-us-west-1
 ```
 
 **Build the AMI:**

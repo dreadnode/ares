@@ -10,14 +10,15 @@
 # rejoin after the reboot -> CANCELLED). So we do it on a plain instance that
 # handles its own reboot via a systemd oneshot, then snapshot.
 #
-# Phase 1 (first boot): SSM agent + aws cli + kernel/headers/driver + ansible +
-#   collection, install a one-shot phase-2 unit, then reboot.
-# Phase 2 (after reboot, driver loaded on target kernel): run goad_attack_box.yml
-#   with the driver/cuda steps disabled, then signal done via S3.
+# First boot (this file): SSM agent + aws cli + kernel/headers/driver + ansible +
+#   collection, install the ares-golden-tools-install oneshot, then reboot.
+# ares-golden-tools-install.service (post-reboot, driver live on target kernel):
+#   run goad_attack_box.yml with driver/cuda disabled, then signal done via S3.
 set -xuo pipefail
 exec >/var/log/ares-golden-build.log 2>&1
 export DEBIAN_FRONTEND=noninteractive
-BUCKET=warpgate-staging-898493401173-use1
+BUCKET=__BUCKET__
+REGION=__AWS_REGION__
 PFX=s3://$BUCKET/ares-golden-build
 
 apt-get update
@@ -40,22 +41,22 @@ apt-get install -y linux-image-cloud-amd64 linux-headers-cloud-amd64 dkms
 apt-get install -y nvidia-driver nvidia-opencl-icd clinfo firmware-misc-nonfree
 dkms status
 
-# ansible + the nimbus_range collection (for phase 2)
+# ansible + the nimbus_range collection (for the tools-install unit)
 pipx install --force ansible-core
 COLL=/root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
 mkdir -p "$COLL"
-$AWS s3 cp $PFX/ares-ansible.tar.gz /tmp/ares.tgz --region us-east-1
+$AWS s3 cp $PFX/ares-ansible.tar.gz /tmp/ares.tgz --region "$REGION"
 tar -xzf /tmp/ares.tgz -C "$COLL"
 /root/.local/bin/ansible-galaxy collection install -r "$COLL/requirements.yml" --force
 
-# Phase 2 one-shot: runs after the reboot, when the driver is live on the target kernel.
-cat >/usr/local/bin/ares-phase2.sh <<'P2'
+# Tools-install oneshot: runs after the reboot, when the driver is live on the target kernel.
+cat >/usr/local/bin/ares-golden-tools-install.sh <<'TOOLS_INSTALL'
 #!/bin/bash
 set -xuo pipefail
 exec >> /var/log/ares-golden-build.log 2>&1
 # Full PATH incl. sbin dirs — dpkg/apt need ldconfig + start-stop-daemon (in /usr/sbin,/sbin).
 export HOME=/root PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-BUCKET=warpgate-staging-898493401173-use1; PFX=s3://$BUCKET/ares-golden-build
+BUCKET=__BUCKET__; REGION=__AWS_REGION__; PFX=s3://$BUCKET/ares-golden-build
 COLL=/root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
 AWS=/usr/local/bin/aws
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader || true
@@ -67,27 +68,27 @@ ANSIBLE_REMOTE_TMP=/tmp/at ansible-playbook "$COLL/playbooks/ares/goad_attack_bo
 RC=$?
 # clean apt caches before snapshot
 apt-get clean; rm -rf /var/lib/apt/lists/* /tmp/ansible* 2>/dev/null || true
-$AWS s3 cp /var/log/ares-golden-build.log $PFX/build.log --region us-east-1 || true
-echo "$RC" > /tmp/rc && $AWS s3 cp /tmp/rc $PFX/PHASE2_DONE --region us-east-1
-systemctl disable ares-phase2.service
-P2
-chmod +x /usr/local/bin/ares-phase2.sh
+$AWS s3 cp /var/log/ares-golden-build.log $PFX/build.log --region "$REGION" || true
+echo "$RC" > /tmp/tools-install-rc && $AWS s3 cp /tmp/tools-install-rc $PFX/TOOLS_INSTALL_DONE --region "$REGION"
+systemctl disable ares-golden-tools-install.service
+TOOLS_INSTALL
+chmod +x /usr/local/bin/ares-golden-tools-install.sh
 
-cat >/etc/systemd/system/ares-phase2.service <<'UNIT'
+cat >/etc/systemd/system/ares-golden-tools-install.service <<'UNIT'
 [Unit]
-Description=ares golden phase2 (tools install + done signal)
+Description=ares golden image: install attack toolset after the driver reboot
 After=network-online.target amazon-ssm-agent.service
 Wants=network-online.target
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/ares-phase2.sh
+ExecStart=/usr/local/bin/ares-golden-tools-install.sh
 RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
-systemctl enable ares-phase2.service
+systemctl enable ares-golden-tools-install.service
 
-$AWS s3 cp /var/log/ares-golden-build.log $PFX/build.log --region us-east-1 || true
-echo "phase1 done; rebooting into target kernel"
+$AWS s3 cp /var/log/ares-golden-build.log $PFX/build.log --region "$REGION" || true
+echo "driver install done; rebooting into target kernel"
 reboot

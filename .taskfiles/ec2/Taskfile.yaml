@@ -1134,10 +1134,10 @@ tasks:
       # (provision once with `task ec2:history-db`) — no cross-region networking,
       # no secret. Pass ARES_DATABASE_URL=... to point at a remote DB instead;
       # if you do, the box→DB reachability probe below derives host:port from it.
-      # The RDS_* vars below only take effect when ARES_DATABASE_URL is empty.
+      # The RDS_* vars need ARES_DATABASE_URL empty AND RDS_ENDPOINT supplied.
       ARES_DATABASE_URL: '{{.ARES_DATABASE_URL | default "postgresql://ares_admin@127.0.0.1:5432/ares_history"}}'
       RDS_SECRET_ID: '{{.RDS_SECRET_ID | default "ares/rds/master"}}'
-      RDS_ENDPOINT: '{{.RDS_ENDPOINT | default "ares-history.cr8uqakiuqnq.us-west-1.rds.amazonaws.com"}}'
+      RDS_ENDPOINT: '{{.RDS_ENDPOINT | default (env "ARES_RDS_ENDPOINT") | default ""}}'
       RDS_USER: '{{.RDS_USER | default "ares_admin"}}'
       RDS_DB: '{{.RDS_DB | default "ares_history"}}'
       LLM_MODEL: '{{.LLM_MODEL | default ""}}'
@@ -1285,7 +1285,7 @@ tasks:
         # master password in Secrets Manager. The password stays out of git and
         # the /etc/ares/env file is chmod 600 below.
         ARES_DATABASE_URL_VAL="{{.ARES_DATABASE_URL}}"
-        if [ -z "$ARES_DATABASE_URL_VAL" ] && [ -n "{{.RDS_SECRET_ID}}" ]; then
+        if [ -z "$ARES_DATABASE_URL_VAL" ] && [ -n "{{.RDS_SECRET_ID}}" ] && [ -n "{{.RDS_ENDPOINT}}" ]; then
           DB_PASSWORD=$(aws secretsmanager get-secret-value \
             {{.AWS_PROFILE_ARG}} \
             --region "{{.AWS_REGION}}" \

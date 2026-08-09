@@ -331,13 +331,13 @@ Requires warpgate ≥ v4.7.0. One-time lab-account prerequisites:
 - IAM role + instance profile `warpgate-imagebuilder` with
   `EC2InstanceProfileForImageBuilder` (grants SSM + S3 read on the staging bucket).
 - An S3 bucket to stage the file provisioner content into. The lab account
-  already has `ec2imagebuilder-warpgate-381491903301-us-west-1`.
+  already has `ec2imagebuilder-warpgate-<account-id>-us-west-1`.
 
 Point the global warpgate config at those (one-time):
 
 ```bash
 warpgate config set aws.ami.instance_profile_name warpgate-imagebuilder
-warpgate config set aws.ami.file_staging_bucket   ec2imagebuilder-warpgate-381491903301-us-west-1
+warpgate config set aws.ami.file_staging_bucket   ec2imagebuilder-warpgate-<account-id>-us-west-1
 warpgate config set aws.region                    us-west-1
 warpgate config set aws.profile                   lab
 ```

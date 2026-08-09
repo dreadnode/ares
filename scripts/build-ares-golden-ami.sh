@@ -28,7 +28,17 @@ PFX="s3://$BUCKET/ares-golden-build"
 echo "[1/6] upload ares ansible collection to S3"
 tar -czf /tmp/ares-ansible.tar.gz -C "$HERE/../ansible" .
 aws s3 cp /tmp/ares-ansible.tar.gz "$PFX/ares-ansible.tar.gz"
-aws s3 rm "$PFX/PHASE2_DONE" 2>/dev/null || true
+aws s3 rm "$PFX/TOOLS_INSTALL_DONE" 2>/dev/null || true
+
+USERDATA=$(mktemp /tmp/ares-golden-userdata.XXXXXX)
+trap 'rm -f "$USERDATA"' EXIT
+sed -e "s|__BUCKET__|$BUCKET|g" -e "s|__AWS_REGION__|$AWS_REGION|g" \
+	"$HERE/ares-golden-userdata.sh" >"$USERDATA"
+grep -q '__BUCKET__\|__AWS_REGION__' "$USERDATA" &&
+	{
+		echo "unrendered placeholder left in $USERDATA"
+		exit 1
+	}
 
 echo "[2/6] resolve latest Kali base AMI + launch builder (g4dn.xlarge)"
 KALI=$(aws ec2 describe-images --owners 679593333241 \
@@ -38,15 +48,15 @@ IID=$(aws ec2 run-instances --image-id "$KALI" --instance-type g4dn.xlarge \
 	--subnet-id "$SUBNET" --security-group-ids "$SG" --associate-public-ip-address \
 	--iam-instance-profile Name="$PROFILE_NAME" \
 	--block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":100,"VolumeType":"gp3"}}]' \
-	--user-data "file://$HERE/ares-golden-userdata.sh" \
+	--user-data "file://$USERDATA" \
 	--tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=ares-golden-builder}]' \
 	--query 'Instances[0].InstanceId' --output text)
 echo "      builder=$IID base=$KALI"
 
-echo "[3/6] wait for build (phase1 install -> reboot -> phase2 tools), ~30-45min"
+echo "[3/6] wait for build (driver install -> reboot -> toolset install), ~30-45min"
 RC=""
 for _ in $(seq 1 100); do
-	RC=$(aws s3 cp "$PFX/PHASE2_DONE" - 2>/dev/null || true)
+	RC=$(aws s3 cp "$PFX/TOOLS_INSTALL_DONE" - 2>/dev/null || true)
 	[ -n "$RC" ] && break
 	sleep 30
 done
@@ -54,7 +64,7 @@ done
 	echo "TIMEOUT waiting for build; see $PFX/build.log and instance $IID"
 	exit 1
 }
-echo "      phase2 rc=$RC"
+echo "      toolset install rc=$RC"
 [ "$RC" = "0" ] || {
 	echo "playbook FAILED (rc=$RC); inspect $PFX/build.log (builder left running: $IID)"
 	exit 1
