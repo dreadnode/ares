@@ -61,7 +61,6 @@ impl AuthThrottle {
                     .entry(credential_key.to_string())
                     .or_default();
 
-                // Prune expired entries
                 timestamps.retain(|t| now.duration_since(*t) < window);
 
                 if timestamps.len() < max_attempts {

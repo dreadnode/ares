@@ -229,7 +229,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
     let text: &str = decoded.as_ref();
     let mut values = HashSet::new();
 
-    // IPv4 addresses
     for cap in ipv4_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let ip = m.as_str();
@@ -243,7 +242,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // Hostnames/FQDNs
     for cap in hostname_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let host = m.as_str();
@@ -253,7 +251,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // DOMAIN\user
     for cap in domain_user_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let user = m.as_str();
@@ -270,7 +267,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // JSON user fields
     for cap in json_user_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let user = m.as_str().trim();
@@ -280,7 +276,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // JSON computer fields
     for cap in json_computer_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let host = m.as_str().trim();
@@ -290,7 +285,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // JSON process fields (only .exe or .dll)
     for cap in json_process_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let proc = m.as_str().trim();
@@ -301,7 +295,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // JSON service fields
     for cap in json_service_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let svc = m.as_str().trim();
@@ -443,7 +436,6 @@ pub fn get_suggested_iocs() -> Vec<ClassifiedIoc> {
 
 /// Classify an IOC value by type.
 fn classify_ioc(value: &str) -> Option<&'static str> {
-    // IP address
     if value.split('.').count() == 4
         && value.chars().all(|c| c.is_ascii_digit() || c == '.')
         && value
@@ -453,7 +445,6 @@ fn classify_ioc(value: &str) -> Option<&'static str> {
         return Some("ip");
     }
 
-    // Hashes
     if value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit()) {
         return Some("hash");
     }
@@ -464,17 +455,14 @@ fn classify_ioc(value: &str) -> Option<&'static str> {
         return Some("hash");
     }
 
-    // DOMAIN\user
     if value.contains('\\') && !value.starts_with("c:\\") && !value.starts_with("\\\\") {
         return Some("user");
     }
 
-    // user@domain
     if value.contains('@') && value.contains('.') {
         return Some("user");
     }
 
-    // Hostname/FQDN
     if is_hostname_like(value) {
         return Some("hostname");
     }

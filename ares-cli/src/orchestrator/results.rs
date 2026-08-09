@@ -42,7 +42,6 @@ pub fn spawn_result_consumer(
         info!("Result consumer started");
 
         loop {
-            // Check shutdown before each poll cycle
             if *shutdown.borrow() {
                 info!("Result consumer shutting down");
                 break;

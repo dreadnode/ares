@@ -52,7 +52,6 @@ impl AlertCluster {
         let labels = alert.get("labels").and_then(|v| v.as_object());
         let annotations = alert.get("annotations").and_then(|v| v.as_object());
 
-        // Extract hosts
         if let Some(labels) = labels {
             for key in HOST_KEYS {
                 if let Some(val) = labels.get(*key).and_then(|v| v.as_str()) {
@@ -67,21 +66,18 @@ impl AlertCluster {
                 }
             }
 
-            // Extract users
             for key in USER_KEYS {
                 if let Some(val) = labels.get(*key).and_then(|v| v.as_str()) {
                     self.common_users.insert(val.to_lowercase());
                 }
             }
 
-            // Extract IPs
             for key in &["ip", "source_ip", "src_ip", "IpAddress", "ClientAddress"] {
                 if let Some(val) = labels.get(*key).and_then(|v| v.as_str()) {
                     self.common_ips.insert(val.to_string());
                 }
             }
 
-            // Extract techniques
             for key in &["mitre_technique", "technique", "technique_id"] {
                 if let Some(val) = labels.get(*key) {
                     match val {
@@ -101,7 +97,6 @@ impl AlertCluster {
             }
         }
 
-        // Also extract users from annotations
         if let Some(annotations) = annotations {
             for key in USER_KEYS {
                 if let Some(val) = annotations.get(*key).and_then(|v| v.as_str()) {
@@ -110,7 +105,6 @@ impl AlertCluster {
             }
         }
 
-        // Update time range
         if let Some(starts_at) = alert.get("startsAt").and_then(|v| v.as_str()) {
             if let Ok(ts) = DateTime::parse_from_rfc3339(starts_at) {
                 let ts = ts.with_timezone(&Utc);
@@ -121,7 +115,6 @@ impl AlertCluster {
             }
         }
 
-        // Extract operation_id from operation_context
         if let Some(op_id) = alert
             .get("operation_context")
             .and_then(|v| v.get("operation_id"))
@@ -162,7 +155,6 @@ impl AlertCluster {
                     }
                 }
             }
-            // Instance host check
             if !host_matched {
                 if let Some(instance) = labels.get("instance").and_then(|v| v.as_str()) {
                     let host = instance.split(':').next().unwrap_or("").to_lowercase();

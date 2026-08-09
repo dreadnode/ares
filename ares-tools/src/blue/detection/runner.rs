@@ -173,7 +173,6 @@ pub async fn run_parallel_detections(args: &Value) -> Result<ToolOutput> {
 
     let mut output_parts = Vec::new();
 
-    // Process in batches
     for batch in query_names.chunks(max_concurrent) {
         let mut handles = Vec::new();
         for name in batch {

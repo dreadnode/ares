@@ -20,7 +20,6 @@ mod users_shares;
 
 use serde_json::{json, Value};
 
-// Re-export all public parser functions at module level.
 pub use bloodhound::{
     parse_bloodhound_collection, parse_bloodhound_documents, BLOODHOUND_OUTPUT_DIR_MARKER,
 };

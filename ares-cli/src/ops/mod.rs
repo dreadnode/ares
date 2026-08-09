@@ -269,7 +269,6 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             auto_report,
             report_dir,
         } => {
-            // Resolve targets from EC2 if requested and no IPs provided
             if ips.is_empty() {
                 if resolve_targets || !resolve::looks_like_ip(&target) {
                     ips = resolve::resolve_ec2_targets(&target, &aws_profile, &aws_region)?;

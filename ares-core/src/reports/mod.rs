@@ -127,7 +127,6 @@ mod tests {
         ];
         let deduped = dedup_hashes(&hashes);
         assert_eq!(deduped.len(), 2);
-        // Administrator should be sorted first
         assert_eq!(deduped[0].username, "administrator");
     }
 
@@ -624,7 +623,6 @@ mod tests {
         assert!(report.contains("BruteForce"));
         assert!(report.contains("MalwareDetected"));
         assert!(report.contains("ESCALATIONS REQUIRED"));
-        // Should have 2 investigations
         assert!(report.contains("Investigations | 2"));
     }
 }

@@ -301,7 +301,6 @@ fn format_alerts_response(body: &str) -> String {
             lines.push(format!("  Summary: {summary}"));
         }
 
-        // Show starts/ends if present
         if let Some(starts) = alert.get("startsAt").and_then(|s| s.as_str()) {
             lines.push(format!("  Started: {starts}"));
         }
@@ -353,7 +352,6 @@ fn format_annotations_response(body: &str) -> String {
             lines.push(format!("  Alert: {alert_name}"));
         }
         if !text.is_empty() {
-            // Truncate long annotation text
             let display = if text.len() > 200 {
                 let mut end = 200;
                 while !text.is_char_boundary(end) {
@@ -369,7 +367,6 @@ fn format_annotations_response(body: &str) -> String {
             lines.push(format!("  Tags: {tags}"));
         }
 
-        // Show time range
         if let Some(time) = ann.get("time").and_then(|t| t.as_i64()) {
             lines.push(format!("  Time: {time}"));
         }
@@ -458,7 +455,6 @@ fn format_dashboard_response(body: &str) -> String {
             lines.push(format!("Description: {description}"));
         }
 
-        // Show panel summary
         if let Some(panels) = db.get("panels").and_then(|p| p.as_array()) {
             lines.push(format!("\nPanels ({}):", panels.len()));
             for panel in panels {

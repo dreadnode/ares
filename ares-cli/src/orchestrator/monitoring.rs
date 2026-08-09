@@ -308,7 +308,6 @@ async fn run_heartbeat_sweep(
         }
     }
 
-    // Mark stale agents offline
     let stale = registry.stale_agents(config.heartbeat_timeout).await;
     for agent in &stale {
         warn!(

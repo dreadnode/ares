@@ -136,7 +136,6 @@ impl HistoricalQueryService {
         cracked_only: bool,
         limit: i64,
     ) -> Result<Vec<HashRow>> {
-        // Base query with computed is_cracked
         let base = "SELECT h.id, o.operation_id, h.username, h.domain, h.hash_type,
                            (h.cracked_password_hash IS NOT NULL) as is_cracked,
                            h.source, h.attack_step, h.discovered_at
@@ -168,7 +167,6 @@ impl HistoricalQueryService {
                 .await?
             }
         } else {
-            // Build WHERE clause dynamically
             let mut where_parts = Vec::new();
             let mut bind_values: Vec<String> = Vec::new();
 

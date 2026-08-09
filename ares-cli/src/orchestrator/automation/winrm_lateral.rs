@@ -30,7 +30,6 @@ fn collect_winrm_lateral_work(state: &StateInner) -> Vec<WinRmWork> {
     let mut items = Vec::new();
 
     for host in &state.hosts {
-        // Check if host has WinRM indicators in services
         let has_winrm = host.services.iter().any(|s| {
             let sl = s.to_lowercase();
             sl.contains("5985") || sl.contains("5986") || sl.contains("winrm")

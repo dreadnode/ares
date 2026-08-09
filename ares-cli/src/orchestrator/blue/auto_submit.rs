@@ -170,7 +170,6 @@ async fn auto_submit_loop(
 ) -> Result<()> {
     info!("Blue auto-submit: waiting {INITIAL_DELAY_SECS}s for red team activity");
 
-    // Wait for initial red team activity
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_secs(INITIAL_DELAY_SECS)) => {}
         _ = shutdown_rx.changed() => return Ok(()),
@@ -357,7 +356,6 @@ async fn submit_investigation(
         let _: () = conn.expire(&env_key, 3600).await?;
     }
 
-    // Track investigation against operation (Redis state)
     let op_inv_key = format!("ares:blue:op:{op_id}:investigations");
     let _: () = conn.sadd(&op_inv_key, &inv_id).await?;
     let _: () = conn.expire(&op_inv_key, 7 * 24 * 3600).await?;

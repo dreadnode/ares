@@ -349,7 +349,6 @@ pub(crate) async fn ops_inject_hash(p: OpsInjectHashParams) -> Result<()> {
     let added = reader.add_hash(&mut conn, &hash).await?;
 
     if added {
-        // If username is krbtgt or Administrator, set has_domain_admin=True
         let username_lower = username.trim().to_lowercase();
         if username_lower == "krbtgt" || username_lower == "administrator" {
             reader
@@ -415,7 +414,6 @@ pub(crate) async fn ops_inject_trust(
         anyhow::bail!("No state found for operation: {operation_id}");
     }
 
-    // Derive flat_name from domain if not provided
     let flat_name = if flat_name.is_empty() {
         domain.split('.').next().unwrap_or(&domain).to_uppercase()
     } else {

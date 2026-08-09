@@ -170,7 +170,6 @@ fn convert_message(msg: &ChatMessage) -> ApiMessage {
         Role::Tool => "tool",
     };
 
-    // Handle tool result messages
     if msg.role == Role::Tool || msg.role == Role::User {
         if let Some(ref parts) = msg.parts {
             for part in parts {

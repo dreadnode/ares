@@ -200,7 +200,6 @@ pub fn parse_spider_credentials(output: &str, params: &Value) -> Vec<Value> {
         }
     }
 
-    // Dedup by username+password
     creds.sort_by(|a, b| {
         let ka = format!("{}:{}", a["username"], a["password"]);
         let kb = format!("{}:{}", b["username"], b["password"]);

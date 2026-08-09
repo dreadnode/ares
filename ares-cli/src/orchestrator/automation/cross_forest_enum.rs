@@ -278,7 +278,6 @@ pub async fn auto_cross_forest_enum(
                 );
             }
 
-            // Mark as processed
             dispatcher
                 .state
                 .write()

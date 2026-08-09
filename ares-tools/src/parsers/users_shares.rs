@@ -49,7 +49,6 @@ pub fn parse_netexec_users(output: &str) -> Vec<Value> {
     for line in output.lines() {
         let line = line.trim();
 
-        // Skip empty lines
         if line.is_empty() {
             continue;
         }
@@ -195,7 +194,6 @@ pub fn parse_netexec_shares(output: &str) -> Vec<Value> {
         if parts.len() < 6 {
             continue;
         }
-        // Detect SMB-prefixed lines
         if parts[0] != "SMB" {
             continue;
         }

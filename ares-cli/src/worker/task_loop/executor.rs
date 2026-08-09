@@ -38,7 +38,6 @@ pub async fn run_agent_task(
     conn: Option<redis::aio::ConnectionManager>,
     operation_id: Option<&str>,
 ) -> anyhow::Result<AgentResult> {
-    // Try expanding composite task types first
     let tools = expand_task(task_type, params);
 
     if tools.is_empty() {
@@ -57,7 +56,6 @@ pub async fn run_agent_task(
         return Ok(make_result_with_discoveries(output, discoveries));
     }
 
-    // Run each expanded tool, collecting outputs and discoveries
     let mut outputs = Vec::new();
     let mut all_discoveries = Vec::new();
     let mut any_error = false;
@@ -186,14 +184,12 @@ fn expand_technique_task(params: &serde_json::Value) -> Vec<(String, serde_json:
     let mut tools = Vec::new();
     let normalized = normalize_params(params);
 
-    // Handle singular "technique" field
     if let Some(technique) = params.get("technique").and_then(|v| v.as_str()) {
         let tool_name = map_technique_to_tool(technique);
         tools.push((tool_name, normalized));
         return tools;
     }
 
-    // Handle "techniques" array
     if let Some(techniques) = params.get("techniques").and_then(|v| v.as_array()) {
         for tech in techniques {
             if let Some(name) = tech.as_str() {
@@ -213,7 +209,6 @@ fn expand_technique_task(params: &serde_json::Value) -> Vec<(String, serde_json:
 fn normalize_params(params: &serde_json::Value) -> serde_json::Value {
     let mut p = params.clone();
     if let Some(obj) = p.as_object_mut() {
-        // target_ip → target (tools expect "target")
         if !obj.contains_key("target") {
             if let Some(ip) = obj.get("target_ip").cloned() {
                 obj.insert("target".to_string(), ip);
@@ -225,7 +220,6 @@ fn normalize_params(params: &serde_json::Value) -> serde_json::Value {
                 obj.insert("targets".to_string(), ip);
             }
         }
-        // Flatten credential object into top-level fields
         if let Some(cred) = obj.get("credential").cloned() {
             if let Some(cred_obj) = cred.as_object() {
                 for (k, v) in cred_obj {

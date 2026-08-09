@@ -114,7 +114,6 @@ pub async fn analyze_lateral_movement(args: &Value) -> Result<ToolOutput> {
         connections.len()
     ));
 
-    // Graph summary
     let mut connection_types: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
     let mut unique_users = std::collections::HashSet::new();
@@ -180,7 +179,6 @@ pub async fn analyze_lateral_movement(args: &Value) -> Result<ToolOutput> {
         parts.push(format!("\nAttack path: {}", path.join(" -> ")));
     }
 
-    // Pivot suggestions
     if !pending.is_empty() {
         parts.push(format!(
             "\n--- Pivot Suggestions ({} pending hosts) ---",
@@ -204,7 +202,6 @@ pub async fn analyze_lateral_movement(args: &Value) -> Result<ToolOutput> {
         }
     }
 
-    // Focus host details
     if let Some(focus) = focus_host {
         let focus_lower = focus.to_lowercase();
         let host_conns: Vec<&LateralConn> = connections
@@ -489,7 +486,6 @@ pub async fn get_formatted_summary(args: &Value) -> Result<ToolOutput> {
         .await
         .unwrap_or(0);
 
-    // Compute pyramid stats from evidence
     let all_evidence: std::collections::HashMap<String, String> =
         conn.hgetall(&evidence_key).await.unwrap_or_default();
     let mut highest_pyramid = 0i32;

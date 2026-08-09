@@ -85,7 +85,6 @@ fn extract_rpcclient_description_passwords(
             current_user = None;
             continue;
         }
-        // Look for password in Description field
         if let Some(ref username) = current_user {
             if stripped.to_lowercase().contains("description")
                 && stripped.to_lowercase().contains("password")
@@ -209,7 +208,6 @@ pub fn extract_plaintext_passwords(
     for line in &lines {
         let stripped = line.trim();
 
-        // DefaultPassword block
         if stripped.contains("[*] DefaultPassword") {
             expecting_default_password = true;
             continue;

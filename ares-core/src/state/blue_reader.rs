@@ -276,7 +276,6 @@ impl BlueStateReader {
         let completed_tasks = self.get_completed_tasks(conn).await?;
         let lateral = self.get_lateral(conn).await?;
 
-        // Extract scalar meta fields
         let stage = meta
             .get("stage")
             .and_then(|v| v.as_str())

@@ -378,7 +378,6 @@ pub async fn auto_credential_expansion(
         for item in hash_work {
             let mut any_dispatched = false;
 
-            // Build a credential-like object for pass-the-hash
             let mut pth_cred = build_pth_credential(&item.hash);
             pth_cred.domain = item.resolved_domain.clone();
 

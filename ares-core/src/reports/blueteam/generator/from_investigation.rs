@@ -43,7 +43,6 @@ impl BlueTeamReportGenerator {
         .into_iter()
         .collect();
 
-        // Extract alert metadata
         let alert = if state.alert.is_object() {
             &state.alert
         } else {
@@ -59,7 +58,6 @@ impl BlueTeamReportGenerator {
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown");
 
-        // Duration
         let started_at = &state.started_at;
         let now = Utc::now();
         let duration = chrono::DateTime::parse_from_rfc3339(started_at)
@@ -78,7 +76,6 @@ impl BlueTeamReportGenerator {
             "COMPLETED".to_string()
         };
 
-        // Merge state-level and evidence-level techniques
         let mut all_techniques: HashSet<String> =
             state.identified_techniques.iter().cloned().collect();
         for ev in &state.evidence {
@@ -92,7 +89,6 @@ impl BlueTeamReportGenerator {
         let ttp_count = provenance.ttp_count;
         let highest_pyramid_level = provenance.highest_level;
 
-        // Assessment
         let assessment = if state.escalated {
             "**ESCALATED** - Human analyst review required".to_string()
         } else if provenance.analyst_ttp_count > 0 {
@@ -109,7 +105,6 @@ impl BlueTeamReportGenerator {
             "Limited findings - may require additional investigation".to_string()
         };
 
-        // Key findings
         let mut key_findings = Vec::new();
         if !sorted_techniques.is_empty() {
             let tech_list: Vec<&str> = sorted_techniques
@@ -165,7 +160,6 @@ impl BlueTeamReportGenerator {
         let analyst_elevation_score =
             format!("{:.1}%", provenance.analyst_elevation_score() * 100.0);
 
-        // Pyramid assessment text
         let pyramid_assessment = if provenance.total_count == 0 {
             "**No evidence collected.**".to_string()
         } else if provenance.analyst_count == 0 {
@@ -186,7 +180,6 @@ impl BlueTeamReportGenerator {
             }
         };
 
-        // Evidence levels
         let evidence_levels: Vec<BlueTeamEvidenceLevel> = (1..=6)
             .rev()
             .map(|level| {
@@ -236,7 +229,6 @@ impl BlueTeamReportGenerator {
             })
             .collect();
 
-        // Timeline
         let mut sorted_timeline: Vec<&crate::models::TimelineEvent> =
             state.timeline.iter().collect();
         sorted_timeline.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
@@ -267,7 +259,6 @@ impl BlueTeamReportGenerator {
             })
             .collect();
 
-        // Techniques table (merged state-level + evidence-level)
         let techniques: Vec<BlueTeamTechnique> = sorted_techniques
             .iter()
             .map(|tech_id| {
@@ -286,7 +277,6 @@ impl BlueTeamReportGenerator {
 
         let detection_techniques: Vec<String> = Vec::new();
 
-        // Queries
         let queries_display: Vec<&serde_json::Value> = queries.iter().take(20).collect();
         let extra_query_count = if queries.len() > 20 {
             queries.len() - 20

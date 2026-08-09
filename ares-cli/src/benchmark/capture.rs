@@ -614,7 +614,6 @@ async fn sync_loki_s3(
             ) else {
                 return false;
             };
-            // Overlap: chunk_end >= window_start AND chunk_start <= window_end
             chunk_end >= start_ms && chunk_start <= end_ms
         })
         .cloned()
@@ -674,7 +673,6 @@ async fn sync_loki_s3(
 
     let failed = results.iter().filter(|r| r.is_err()).count();
     if failed > 0 {
-        // Surface the first error but count the rest.
         let first = results.into_iter().find_map(|r| r.err()).unwrap();
         bail!(
             "{failed}/{} chunk downloads failed (first error: {first:#})",

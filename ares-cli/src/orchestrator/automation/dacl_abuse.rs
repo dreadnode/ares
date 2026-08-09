@@ -379,7 +379,6 @@ pub(crate) fn collect_dacl_work_census(
             continue;
         }
 
-        // Extract source user from vuln details
         let source_user = vuln
             .details
             .get("source")

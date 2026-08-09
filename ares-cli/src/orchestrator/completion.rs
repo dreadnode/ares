@@ -546,7 +546,6 @@ pub async fn wait_for_completion(
     let mut last_advance_at = tokio::time::Instant::now();
 
     loop {
-        // Check shutdown
         if *shutdown_rx.borrow() {
             info!("Completion monitor interrupted by shutdown");
             return;
@@ -870,7 +869,6 @@ pub async fn wait_for_completion(
             return;
         }
 
-        // Sleep until next check or shutdown
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
             _ = shutdown_rx.changed() => {
@@ -967,7 +965,6 @@ async fn auto_submit_blue_investigation(
         )
     };
 
-    // Collect attack techniques from Redis
     let techniques_key = format!("ares:op:{op_id}:techniques");
     let techniques: Vec<String> = redis::cmd("SMEMBERS")
         .arg(&techniques_key)
@@ -1079,12 +1076,10 @@ async fn auto_submit_blue_investigation(
         .expire(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS, 86400)
         .await?;
 
-    // Track investigation against operation
     let op_inv_key = format!("ares:blue:op:{op_id}:investigations");
     let _: () = conn.sadd(&op_inv_key, &inv_id).await?;
     let _: () = conn.expire(&op_inv_key, 7 * 24 * 3600).await?;
 
-    // Publish investigation request to NATS
     let nats = dispatcher
         .queue
         .nats_broker()
@@ -1443,13 +1438,11 @@ mod tests {
             &dominated,
             &dcs,
         );
-        // Child DA does not satisfy the forest root requirement
         assert_eq!(result, vec!["contoso.local"]);
     }
 
     #[test]
     fn undominated_forest_root_dominated_directly() {
-        // Dominating the forest root itself should satisfy the requirement
         let trusted = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
         dominated.insert("contoso.local".to_string());
@@ -1505,7 +1498,6 @@ mod tests {
 
     #[test]
     fn undominated_no_target_no_first_domain() {
-        // Both target_domain and first_domain are None
         let trusted = std::collections::HashMap::new();
         let dominated = HashSet::new();
         let dcs = std::collections::HashMap::new();
@@ -1525,7 +1517,6 @@ mod tests {
 
     #[test]
     fn undominated_only_first_domain() {
-        // target_domain is None but first_domain is set
         let trusted = std::collections::HashMap::new();
         let dominated = HashSet::new();
         let dcs = std::collections::HashMap::new();
@@ -1629,7 +1620,6 @@ mod tests {
 
     #[test]
     fn undominated_empty_dc_key_ignored() {
-        // Empty string DC key should be ignored
         let trusted = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
         dominated.insert("contoso.local".to_string());
@@ -2008,8 +1998,6 @@ mod tests {
             CompletionDecision::Stop("hard max runtime exceeded")
         );
     }
-
-    // tests for the blue drain wait
 
     #[test]
     fn drain_budget_must_outlast_one_investigation() {

@@ -80,7 +80,6 @@ pub fn blue_tools_for_role(role: BlueAgentRole) -> Vec<ToolDefinition> {
         }
     }
 
-    // Lateral connection tool only for lateral_analyst
     if role == BlueAgentRole::LateralAnalyst {
         tools.push(state::lateral_connection_tool_definition());
     }

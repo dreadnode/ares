@@ -188,7 +188,6 @@ impl SharedState {
                             break;
                         }
                         d += 1;
-                        // Check credentials then hashes for the parent
                         if let Some(c) = state.credentials.iter().find(|c| c.id == *pid) {
                             current_id = c.parent_id.clone();
                         } else if let Some(h2) = state.hashes.iter().find(|h2| h2.id == *pid) {

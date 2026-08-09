@@ -219,7 +219,6 @@ pub async fn asrep_roast(args: &Value) -> Result<ToolOutput> {
                 .flag("-usersfile", seclists)
                 .arg("-no-pass");
         } else {
-            // Write built-in AD usernames to a temp file
             let tmp = format!("/tmp/asrep_users_{}.txt", std::process::id());
             std::fs::write(&tmp, DEFAULT_AD_USERNAMES)?;
             cmd = cmd.arg(&target).flag("-usersfile", &tmp).arg("-no-pass");

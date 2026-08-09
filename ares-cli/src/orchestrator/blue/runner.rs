@@ -84,7 +84,6 @@ impl BlueOrchestrator {
         };
         let mut conn = conn;
 
-        // Get all active investigation IDs
         let active_ids: Vec<String> = match conn
             .smembers::<_, Vec<String>>(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS)
             .await
@@ -139,7 +138,6 @@ impl BlueOrchestrator {
                     "Investigation orphaned after orchestrator restart (was running {hours:.1}h)"
                 );
 
-                // Update status to failed
                 let updated = serde_json::json!({
                     "status": "failed",
                     "started_at": status_obj.get("started_at").unwrap_or(&serde_json::Value::Null),
@@ -149,7 +147,6 @@ impl BlueOrchestrator {
                 let data = serde_json::to_string(&updated).unwrap_or_default();
                 let _: Result<(), _> = conn.set_ex::<_, _, ()>(&status_key, &data, 86400).await;
 
-                // Remove from active set
                 let _: Result<(), _> = conn
                     .srem::<_, _, ()>(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS, inv_id)
                     .await;
@@ -175,7 +172,6 @@ impl BlueOrchestrator {
     pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
         info!("Blue team orchestrator starting");
 
-        // Clean up stale investigations from previous runs
         self.cleanup_stale_investigations().await;
 
         let mut task_queue = BlueTaskQueue::connect_with_nats(&self.redis_url, &self.nats_url)
@@ -219,13 +215,11 @@ impl BlueOrchestrator {
         let mut last_stale_check = std::time::Instant::now();
 
         loop {
-            // Check shutdown
             if *shutdown_rx.borrow() {
                 info!("Blue orchestrator: shutdown signalled");
                 break;
             }
 
-            // Poll for investigation requests
             let poll_result = tokio::select! {
                 result = task_queue.pop_investigation_request(5.0) => result,
                 _ = shutdown_rx.changed() => {
@@ -280,7 +274,6 @@ impl BlueOrchestrator {
                         "Received investigation request"
                     );
 
-                    // Register the investigation
                     if let Err(e) = task_queue
                         .register_investigation(&investigation_id, &alert, &model)
                         .await
@@ -288,7 +281,6 @@ impl BlueOrchestrator {
                         warn!(err = %e, "Failed to register investigation");
                     }
 
-                    // Run the investigation
                     let investigation = Investigation::new(
                         investigation_id.clone(),
                         alert,
@@ -406,7 +398,6 @@ impl BlueOrchestrator {
                         }
                     }
 
-                    // Clean up active investigation registration
                     let _: Result<(), _> = conn
                         .srem::<_, _, ()>(
                             ares_core::state::BLUE_ACTIVE_INVESTIGATIONS,
@@ -416,7 +407,6 @@ impl BlueOrchestrator {
                 }
                 Ok(None) => {
                     retry_delay = Duration::from_secs(1);
-                    // Periodic stale investigation cleanup
                     if last_stale_check.elapsed() >= Duration::from_secs(STALE_CHECK_INTERVAL_SECS)
                     {
                         self.cleanup_stale_investigations().await;

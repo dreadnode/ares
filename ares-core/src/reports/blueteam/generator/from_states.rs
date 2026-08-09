@@ -38,7 +38,6 @@ impl BlueTeamReportGenerator {
             return self.generate(&input);
         }
 
-        // Compute time bounds
         let started_at = states
             .iter()
             .filter_map(|s| chrono::DateTime::parse_from_rfc3339(&s.started_at).ok())
@@ -52,7 +51,6 @@ impl BlueTeamReportGenerator {
         let now = Utc::now();
         let completed_at = now.format("%Y-%m-%d %H:%M:%S UTC").to_string();
 
-        // Duration from earliest start to now
         let earliest = states
             .iter()
             .filter_map(|s| chrono::DateTime::parse_from_rfc3339(&s.started_at).ok())
@@ -67,7 +65,6 @@ impl BlueTeamReportGenerator {
             })
             .unwrap_or_else(|| "0:00:00".to_string());
 
-        // Aggregate across all investigations
         let mut all_evidence: Vec<&crate::models::Evidence> = Vec::new();
         let mut seen_evidence_ids: HashSet<&str> = HashSet::new();
         let mut all_techniques: HashSet<String> = HashSet::new();
@@ -117,7 +114,6 @@ impl BlueTeamReportGenerator {
 
         let provenance = EvidenceProvenance::from_evidence(all_evidence.iter().copied());
 
-        // Build evidence_by_level
         let mut evidence_by_level: HashMap<i32, Vec<serde_json::Value>> = HashMap::new();
         for ev in &all_evidence {
             let val = ev.value.clone();
@@ -144,7 +140,6 @@ impl BlueTeamReportGenerator {
                 }));
         }
 
-        // Build alert summaries
         let alert_summaries: Vec<serde_json::Value> = states
             .iter()
             .map(|inv| {
@@ -168,7 +163,6 @@ impl BlueTeamReportGenerator {
             })
             .collect();
 
-        // Build timeline from all investigations
         let mut all_timeline: Vec<&crate::models::TimelineEvent> = Vec::new();
         for state in states {
             all_timeline.extend(state.timeline.iter());
@@ -186,7 +180,6 @@ impl BlueTeamReportGenerator {
             })
             .collect();
 
-        // Build techniques list
         let mut sorted_techniques: Vec<String> = all_techniques.iter().cloned().collect();
         sorted_techniques.sort();
         let techniques: Vec<serde_json::Value> = sorted_techniques
@@ -221,7 +214,6 @@ impl BlueTeamReportGenerator {
         let mut sorted_users: Vec<String> = all_users.into_iter().collect();
         sorted_users.sort();
 
-        // Build investigation details
         let investigation_details: Vec<serde_json::Value> = states
             .iter()
             .map(|inv| {

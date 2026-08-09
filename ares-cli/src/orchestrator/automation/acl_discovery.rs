@@ -167,7 +167,6 @@ pub async fn auto_acl_discovery(dispatcher: Arc<Dispatcher>, mut shutdown: watch
 
     info!("auto_acl_discovery: spawned, waiting 45s for initial recon");
 
-    // Wait for initial recon to populate domain controllers.
     tokio::time::sleep(Duration::from_secs(45)).await;
 
     info!("auto_acl_discovery: initial wait complete, entering main loop");

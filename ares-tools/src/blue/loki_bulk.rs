@@ -317,7 +317,6 @@ pub async fn import_stream(
         }
     }
 
-    // Flush remaining entries
     if !batch_entries.is_empty() {
         let pushed = push_batch(client, config, &url, &mut batch_entries).await?;
         total_entries += pushed;
@@ -354,7 +353,6 @@ async fn push_batch(
         agg.values.extend(entry.values);
     }
 
-    // Build push payload
     let streams: Vec<serde_json::Value> = aggregated
         .into_values()
         .map(|agg| {
@@ -367,7 +365,6 @@ async fn push_batch(
 
     let payload = serde_json::json!({ "streams": streams });
 
-    // Compress with gzip
     let json_bytes = serde_json::to_vec(&payload).context("serialize push payload")?;
     let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
     encoder
@@ -375,7 +372,6 @@ async fn push_batch(
         .context("gzip compress push payload")?;
     let compressed = encoder.finish().context("finalize gzip compression")?;
 
-    // POST with retry
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
             let delay = RETRY_BASE_DELAY * 2u32.pow(attempt - 1);

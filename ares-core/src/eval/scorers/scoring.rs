@@ -30,7 +30,6 @@ pub enum KillChainPhase {
 /// outrank their base tactic. Returns [`None`] for an unrecognized id.
 pub(crate) fn technique_phase(technique_id: &str) -> Option<KillChainPhase> {
     use KillChainPhase::*;
-    // Domain-dominance sub-techniques take priority over their base tactic.
     if technique_id.starts_with("T1003.006") // DCSync
         || technique_id.starts_with("T1558.001") // Golden Ticket
         || technique_id.starts_with("T1078.002")

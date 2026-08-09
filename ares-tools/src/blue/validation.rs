@@ -44,7 +44,6 @@ pub fn validate_evidence(evidence_type: &str, value: &str, source: &str) -> Vali
     let mut warnings: Vec<String> = Vec::new();
     let mut valid = true;
 
-    // Check evidence_type is known
     let normalized_type = evidence_type.to_lowercase();
     if !KNOWN_EVIDENCE_TYPES.contains(&normalized_type.as_str()) {
         valid = false;
@@ -55,13 +54,11 @@ pub fn validate_evidence(evidence_type: &str, value: &str, source: &str) -> Vali
         ));
     }
 
-    // Check value is non-empty
     if value.trim().is_empty() {
         valid = false;
         warnings.push("Evidence value must not be empty".to_string());
     }
 
-    // Check value length
     if value.len() > MAX_VALUE_LENGTH {
         valid = false;
         warnings.push(format!(
@@ -71,13 +68,11 @@ pub fn validate_evidence(evidence_type: &str, value: &str, source: &str) -> Vali
         ));
     }
 
-    // Check source is non-empty
     if source.trim().is_empty() {
         valid = false;
         warnings.push("Evidence source must not be empty".to_string());
     }
 
-    // For IP-type evidence, validate IP format
     if normalized_type == "suspicious_ip"
         && !value.trim().is_empty()
         && value.parse::<IpAddr>().is_err()

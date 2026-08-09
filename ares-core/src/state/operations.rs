@@ -217,7 +217,6 @@ pub async fn finalize_operation(
     let meta_key = build_key(operation_id, KEY_META);
     let now = Utc::now().to_rfc3339();
 
-    // 1. Mark completed in meta HASH
     let completed_json = serde_json::to_string(&true).unwrap_or_default();
     let completed_at_json = serde_json::to_string(&now).unwrap_or_default();
     conn.hset::<_, _, _, ()>(&meta_key, "completed", &completed_json)
@@ -233,14 +232,11 @@ pub async fn finalize_operation(
     conn.expire::<_, ()>(&meta_key, OP_RETENTION_TTL_SECS)
         .await?;
 
-    // 2. Write status key
     set_operation_status(conn, operation_id, status).await?;
 
-    // 3. Delete the operation lock
     let lock_key = build_lock_key(operation_id);
     conn.del::<_, ()>(&lock_key).await?;
 
-    // 4. Clear ares:op:active if it points to this operation
     let active: Option<String> = conn.get("ares:op:active").await?;
     if active.as_deref() == Some(operation_id) {
         conn.del::<_, ()>("ares:op:active").await?;
@@ -395,7 +391,6 @@ pub async fn delete_operation(
     conn: &mut impl AsyncCommands,
     operation_id: &str,
 ) -> Result<usize, redis::RedisError> {
-    // Find all keys for this operation via SCAN
     let pattern = format!("{KEY_PREFIX}:{operation_id}:*");
     let mut keys = scan_keys(conn, &pattern).await?;
 

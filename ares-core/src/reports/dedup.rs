@@ -74,7 +74,6 @@ pub fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
         }
     }
 
-    // Build a set of (username, hash_value) pairs that have a domain-qualified entry.
     let qualified: HashSet<(String, String)> = result
         .iter()
         .filter(|h| !h.domain.trim().is_empty())
@@ -86,7 +85,6 @@ pub fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
         })
         .collect();
 
-    // Drop empty-domain entries that are duplicated by a domain-qualified entry.
     result.retain(|h| {
         if h.domain.trim().is_empty() {
             let key = (
@@ -157,7 +155,6 @@ pub fn dedup_users(users: &[User]) -> Vec<User> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for u in users {
-        // Only accept users from trusted parser sources
         if !u.source.is_empty() && !TRUSTED_USER_SOURCES.contains(&u.source.as_str()) {
             continue;
         }

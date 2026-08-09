@@ -914,15 +914,12 @@ fn print_attack_path(timeline_events: &[serde_json::Value]) {
 
 /// Format a timeline timestamp for display.
 fn format_timeline_timestamp(ts: &str) -> String {
-    // Try to parse as RFC3339 and reformat
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
         return dt.format("%Y-%m-%d %H:%M:%S").to_string();
     }
-    // Try common variants
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f") {
         return dt.format("%Y-%m-%d %H:%M:%S").to_string();
     }
-    // Return as-is, truncated
     if ts.len() > 23 {
         ts[..23].to_string()
     } else {
@@ -1040,7 +1037,6 @@ pub(super) fn build_domain_achievements(
 ) -> HashMap<String, DomainAchievement> {
     let mut achievements: HashMap<String, DomainAchievement> = HashMap::new();
 
-    // krbtgt hashes indicate DA for that domain
     for h in hashes {
         if h.username.eq_ignore_ascii_case("krbtgt") {
             let domain = resolve_domain_fqdn(&h.domain, &state.netbios_to_fqdn);
@@ -1055,7 +1051,6 @@ pub(super) fn build_domain_achievements(
         }
     }
 
-    // golden_ticket vulnerabilities
     for vuln in state.discovered_vulnerabilities.values() {
         if vuln.vuln_type == "golden_ticket" {
             if let Some(domain_val) = vuln.details.get("domain") {
@@ -1068,7 +1063,6 @@ pub(super) fn build_domain_achievements(
         }
     }
 
-    // Admin credentials
     for c in credentials {
         if c.is_admin {
             let domain = resolve_domain_fqdn(&c.domain, &state.netbios_to_fqdn);
@@ -1083,7 +1077,6 @@ pub(super) fn build_domain_achievements(
         }
     }
 
-    // Administrator hashes also indicate DA
     for h in hashes {
         if h.username.eq_ignore_ascii_case("administrator") {
             let domain = resolve_domain_fqdn(&h.domain, &state.netbios_to_fqdn);

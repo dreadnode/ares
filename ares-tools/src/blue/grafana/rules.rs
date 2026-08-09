@@ -356,7 +356,6 @@ pub async fn get_alerts_in_time_range(args: &Value) -> Result<ToolOutput> {
     let to_time = required_str(args, "to_time")?;
     let buffer_minutes = optional_i64(args, "buffer_minutes").unwrap_or(30);
 
-    // Parse timestamps
     let from_dt = chrono::DateTime::parse_from_rfc3339(from_time)
         .or_else(|_| chrono::DateTime::parse_from_str(from_time, "%Y-%m-%dT%H:%M:%S%.fZ"))
         .unwrap_or_else(|_| crate::blue::replay_clock::replay_now().into());
@@ -364,7 +363,6 @@ pub async fn get_alerts_in_time_range(args: &Value) -> Result<ToolOutput> {
         .or_else(|_| chrono::DateTime::parse_from_str(to_time, "%Y-%m-%dT%H:%M:%S%.fZ"))
         .unwrap_or_else(|_| crate::blue::replay_clock::replay_now().into());
 
-    // Apply buffer
     let from_buffered = from_dt - chrono::Duration::minutes(buffer_minutes);
     let to_buffered = to_dt + chrono::Duration::minutes(buffer_minutes);
 
@@ -401,7 +399,6 @@ pub async fn get_alerts_in_time_range(args: &Value) -> Result<ToolOutput> {
 
     let annotations: Vec<Value> = serde_json::from_str(&body).unwrap_or_default();
 
-    // Transform annotations to alert format with dedup
     let mut seen_fingerprints = std::collections::HashSet::new();
     let mut alerts = Vec::new();
 

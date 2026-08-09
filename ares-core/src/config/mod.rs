@@ -85,7 +85,6 @@ impl AresConfig {
     ///
     /// Same resolution order as [`from_env`].
     pub fn resolve_path() -> Result<PathBuf> {
-        // 1. Explicit env var
         if let Ok(env_path) = std::env::var("ARES_CONFIG") {
             let p = PathBuf::from(&env_path);
             if p.exists() {
@@ -94,7 +93,6 @@ impl AresConfig {
             bail!("ARES_CONFIG points to {env_path} but the file does not exist");
         }
 
-        // 2. Default search paths
         for candidate in DEFAULT_PATHS {
             let p = PathBuf::from(candidate);
             if p.exists() {

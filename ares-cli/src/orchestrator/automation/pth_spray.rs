@@ -126,7 +126,6 @@ fn collect_pth_work(state: &StateInner) -> Option<Vec<PthWork>> {
             continue;
         }
 
-        // Check if host has SMB (port 445)
         let has_smb = host.services.iter().any(|s| {
             let sl = s.to_lowercase();
             sl.contains("445") || sl.contains("smb") || sl.contains("cifs")

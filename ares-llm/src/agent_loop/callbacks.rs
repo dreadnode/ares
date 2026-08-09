@@ -226,7 +226,6 @@ pub(super) async fn handle_callback(
             return result;
         }
     }
-    // Fall back to built-in handlers
     handle_builtin_callback(call)
 }
 

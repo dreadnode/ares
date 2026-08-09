@@ -142,7 +142,6 @@ impl InvestigationStore {
     /// Store a completed investigation.
     pub fn store_investigation(&self, investigation: StoredInvestigation) {
         let mut data = self.data.lock().unwrap();
-        // Replace if exists, otherwise append
         if let Some(pos) = data
             .investigations
             .iter()

@@ -292,7 +292,6 @@ impl LlmProvider for AnthropicProvider {
         if !status.is_success() {
             let message = if let Ok(err) = serde_json::from_str::<ApiError>(&body) {
                 let msg = format!("{} — {}", err.error.error_type, err.error.message);
-                // Classify by error type
                 if err.error.error_type == "request_too_large" {
                     return Err(LlmError::ContextTooLong(msg));
                 }
@@ -315,7 +314,6 @@ impl LlmProvider for AnthropicProvider {
             LlmError::Other(anyhow::anyhow!("Failed to parse Anthropic response: {e}"))
         })?;
 
-        // Extract text and tool calls from response blocks
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
 

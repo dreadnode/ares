@@ -43,7 +43,6 @@ use super::types::{
     ToolExecResult, ToolFailureKind,
 };
 
-/// Result of dispatching a single tool call.
 struct DispatchResult {
     call_id: String,
     output: String,
@@ -63,7 +62,6 @@ struct DispatchResult {
     discoveries: Option<serde_json::Value>,
 }
 
-/// Dispatch a single external tool call.
 async fn dispatch_one(
     dispatcher: Arc<dyn ToolDispatcher>,
     role: String,
@@ -386,7 +384,6 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
             CompactionDecision::Skipped => {}
         }
 
-        // Build LLM request
         let mut request = LlmRequest::new(&config.model);
         request.system = Some(system_prompt.to_string());
         request.messages.clone_from(&messages);
@@ -421,7 +418,6 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
             }
         };
 
-        // Accumulate token usage
         total_usage.input_tokens += response.usage.input_tokens;
         total_usage.output_tokens += response.usage.output_tokens;
         total_usage.cache_creation_input_tokens += response.usage.cache_creation_input_tokens;
@@ -431,14 +427,13 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
             session_log.record_usage(steps, &response.usage);
         }
 
-        // Report incremental token usage to callback handler (persists to Redis)
+        // Persists to Redis.
         if let Some(ref handler) = callback_handler {
             handler
                 .on_token_usage(&response.usage, &config.model, role)
                 .await;
         }
 
-        // Handle based on stop reason
         match response.stop_reason {
             StopReason::EndTurn if response.tool_calls.is_empty() => {
                 let assistant_msg = ChatMessage::text(Role::Assistant, &response.content);
@@ -690,7 +685,6 @@ async fn run_agent_loop_inner(p: RunAgentLoopInnerParams<'_>) -> AgentLoopOutcom
                     messages.push(tr);
                 }
 
-                // Check if tool has exceeded max call count
                 if *tool_call_counts.get(&call.name).unwrap_or(&0) >= max_tool_calls_per_name
                     && !tools_to_remove.contains(&call.name)
                 {

@@ -83,7 +83,6 @@ pub async fn run_blue_task_loop(deps: BlueTaskLoopDeps<'_>) -> Result<()> {
                     current_task: Some(task.task_id.clone()),
                 });
 
-                // Send blue team heartbeat
                 let _ = task_queue
                     .send_heartbeat(
                         &config.agent_name,
@@ -94,7 +93,6 @@ pub async fn run_blue_task_loop(deps: BlueTaskLoopDeps<'_>) -> Result<()> {
                     )
                     .await;
 
-                // Execute the blue team task
                 let result = execute_blue_task(
                     &task,
                     role,
@@ -105,7 +103,6 @@ pub async fn run_blue_task_loop(deps: BlueTaskLoopDeps<'_>) -> Result<()> {
                 )
                 .await;
 
-                // Push result
                 if let Err(e) = task_queue.send_result(&result).await {
                     error!(
                         task_id = %task.task_id,
@@ -178,7 +175,6 @@ async fn execute_blue_task(
         "Executing blue team task"
     );
 
-    // Build tools for this role
     let tools = blue::blue_tools_for_role(role);
     let capabilities: Vec<String> = tools
         .iter()
@@ -186,7 +182,6 @@ async fn execute_blue_task(
         .map(|t| t.name.clone())
         .collect();
 
-    // Build system prompt
     let system_prompt = match ares_llm::prompt::blue::build_blue_system_prompt(
         role.as_str(),
         &capabilities,
@@ -203,7 +198,6 @@ async fn execute_blue_task(
         }
     };
 
-    // Build task prompt
     // First try to load investigation state summary (best-effort)
     let state_summary = "Investigation in progress.".to_string();
 
@@ -237,7 +231,6 @@ async fn execute_blue_task(
         ..AgentLoopConfig::default()
     };
 
-    // Run the agent loop
     let outcome = run_agent_loop(RunAgentLoopParams {
         provider,
         dispatcher,
@@ -375,7 +368,6 @@ impl ToolDispatcher for BlueLocalToolDispatcher {
     ) -> Result<ares_llm::ToolExecResult> {
         debug!(tool = %call.name, "Executing blue team tool locally");
 
-        // Check if this is a blue team HTTP tool
         if ares_tools::blue::is_blue_tool(&call.name) {
             match ares_tools::blue::dispatch_blue(&call.name, &call.arguments).await {
                 Ok(output) => {

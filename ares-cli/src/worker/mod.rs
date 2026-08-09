@@ -65,11 +65,9 @@ pub async fn run() -> anyhow::Result<()> {
     // publishes, and tool-exec request/reply over one TCP connection.
     let nats = ares_core::nats::NatsBroker::connect(&config.nats_url).await?;
 
-    // Shared shutdown signal
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let shutdown_signal = Arc::clone(&shutdown);
 
-    // Spawn background heartbeat
     let (_heartbeat_handle, status_tx) = heartbeat::spawn_heartbeat(
         conn.clone(),
         heartbeat::HeartbeatConfig {
@@ -83,11 +81,9 @@ pub async fn run() -> anyhow::Result<()> {
         Arc::clone(&shutdown),
     );
 
-    // Check tool availability for this role and publish inventory
     let inventory = tool_check::check_tools(&config.worker_role).await;
     tool_check::publish_inventory(&mut conn.clone(), &config.agent_name, &inventory).await;
 
-    // Spawn /etc/hosts sync if we have an operation ID
     let _hosts_handle = config.operation_id.as_ref().map(|op_id| {
         hosts::spawn_hosts_sync(
             conn.clone(),
@@ -97,7 +93,6 @@ pub async fn run() -> anyhow::Result<()> {
         )
     });
 
-    // Spawn SIGTERM/SIGINT handler
     let shutdown_for_signal = Arc::clone(&shutdown_signal);
     tokio::spawn(async move {
         crate::util::wait_for_shutdown_signal().await;
@@ -105,7 +100,6 @@ pub async fn run() -> anyhow::Result<()> {
         shutdown_for_signal.notify_waiters();
     });
 
-    // Run the appropriate loop based on worker mode
     let result = match config.mode {
         config::WorkerMode::Task => {
             task_loop::run_task_loop(&config, conn, nats.clone(), status_tx, shutdown_signal).await

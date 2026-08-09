@@ -46,11 +46,9 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
         }
     };
 
-    // Find operation ID
     let op_id = if let Some(id) = operation_id {
         id.to_string()
     } else {
-        // Scan for latest operation
         match find_latest_operation(&mut conn).await {
             Some(id) => id,
             None => {
@@ -64,7 +62,6 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
         }
     };
 
-    // Load red team state: credentials, techniques, targets
     let meta_key = format!("ares:op:{op_id}:meta");
     let meta_exists: bool = redis::AsyncCommands::exists(&mut conn, &meta_key)
         .await
@@ -437,13 +434,11 @@ async fn load_op_collections(
         .unwrap_or_default();
     let hosts: std::collections::HashSet<String> = hosts_list.into_iter().collect();
 
-    // Loot/techniques
     let loot_key = format!("ares:op:{op_id}:loot");
     let loot: Vec<String> = redis::AsyncCommands::lrange(conn, &loot_key, 0, -1)
         .await
         .unwrap_or_default();
 
-    // Operation metadata
     let meta_key = format!("ares:op:{op_id}:meta");
     let meta: HashMap<String, String> = redis::AsyncCommands::hgetall(conn, &meta_key)
         .await

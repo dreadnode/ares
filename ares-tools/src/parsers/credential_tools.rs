@@ -463,7 +463,6 @@ pub fn parse_spray_success(output: &str, params: &Value) -> Vec<Value> {
 
 /// Parse NTDS.DIT extraction output — identical format to secretsdump.
 pub fn parse_ntds_dit(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) {
-    // NTDS.DIT output uses the same format as secretsdump
     super::parse_secretsdump(output, params)
 }
 
@@ -507,7 +506,6 @@ pub fn parse_ldap_descriptions(output: &str, params: &Value) -> Vec<Value> {
                 .trim_end_matches(')')
                 .to_string();
 
-            // Try to extract username from the line
             // netexec format: "SMB ... DC01  username  Description with Password: xxx"
             let username = extract_username_from_description_line(line);
             if let Some(username) = username {

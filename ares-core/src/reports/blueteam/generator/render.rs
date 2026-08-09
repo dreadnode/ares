@@ -38,7 +38,6 @@ impl BlueTeamReportGenerator {
         .into_iter()
         .collect();
 
-        // Build pyramid entries (6 down to 1)
         let pyramid_entries: Vec<PyramidEntry> = (1..=6)
             .rev()
             .map(|level| {
@@ -55,7 +54,6 @@ impl BlueTeamReportGenerator {
             })
             .collect();
 
-        // Build evidence levels
         let evidence_levels: Vec<BlueTeamEvidenceLevel> = (1..=6)
             .rev()
             .map(|level| {
@@ -121,7 +119,6 @@ impl BlueTeamReportGenerator {
             })
             .collect();
 
-        // Build alert summaries for template
         let alert_summaries: Vec<BlueTeamAlertSummary> = input
             .alert_summaries
             .iter()
@@ -182,7 +179,6 @@ impl BlueTeamReportGenerator {
             })
             .collect();
 
-        // Build timeline for template
         let timeline: Vec<TimelineEventCtx> = input
             .timeline
             .iter()
@@ -226,7 +222,6 @@ impl BlueTeamReportGenerator {
             })
             .collect();
 
-        // Build techniques for template
         let techniques: Vec<BlueTeamTechnique> = input
             .techniques
             .iter()
@@ -268,7 +263,6 @@ impl BlueTeamReportGenerator {
             })
             .unwrap_or_default();
 
-        // Build investigation details
         let investigation_details: Vec<BlueTeamInvestigationDetail> = input
             .investigation_details
             .iter()

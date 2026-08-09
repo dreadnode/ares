@@ -159,7 +159,6 @@ pub async fn run_investigation(
         None
     };
 
-    // Build the orchestrator system prompt
     let role = BlueAgentRole::Orchestrator;
     let tools = ares_llm::tool_registry::blue::blue_tools_for_role(role);
     let capabilities: Vec<String> = tools
@@ -183,7 +182,6 @@ pub async fn run_investigation(
     )
     .context("Failed to build blue orchestrator system prompt")?;
 
-    // Build the task prompt with alert context using the initial alert prompt template
     let mut task_prompt = ares_llm::prompt::blue::build_initial_alert_prompt(
         &investigation.investigation_id,
         &investigation.alert,
@@ -249,7 +247,6 @@ pub async fn run_investigation(
     let sweep_refresh =
         super::sweep::spawn_sweep_refresh(investigation.investigation_id.clone(), attack_start);
 
-    // Run the orchestrator agent loop
     let outcome = run_agent_loop(RunAgentLoopParams {
         provider: provider.as_ref(),
         dispatcher,
@@ -362,7 +359,6 @@ pub async fn run_investigation(
         super::sweep::recheck_silver_tickets(&investigation.investigation_id),
     );
 
-    // Score investigation against red team ground truth
     if let Some(op_id) = &investigation.operation_id {
         score_against_ground_truth(
             conn,
@@ -374,7 +370,6 @@ pub async fn run_investigation(
         .await;
     }
 
-    // Update investigation status
     let final_status = match &investigation_outcome {
         InvestigationOutcome::Completed { verdict, steps } => {
             info!(
@@ -422,7 +417,6 @@ pub async fn run_investigation(
             .ok();
     }
 
-    // Release investigation lock
     investigation.state_writer.release_lock(conn).await.ok();
 
     // Auto-generate investigation report

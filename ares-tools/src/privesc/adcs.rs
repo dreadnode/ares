@@ -786,7 +786,6 @@ pub async fn certipy_account_update(args: &Value) -> Result<ToolOutput> {
 pub async fn certipy_esc4_full_chain(args: &Value) -> Result<ToolOutput> {
     let template_output = certipy_template_esc4(args).await?;
 
-    // Generate a unique output name for the PFX and inject into args
     let template = args
         .get("template")
         .and_then(|v| v.as_str())

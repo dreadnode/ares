@@ -87,7 +87,6 @@ pub(crate) fn normalize_state_domains(
             if indices.len() == 1 {
                 let i = indices[0];
                 keep[i] = true;
-                // Correct domain if user exists in exactly one domain
                 if let Some(ds) = domains_for_user {
                     if ds.len() == 1 {
                         let correct = ds.iter().next().unwrap().clone();
@@ -108,7 +107,6 @@ pub(crate) fn normalize_state_domains(
                     }
                     Some(ds) if ds.len() == 1 => {
                         let correct = ds.iter().next().unwrap();
-                        // Keep only matching credential, or correct the best one
                         let matching = indices
                             .iter()
                             .find(|&&i| credentials[i].domain.to_lowercase() == *correct);
@@ -124,7 +122,6 @@ pub(crate) fn normalize_state_domains(
                         }
                     }
                     Some(ds) => {
-                        // Keep only creds whose domain matches a known user domain
                         for &i in indices {
                             if ds.contains(&credentials[i].domain.to_lowercase()) {
                                 keep[i] = true;

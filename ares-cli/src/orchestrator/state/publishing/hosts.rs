@@ -165,7 +165,6 @@ impl SharedState {
                     }
                 });
             if let Some(existing) = existing_idx.map(|i| &mut state.hosts[i]) {
-                // Merge IP if incoming has one and existing doesn't
                 if !host.ip.is_empty() && existing.ip.is_empty() {
                     existing.ip = host.ip.clone();
                 }

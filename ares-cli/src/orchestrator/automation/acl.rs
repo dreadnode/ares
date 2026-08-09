@@ -296,7 +296,6 @@ pub(crate) fn collect_acl_chain_work_census(
         for (step_idx, step) in steps.iter().enumerate() {
             let dedup_key = acl_step_key(chain, chain_idx, step_idx);
 
-            // Skip already dispatched steps
             if state.dispatched_acl_steps.contains(&dedup_key) {
                 census.already_dispatched += 1;
                 continue;
@@ -315,7 +314,6 @@ pub(crate) fn collect_acl_chain_work_census(
                 continue;
             }
 
-            // Get the source user for this step
             let source_user = extract_source_user(step);
             let source_domain = extract_source_domain(step);
 
@@ -437,7 +435,6 @@ pub async fn auto_acl_chain_follow(
             last_census = Some(census);
         }
 
-        // Dispatch each collected step
         for AclStepWork {
             dedup_key,
             vuln_id,

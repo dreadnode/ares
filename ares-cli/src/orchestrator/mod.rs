@@ -317,7 +317,6 @@ async fn run_inner() -> Result<()> {
             let domain = config.target_domain.to_lowercase();
             if !state.domains.contains(&domain) {
                 state.domains.push(domain.clone());
-                // Also persist to Redis
                 let domain_key = format!("ares:op:{}:domains", state.operation_id);
                 let mut conn = queue.connection();
                 let _: Result<(), _> =
@@ -762,14 +761,12 @@ async fn run_inner() -> Result<()> {
     let probe_handle =
         state::domain_probe::spawn_domain_probe_worker(probe_ctx, shutdown_rx.clone());
 
-    // Exploitation workflow
     let exploit_disp = dispatcher.clone();
     let exploit_shutdown = shutdown_rx.clone();
     let exploit_handle = tokio::spawn(async move {
         exploitation::exploitation_workflow(exploit_disp, exploit_shutdown).await
     });
 
-    // Discovery poller
     let disc_disp = dispatcher.clone();
     let disc_shutdown = shutdown_rx.clone();
     let disc_handle =
@@ -777,7 +774,6 @@ async fn run_inner() -> Result<()> {
             async move { result_processing::discovery_poller(disc_disp, disc_shutdown).await },
         );
 
-    // State refresh
     let refresh_disp = dispatcher.clone();
     let refresh_shutdown = shutdown_rx.clone();
     let refresh_handle =
@@ -1023,7 +1019,6 @@ async fn run_inner() -> Result<()> {
 
     loop {
         tokio::select! {
-            // Process completed task results
             result = result_rx.recv() => {
                 match result {
                     Some(completed) => {
@@ -1516,7 +1511,6 @@ async fn run_blue_only() -> Result<()> {
         shutdown_rx,
     );
 
-    // Wait for shutdown signal
     crate::util::wait_for_shutdown_signal().await;
     info!("Shutdown signal received");
     let _ = shutdown_tx.send(true);

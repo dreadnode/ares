@@ -353,7 +353,6 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
         ));
     }
 
-    // Check cache for identical query
     let key = cache_key(logql, start_time, end_time);
     {
         let cache = query_cache().lock().await;
@@ -459,7 +458,6 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
             }
             let output = make_output(&formatted);
 
-            // Cache the result
             let mut cache = query_cache().lock().await;
             if cache.len() >= QUERY_CACHE_MAX {
                 let now = std::time::Instant::now();
@@ -487,7 +485,6 @@ pub async fn query_logs(args: &Value) -> Result<ToolOutput> {
         return Ok(make_error(&format!("Loki returned {status}: {body}")));
     }
 
-    // All retries exhausted
     let err_msg = last_err.unwrap_or_else(|| "Unknown error".to_string());
     Ok(make_error(&format!(
         "Loki query failed after {attempts_made} attempt(s): {err_msg}"

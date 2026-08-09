@@ -40,7 +40,6 @@ pub(super) fn print_loot_json(
         .filter(|h| is_reportable_hash(h))
         .collect();
 
-    // Build forest structure
     let mut all_domains: Vec<String> = domains
         .iter()
         .map(|d| d.trim().trim_end_matches('.').to_lowercase())

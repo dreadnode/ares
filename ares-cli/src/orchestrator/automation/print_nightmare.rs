@@ -34,7 +34,6 @@ fn collect_print_nightmare_work(
     for host in &state.hosts {
         let ip = &host.ip;
 
-        // Skip if we already tried PrintNightmare on this host
         if state.is_processed(DEDUP_PRINTNIGHTMARE, ip) {
             continue;
         }

@@ -39,7 +39,6 @@ pub fn parse_secretsdump(output: &str) -> Vec<ParsedHash> {
             let lm_hash = caps[4].to_lowercase();
             let nt_hash = caps[5].to_lowercase();
 
-            // Skip empty password hashes
             if nt_hash == EMPTY_NT_HASH {
                 continue;
             }

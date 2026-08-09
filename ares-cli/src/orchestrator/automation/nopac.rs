@@ -31,7 +31,6 @@ fn collect_nopac_work(state: &StateInner) -> Vec<NopacWork> {
             continue;
         }
 
-        // Find a credential for this domain
         let cred = match state
             .credentials
             .iter()

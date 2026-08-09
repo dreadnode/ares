@@ -600,7 +600,6 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
         let line = line.trim_end();
 
         if line.starts_with("dn: ") || (line.is_empty() && has_identity(&current)) {
-            // Flush current
             if let Some(field) = pending_b64.take() {
                 flush_b64(&mut current, field, &mut ntsd_buf);
             }
@@ -667,7 +666,6 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
             current.gmsa_membership_base64 = val.trim().to_string();
         }
     }
-    // Flush last object
     if let Some(field) = pending_b64.take() {
         flush_b64(&mut current, field, &mut ntsd_buf);
     }
@@ -675,7 +673,6 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
         objects.push(current);
     }
 
-    // Build SID map
     for obj in &objects {
         if !obj.object_sid.is_empty() && !obj.sam_account_name.is_empty() {
             sid_to_name.insert(obj.object_sid.clone(), obj.sam_account_name.clone());
@@ -694,7 +691,6 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
 
         let aces = parse_security_descriptor(&sd_bytes);
         for (trustee_sid, vuln_type) in &aces {
-            // Resolve trustee SID to name
             let source_name = sid_to_name
                 .get(trustee_sid)
                 .map(|s| s.as_str())
@@ -917,7 +913,6 @@ pub fn parse_acl_enumeration(output: &str, params: &Value) -> Vec<Value> {
 
 /// Simple base64 decoder (no external dependency).
 fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
-    // Strip whitespace
     let clean: String = input.chars().filter(|c| !c.is_whitespace()).collect();
     if clean.is_empty() {
         return Ok(Vec::new());

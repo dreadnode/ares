@@ -28,7 +28,6 @@ pub fn extract_target_info(arguments: &serde_json::Value) -> ToolTargetInfo {
         return info;
     };
 
-    // Extract IP — sanitize multi-token values first
     for key in &["target_ip", "target", "host", "ip"] {
         if let Some(val) = obj.get(*key).and_then(|v| v.as_str()) {
             let sanitized = first_token(val);
@@ -39,7 +38,6 @@ pub fn extract_target_info(arguments: &serde_json::Value) -> ToolTargetInfo {
         }
     }
 
-    // Extract FQDN — sanitize multi-token values first
     for key in &["target_fqdn", "target", "host", "hostname"] {
         if let Some(val) = obj.get(*key).and_then(|v| v.as_str()) {
             let sanitized = first_token(val);
@@ -50,7 +48,6 @@ pub fn extract_target_info(arguments: &serde_json::Value) -> ToolTargetInfo {
         }
     }
 
-    // Extract username
     for key in &["username", "user", "target_user"] {
         if let Some(val) = obj.get(*key).and_then(|v| v.as_str()) {
             if !val.is_empty() {
@@ -71,7 +68,6 @@ pub fn extract_target_info(arguments: &serde_json::Value) -> ToolTargetInfo {
 /// - `ws*`, `pc*`, `desktop*`, `laptop*`, `client*` prefix -> `"workstation"`
 /// - anything else -> `"server"`
 pub fn infer_target_type(host: &str) -> &'static str {
-    // Extract the first label (hostname part) from FQDN
     let hostname = host.split('.').next().unwrap_or(host).to_lowercase();
 
     if hostname.starts_with("dc") {
@@ -103,11 +99,9 @@ pub fn infer_target_type(host: &str) -> &'static str {
 
 /// Infer target type, falling back to `"user"` when only a username is present.
 pub fn infer_target_type_from_info(info: &ToolTargetInfo) -> Option<&'static str> {
-    // Prefer hostname-based inference
     if let Some(ref fqdn) = info.target_fqdn {
         return Some(infer_target_type(fqdn));
     }
-    // If we only have a user, it's a user-targeted attack
     if info.target_user.is_some() {
         return Some("user");
     }

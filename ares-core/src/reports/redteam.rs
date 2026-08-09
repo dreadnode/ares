@@ -63,7 +63,6 @@ impl RedTeamReportGenerator {
 
         let executive_summary = generate_executive_summary(state, &unique_users, &unique_creds);
 
-        // Collect all MITRE techniques
         let mut all_techniques: HashSet<String> = techniques.iter().cloned().collect();
         for event in timeline_events {
             if let Some(arr) = event.get("mitre_techniques").and_then(|v| v.as_array()) {
@@ -80,7 +79,6 @@ impl RedTeamReportGenerator {
             .collect();
         techniques_enriched.sort();
 
-        // Build vulnerability context
         let mut discovered_vulns: Vec<VulnCtx> = state
             .discovered_vulnerabilities
             .iter()
@@ -95,7 +93,6 @@ impl RedTeamReportGenerator {
             .collect();
         discovered_vulns.sort_by_key(|v| v.priority);
 
-        // Build timeline context
         let timeline: Vec<TimelineEventCtx> = timeline_events
             .iter()
             .map(timeline_event_from_json)
@@ -210,7 +207,6 @@ impl RedTeamReportGenerator {
             .filter(|h| h.is_dc || h.detect_dc())
             .count();
 
-        // Collect all MITRE techniques
         let mut all_techniques: HashSet<String> = techniques.iter().cloned().collect();
         for event in timeline_events {
             if let Some(arr) = event.get("mitre_techniques").and_then(|v| v.as_array()) {
@@ -227,7 +223,6 @@ impl RedTeamReportGenerator {
             .collect();
         techniques_enriched.sort();
 
-        // Vulnerability context
         let mut discovered_vulns: Vec<VulnCtx> = state
             .discovered_vulnerabilities
             .iter()
@@ -242,13 +237,11 @@ impl RedTeamReportGenerator {
             .collect();
         discovered_vulns.sort_by_key(|v| v.priority);
 
-        // Timeline
         let timeline: Vec<TimelineEventCtx> = timeline_events
             .iter()
             .map(timeline_event_from_json)
             .collect();
 
-        // Domains sorted, deduped, lowercased
         let mut domains: Vec<String> = state
             .all_domains
             .iter()
@@ -374,7 +367,6 @@ impl RedTeamReportGenerator {
                 "Not Generated"
             },
         );
-        // Build the credential chain to DA from parent_id lineage
         let da_chain = state.build_domain_admin_chain();
         let da_path_from_chain = SharedRedTeamState::format_attack_chain(&da_chain);
         // Use the chain-derived path if the explicit path isn't set
@@ -466,7 +458,6 @@ pub(crate) fn generate_executive_summary(
 
     let mut summary_parts = Vec::new();
 
-    // Operation overview
     let target_ips = if !state.target_ips.is_empty() {
         state.target_ips.clone()
     } else if let Some(ref t) = state.target {
@@ -496,7 +487,6 @@ pub(crate) fn generate_executive_summary(
         state.operation_id
     ));
 
-    // Key achievements
     let mut achievements = Vec::new();
     if state.has_domain_admin {
         achievements.push("\u{2713} **Domain Administrator access achieved**".to_string());
@@ -522,7 +512,6 @@ pub(crate) fn generate_executive_summary(
         ));
     }
 
-    // Discovery statistics
     summary_parts.push(format!(
         "\n\n**Discovery Statistics:**\n\
          - Hosts Discovered: {host_count}\n\
@@ -536,7 +525,6 @@ pub(crate) fn generate_executive_summary(
         state.all_hashes.len(),
     ));
 
-    // Attack path
     if state.has_domain_admin || state.has_golden_ticket {
         if let Some(ref path) = state.domain_admin_path {
             summary_parts.push(format!("\n\n**Attack Path:**\n{path}"));
@@ -548,7 +536,6 @@ pub(crate) fn generate_executive_summary(
         }
     }
 
-    // Security posture
     let (posture, assessment) = if state.has_domain_admin || state.has_golden_ticket {
         (
             "**CRITICAL**",

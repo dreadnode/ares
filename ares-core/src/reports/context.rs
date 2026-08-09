@@ -33,17 +33,14 @@ impl From<&Host> for HostCtx {
         let mut services = Vec::new();
         for svc in &h.services {
             let svc_trimmed = svc.trim();
-            // Skip non-service entries
             if NON_SERVICE_ENTRIES
                 .iter()
                 .any(|ns| svc_trimmed.eq_ignore_ascii_case(ns))
             {
                 continue;
             }
-            // Normalize: strip trailing `?` inside parens for dedup key
             let key = svc_trimmed.replace("?)", ")").to_lowercase();
             if seen_ports.insert(key) {
-                // Prefer the non-`?` variant; strip the `?` from display too
                 services.push(svc_trimmed.replace("?)", ")").replace("?", ""));
             }
         }

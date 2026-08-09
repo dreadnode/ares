@@ -525,7 +525,6 @@ impl Dispatcher {
             }
         }
 
-        // Set initial task status with full metadata
         let _ = self
             .queue
             .set_task_status_full(
@@ -598,10 +597,8 @@ impl Dispatcher {
             // Token usage is now recorded incrementally per-LLM-call via
             // CallbackHandler::on_token_usage — no batch recording needed here.
 
-            // Convert outcome to TaskResult and push to result queue
             let mut result = match outcome {
                 Ok(outcome) => {
-                    // Merge all structured discoveries from tool results
                     let merged_discoveries = if outcome.discoveries.is_empty() {
                         None
                     } else {

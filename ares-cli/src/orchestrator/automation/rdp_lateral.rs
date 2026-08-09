@@ -118,7 +118,6 @@ fn collect_rdp_work(state: &crate::orchestrator::state::StateInner) -> Vec<RdpWo
             continue;
         }
 
-        // Infer domain from hostname
         let domain = host
             .hostname
             .find('.')

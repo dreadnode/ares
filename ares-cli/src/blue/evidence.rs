@@ -43,7 +43,6 @@ pub(crate) async fn blue_evidence(
     println!("Total items: {}", evidence_items.len());
     println!("{}", "-".repeat(60));
 
-    // Group by type
     let mut by_type: HashMap<String, Vec<&serde_json::Value>> = HashMap::new();
     for item in &evidence_items {
         let ev_type = item

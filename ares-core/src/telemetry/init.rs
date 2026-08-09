@@ -88,7 +88,6 @@ pub fn init_telemetry(config: TelemetryConfig) -> TelemetryGuard {
         .with_file(false)
         .with_line_number(false);
 
-    // Try to set up OTLP exporter if endpoint is configured.
     let otel = try_init_otel_provider(&config.service_name);
 
     match otel {

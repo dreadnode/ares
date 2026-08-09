@@ -1110,7 +1110,6 @@ impl SharedRedTeamState {
     /// Finds the krbtgt NTLM hash and walks its `parent_id` chain backward.
     /// Returns an empty vec if no krbtgt hash exists or DA was not achieved.
     pub fn build_domain_admin_chain(&self) -> Vec<AttackChainStep> {
-        // Find the krbtgt hash (the DA indicator)
         let krbtgt = self.all_hashes.iter().find(|h| {
             h.username.eq_ignore_ascii_case("krbtgt") && h.hash_type.to_lowercase().contains("ntlm")
         });

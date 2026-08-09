@@ -280,7 +280,6 @@ pub fn plan_task_result(
 pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
     let payload = result.result.as_ref()?;
 
-    // Check users_investigated array for critical user names.
     if let Some(users) = payload.get("users_investigated").and_then(|v| v.as_array()) {
         for user in users {
             if let Some(name) = user.as_str() {
@@ -293,7 +292,6 @@ pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
         }
     }
 
-    // Check evidence_highlights for critical user mentions.
     if let Some(highlights) = payload
         .get("evidence_highlights")
         .and_then(|v| v.as_array())
@@ -310,7 +308,6 @@ pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
         }
     }
 
-    // Check for high-severity indicators in the result.
     if let Some(severity) = payload.get("severity").and_then(|v| v.as_str()) {
         let sev_lower = severity.to_lowercase();
         if sev_lower == "critical" || sev_lower == "high" {
@@ -318,7 +315,6 @@ pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
         }
     }
 
-    // Check findings text for critical user mentions.
     if let Some(findings) = payload.get("findings").and_then(|v| v.as_str()) {
         let lower = findings.to_lowercase();
         for &critical in CRITICAL_USERS.iter() {
@@ -340,7 +336,6 @@ pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
 fn extract_evidence_types(payload: &Value) -> Vec<String> {
     let mut types = Vec::new();
 
-    // Direct evidence_types array
     if let Some(arr) = payload.get("evidence_types").and_then(|v| v.as_array()) {
         for item in arr {
             if let Some(s) = item.as_str() {
@@ -349,7 +344,6 @@ fn extract_evidence_types(payload: &Value) -> Vec<String> {
         }
     }
 
-    // Evidence objects with a "type" field
     if let Some(arr) = payload.get("evidence").and_then(|v| v.as_array()) {
         for item in arr {
             if let Some(ev_type) = item.get("type").and_then(|v| v.as_str()) {
@@ -358,7 +352,6 @@ fn extract_evidence_types(payload: &Value) -> Vec<String> {
         }
     }
 
-    // MITRE technique mapping
     if let Some(arr) = payload.get("techniques_found").and_then(|v| v.as_array()) {
         for tech in arr {
             if let Some(tech_str) = tech.as_str() {

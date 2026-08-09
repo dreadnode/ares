@@ -71,7 +71,6 @@ fn is_motd_line(line: &str) -> bool {
         return false;
     }
 
-    // Pure box-drawing lines (all chars are box-drawing or whitespace)
     if trimmed
         .chars()
         .all(|c| BOX_CHARS.contains(&c) || c.is_whitespace())
@@ -79,7 +78,7 @@ fn is_motd_line(line: &str) -> bool {
         return true;
     }
 
-    // Lines that start and end with box-drawing chars (banner frames with text inside)
+    // Banner frames with text inside (box-drawing chars at both ends)
     let chars: Vec<char> = trimmed.chars().collect();
     if chars.len() >= 2
         && BOX_CHARS.contains(&chars[0])
@@ -128,7 +127,7 @@ pub fn filter_output(raw: &str) -> String {
                 .take_while(|l| !SECTION_HEADER_RE.is_match(l))
                 .any(|l| !l.trim().is_empty());
             if !has_body {
-                continue; // skip this empty header
+                continue;
             }
         }
         result_lines.push(line);

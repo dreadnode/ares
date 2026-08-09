@@ -372,7 +372,6 @@ pub async fn smbclient_spider(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await?;
 
-    // Append downloaded file contents
     let extra = read_spider_downloads(target).await;
     if !extra.is_empty() {
         output.stdout.push_str(&extra);
@@ -397,7 +396,6 @@ async fn read_spider_downloads(target: &str) -> String {
         extra.push_str(&meta);
     }
 
-    // Walk the download directory and include text file contents
     if tokio::fs::metadata(&spider_dir).await.is_err() {
         return extra;
     }

@@ -369,7 +369,6 @@ async fn run_replay_inner(
 
     let effective_model = resolve_model(&p.model);
     let mut env_vars = collect_env_vars(BLUE_ENV_VAR_NAMES);
-    // Ensure LOKI_URL points to the replay EC2
     env_vars.insert("LOKI_URL".to_string(), loki_url.to_string());
 
     let nats = NatsBroker::connect_from_env()

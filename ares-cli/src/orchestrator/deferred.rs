@@ -836,7 +836,6 @@ pub fn spawn_deferred_processor(
                 }
             }
 
-            // Evict stale tasks first
             if let Err(e) = deferred.evict_stale().await {
                 warn!(err = %e, "Deferred eviction error");
             }

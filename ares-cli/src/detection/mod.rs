@@ -40,14 +40,12 @@ pub(crate) async fn ops_export_detection(
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create output directory: {dir}"))?;
 
-        // Save JSON
         let json_path = format!("{dir}/detection_playbook.json");
         let json = serde_json::to_string_pretty(&detection_playbook)?;
         std::fs::write(&json_path, &json)
             .with_context(|| format!("Failed to write JSON playbook to {json_path}"))?;
         println!("Detection playbook (JSON) saved to {json_path}");
 
-        // Save Markdown
         if markdown_output {
             let md_path = format!("{dir}/detection_playbook.md");
             let md = markdown::generate_detection_markdown(&detection_playbook);
@@ -56,7 +54,6 @@ pub(crate) async fn ops_export_detection(
             println!("Detection playbook (Markdown) saved to {md_path}");
         }
 
-        // Console summary
         println!();
         println!("Detection Playbook Summary");
         println!("  Operation:    {}", detection_playbook.operation_id);
@@ -87,7 +84,6 @@ pub(crate) async fn ops_export_detection(
         );
         println!();
 
-        // Show top 5 priority queries
         if !detection_playbook.priority_queries.is_empty() {
             println!("Top Priority Queries:");
             for (i, q) in detection_playbook

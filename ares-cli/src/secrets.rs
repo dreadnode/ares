@@ -177,7 +177,6 @@ pub(crate) fn load_secrets_manager_secrets(
 ///
 /// Only fetches secrets that are not already set in the environment.
 pub(crate) fn load_1password_secrets() -> Result<usize> {
-    // Check that `op` is available
     let check = std::process::Command::new("op").arg("--version").output();
 
     match check {
@@ -192,7 +191,6 @@ pub(crate) fn load_1password_secrets() -> Result<usize> {
 
     let mut count = 0;
     for (env_var, item_name, field_name) in OP_SECRETS {
-        // Skip if already set
         if std::env::var(env_var).is_ok() {
             debug!("1password: skipping {env_var} (already set)");
             continue;

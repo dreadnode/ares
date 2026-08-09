@@ -1072,7 +1072,6 @@ pub async fn crack_with_john(args: &Value) -> Result<ToolOutput> {
     // needs no session.
     let session_arg = format!("--session={}", next_crack_session("jtr"));
 
-    // Build wordlist order
     let wordlists: Vec<&str> = if let Some(wl) = explicit_wordlist {
         vec![wl]
     } else {
@@ -1083,7 +1082,6 @@ pub async fn crack_with_john(args: &Value) -> Result<ToolOutput> {
             .collect()
     };
 
-    // Optional dynamic wordlist
     let dynamic_file = if use_dynamic {
         let usernames: Vec<&str> = args
             .get("known_usernames")
@@ -1142,7 +1140,6 @@ pub async fn crack_with_john(args: &Value) -> Result<ToolOutput> {
         }
     }
 
-    // Try each wordlist
     for wordlist in &wordlists {
         let timeout_secs = (per_list_secs + 60) as u64;
         let mut cmd = CommandBuilder::new("john")
@@ -1159,7 +1156,6 @@ pub async fn crack_with_john(args: &Value) -> Result<ToolOutput> {
         }
     }
 
-    // Run `john --show` to get the cracked results.
     let mut show_cmd = CommandBuilder::new("john").arg("--show").arg(&hash_path);
     if let Some(ref fa) = format_arg {
         show_cmd = show_cmd.arg(fa);

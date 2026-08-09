@@ -86,7 +86,6 @@ impl RedBlueCorrelator {
         let content = std::fs::read_to_string(report_path)?;
         let mut activities = Vec::new();
 
-        // Extract operation ID
         let op_id_re = Regex::new(r"\*\*Operation ID\*\*:\s*(\S+)")?;
         let operation_id = op_id_re
             .captures(&content)
@@ -94,14 +93,12 @@ impl RedBlueCorrelator {
             .map(|m| m.as_str().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Extract target IP
         let target_ip_re = Regex::new(r"\*\*Target\*\*:\s*(\d+\.\d+\.\d+\.\d+)")?;
         let target_ip = target_ip_re
             .captures(&content)
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string());
 
-        // Extract start time
         let started_re = Regex::new(r"\*\*Started\*\*:\s*(.+?)(?:\n|$)")?;
         let started_at = started_re
             .captures(&content)
@@ -113,7 +110,6 @@ impl RedBlueCorrelator {
             .map(|dt| dt.and_utc())
             .unwrap_or_else(Utc::now);
 
-        // Parse hosts section
         let hosts_re = Regex::new(r"### Hosts \((\d+)\)([\s\S]*?)(?:###|\z)")?;
         if let Some(hosts_cap) = hosts_re.captures(&content) {
             if let Ok(host_count) = hosts_cap[1].parse::<u32>() {
@@ -136,7 +132,6 @@ impl RedBlueCorrelator {
             }
         }
 
-        // Parse credentials section
         let creds_re = Regex::new(r"### Credentials \(\d+\)([\s\S]*?)(?:###|\z)")?;
         if let Some(creds_cap) = creds_re.captures(&content) {
             let creds_content = &creds_cap[1];
@@ -172,7 +167,6 @@ impl RedBlueCorrelator {
             }
         }
 
-        // Parse timeline section
         let timeline_re = Regex::new(r"### Timeline of Key Events([\s\S]*?)(?:---|\z)")?;
         if let Some(timeline_cap) = timeline_re.captures(&content) {
             let timeline_content = &timeline_cap[1];
@@ -205,7 +199,6 @@ impl RedBlueCorrelator {
             acts.iter().any(|a| a.technique_id.as_deref() == Some(id))
         };
 
-        // Domain Admin access
         if !already_timelined(&activities, "T1078.002")
             && (content.contains("Domain Admin Access**: ✓")
                 || content.to_lowercase().contains("has_domain_admin: true"))
@@ -226,7 +219,6 @@ impl RedBlueCorrelator {
             });
         }
 
-        // Golden Ticket
         if !already_timelined(&activities, "T1558.001")
             && (content.contains("Golden Ticket**: ✓")
                 || content.to_lowercase().contains("has_golden_ticket: true"))
@@ -268,7 +260,6 @@ impl RedBlueCorrelator {
     ) -> anyhow::Result<Vec<BlueTeamDetection>> {
         let content = std::fs::read_to_string(report_path)?;
 
-        // Skip DatasourceNoData reports
         if report_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -297,7 +288,6 @@ impl RedBlueCorrelator {
             .map(|m| m.as_str().trim().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Parse timestamp from startsAt or filename
         let starts_at_re = Regex::new(r#""startsAt":\s*"([^"]+)""#)?;
         let timestamp = if let Some(ts_cap) = starts_at_re.captures(&content) {
             DateTime::parse_from_rfc3339(&ts_cap[1].replace('Z', "+00:00"))
@@ -483,7 +473,6 @@ impl RedBlueCorrelator {
 
         let time_window_secs = self.time_window.num_seconds() as f64;
 
-        // Match activities to detections
         for red_activity in &red_sorted {
             let mut best_match: Option<CorrelationMatch> = None;
             let mut best_confidence = 0.0_f64;
@@ -518,7 +507,6 @@ impl RedBlueCorrelator {
                 if target_match {
                     confidence += 0.3;
                 }
-                // Time proximity bonus
                 let time_bonus = if synthetic_ts {
                     0.0
                 } else {
@@ -548,7 +536,6 @@ impl RedBlueCorrelator {
             }
         }
 
-        // Identify detection gaps
         let gaps: Vec<DetectionGap> = red_activities
             .iter()
             .filter(|a| !matched_red_keys.contains(&a.key()))
@@ -742,7 +729,6 @@ impl RedBlueCorrelator {
         for (operation_id, activities) in &red_reports {
             let report = self.correlate(activities, &blue_detections, operation_id);
 
-            // Save markdown report under {op_id}/ subdirectory
             let markdown = Self::generate_report_markdown(&report);
             let op_dir = self.reports_dir.join(operation_id);
             std::fs::create_dir_all(&op_dir)?;
@@ -1128,7 +1114,6 @@ mod tests {
         )];
         let correlator = RedBlueCorrelator::new("/tmp/test", None);
         let report = correlator.correlate(&red, &blue, "op-1");
-        // One match out of two activities
         assert_eq!(report.matched_activities, 1);
         assert!((report.detection_rate - 0.5).abs() < 0.001);
     }

@@ -245,7 +245,6 @@ impl SharedState {
             }
         }
 
-        // Apply strategy weight override if provided
         if let Some(strategy_cfg) = strategy {
             let effective = strategy_cfg.effective_priority(&vuln.vuln_type);
             if effective != vuln.priority {
@@ -393,7 +392,6 @@ impl SharedState {
         let task_id = task.task_id.clone();
         let json = serde_json::to_string(&task).unwrap_or_default();
 
-        // Persist to Redis
         let key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -436,7 +434,6 @@ impl SharedState {
         );
 
         let mut conn = queue.connection();
-        // Remove from pending, add to completed
         let _: Result<(), _> = redis::AsyncCommands::hdel(&mut conn, &pending_key, task_id).await;
         let _: Result<(), _> =
             redis::AsyncCommands::hset(&mut conn, &completed_key, task_id, &result_json).await;

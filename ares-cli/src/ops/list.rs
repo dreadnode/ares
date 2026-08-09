@@ -35,7 +35,6 @@ pub(crate) async fn ops_list(redis_url: Option<String>, latest: bool) -> Result<
         return Ok(());
     }
 
-    // Collect metadata for each operation
     let mut ops: Vec<OperationListEntry> = Vec::new();
     let listed_at = Utc::now();
     for op_id in &op_ids {

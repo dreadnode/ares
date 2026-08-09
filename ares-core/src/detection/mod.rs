@@ -88,11 +88,9 @@ pub fn detection_config() -> &'static DetectionConfig {
 /// Find a template by name or alias.
 pub fn find_template(name: &str) -> Option<(&'static str, &'static TemplateEntry)> {
     let config = detection_config();
-    // Direct match
     if let Some((key, entry)) = config.templates.get_key_value(name) {
         return Some((key.as_str(), entry));
     }
-    // Alias match
     for (key, entry) in &config.templates {
         if entry.aliases.iter().any(|a| a == name) {
             return Some((key.as_str(), entry));
@@ -116,16 +114,12 @@ pub fn mitre_for_connection_type(conn_type: &str) -> Option<&'static str> {
         let config = detection_config();
         let mut m: BTreeMap<&'static str, &'static str> = BTreeMap::new();
 
-        // Primary source: derive from connection_types declared in YAML templates.
-        // Templates are iterated in alphabetical key order; first writer wins per
-        // connection type, so the canonical template for each type takes precedence.
         for entry in config.templates.values() {
             for ct in &entry.connection_types {
                 m.entry(ct.as_str()).or_insert(entry.mitre_id.as_str());
             }
         }
 
-        // Fallbacks for connection types not yet covered by any YAML template.
         m.entry("smb").or_insert("T1021.002");
         m.entry("rdp").or_insert("T1021.001");
         m.entry("wmi").or_insert("T1047");

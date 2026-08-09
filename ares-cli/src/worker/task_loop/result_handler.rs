@@ -99,7 +99,6 @@ pub async fn process_task(
         }
     }
 
-    // Publish result to JetStream result subject
     match serde_json::to_vec(&task_result) {
         Ok(bytes) => {
             let subject = nats::task_result_subject(&task.task_id);

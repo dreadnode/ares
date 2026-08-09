@@ -22,7 +22,6 @@ pub fn is_valid_credential_for_domain(
     let cred_lower = cred_domain.to_lowercase();
     let target_lower = target_domain.to_lowercase();
 
-    // Same domain: always valid
     if cred_lower == target_lower {
         return true;
     }

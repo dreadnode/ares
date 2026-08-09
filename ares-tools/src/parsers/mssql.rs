@@ -164,7 +164,6 @@ pub fn parse_mssql_linked_servers(output: &str, params: &Value) -> Vec<Value> {
 
     let mut vulns = Vec::new();
 
-    // Check for error conditions
     let lower = output.to_lowercase();
     if lower.contains("login failed") || lower.contains("error") && lower.contains("access denied")
     {

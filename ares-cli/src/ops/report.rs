@@ -17,7 +17,6 @@ pub(crate) async fn ops_report(
 
     let reader = RedisStateReader::new(op_id.clone());
 
-    // Check for cached report first (unless regenerating)
     if !regenerate {
         if let Ok(Some(cached)) = reader.get_report(&mut conn).await {
             let report_path = save_report(&output_dir, &op_id, &cached)?;

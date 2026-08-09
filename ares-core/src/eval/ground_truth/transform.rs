@@ -26,7 +26,6 @@ pub fn create_ground_truth_from_red_state(
         .map(|t| t.ip.clone())
         .unwrap_or_default();
 
-    // Hosts → IP and hostname IOCs
     for host in &state.all_hosts {
         expected_iocs.push(ExpectedIOC {
             ioc_type: "ip".to_string(),
@@ -48,7 +47,6 @@ pub fn create_ground_truth_from_red_state(
         }
     }
 
-    // Users → user IOCs
     for user in &state.all_users {
         expected_iocs.push(ExpectedIOC {
             ioc_type: "user".to_string(),
@@ -60,7 +58,6 @@ pub fn create_ground_truth_from_red_state(
         });
     }
 
-    // Credentials → user IOCs
     for cred in &state.all_credentials {
         expected_iocs.push(ExpectedIOC {
             ioc_type: "user".to_string(),
@@ -86,7 +83,6 @@ pub fn create_ground_truth_from_red_state(
         });
     }
 
-    // Identified techniques
     for tech_id in identified_techniques {
         let required = is_technique_required(tech_id);
         let parent_id = if tech_id.contains('.') {
@@ -102,7 +98,6 @@ pub fn create_ground_truth_from_red_state(
         });
     }
 
-    // Domain admin flag → add T1078.002
     if state.has_domain_admin {
         expected_techniques.push(ExpectedTechnique {
             technique_id: "T1078.002".to_string(),
@@ -112,7 +107,6 @@ pub fn create_ground_truth_from_red_state(
         });
     }
 
-    // Golden ticket flag → add T1558.001
     if state.has_golden_ticket {
         expected_techniques.push(ExpectedTechnique {
             technique_id: "T1558.001".to_string(),
@@ -122,7 +116,6 @@ pub fn create_ground_truth_from_red_state(
         });
     }
 
-    // Shares → expected shares + IOCs
     let mut expected_shares: Vec<ExpectedShare> = Vec::new();
     for share in &state.all_shares {
         let is_writable = share.permissions == "WRITE" || share.permissions == "READ/WRITE";
@@ -142,7 +135,6 @@ pub fn create_ground_truth_from_red_state(
         });
     }
 
-    // Vulnerabilities → expected vulns + techniques
     let mut expected_vulnerabilities: Vec<ExpectedVulnerability> = Vec::new();
     for (vuln_id, vuln) in &state.discovered_vulnerabilities {
         let vuln_techniques = get_techniques_for_vuln_type(&vuln.vuln_type);
@@ -184,7 +176,6 @@ pub fn create_ground_truth_from_red_state(
         .filter(|ioc| seen_values.insert(ioc.value.clone()))
         .collect();
 
-    // Deduplicate techniques by ID
     let mut seen_techniques: HashSet<String> = HashSet::new();
     let unique_techniques: Vec<ExpectedTechnique> = expected_techniques
         .into_iter()

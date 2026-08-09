@@ -19,22 +19,17 @@ pub(crate) async fn blue_report(
     let generator = BlueTeamReportGenerator::new()
         .context("Failed to initialize blue team report template engine")?;
 
-    // Determine what to generate: operation report or single investigation report
     if let Some(ref inv_id) = investigation_id {
-        // Single investigation report (no operation context)
         let report = generate_investigation_report(&mut conn, &generator, inv_id).await?;
         let path = save_investigation_report(&output_dir, None, inv_id, &report)?;
         println!("Investigation report saved to {path}");
     } else if let Some(ref op_id) = operation_id {
-        // Operation report (multi-investigation)
         let report = generate_operation_report(&mut conn, &generator, op_id).await?;
         let path = save_operation_report(&output_dir, op_id, &report)?;
         println!("Operation report saved to {path}");
     } else if latest {
-        // Try operation first, fall back to investigation
         let op_id = ares_core::state::resolve_latest_operation(&mut conn).await?;
         if let Some(ref op_id) = op_id {
-            // Check if there are blue team investigations for this operation
             let inv_ids =
                 ares_core::state::list_investigations_for_operation(&mut conn, op_id).await?;
             if !inv_ids.is_empty() {
@@ -44,7 +39,6 @@ pub(crate) async fn blue_report(
                 return Ok(());
             }
         }
-        // Fall back to latest investigation
         let inv_id = super::resolve_latest_investigation(&mut conn)
             .await?
             .context("No investigations or operations found")?;

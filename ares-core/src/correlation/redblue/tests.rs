@@ -735,14 +735,12 @@ fn report_to_value_full_structure() {
     let report = correlator.correlate(&red, &blue, "op-val");
     let val = report.to_value();
 
-    // Check structure
     assert_eq!(val["red_operation_id"], "op-val");
     assert!(val["time_window"]["start"].is_string());
     assert!(val["time_window"]["end"].is_string());
     assert_eq!(val["summary"]["total_red_activities"], 2);
     assert_eq!(val["summary"]["total_blue_detections"], 1);
 
-    // Check matches array
     let matches = val["matches"].as_array().unwrap();
     assert!(!matches.is_empty());
     assert!(matches[0]["red_technique"].is_string());
@@ -751,7 +749,6 @@ fn report_to_value_full_structure() {
     assert!(matches[0]["match_quality"].is_string());
     assert!(matches[0]["confidence"].is_f64());
 
-    // Check gaps array
     let gaps = val["gaps"].as_array().unwrap();
     assert!(!gaps.is_empty());
     assert!(gaps[0]["technique"].is_string());

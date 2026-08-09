@@ -89,7 +89,6 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
     let value = required_str(args, "value")?;
     let source = required_str(args, "source")?;
 
-    // Validate evidence before writing
     let vr = validation::validate_evidence(evidence_type, value, source);
     if !vr.valid {
         return Ok(make_error(&format!(
@@ -185,7 +184,6 @@ pub async fn add_evidence(args: &Value) -> Result<ToolOutput> {
         let _: () = conn.expire(&key, TTL_SECS).await?;
     }
 
-    // Build output, including any warnings
     let warning_str = if vr.warnings.is_empty() {
         String::new()
     } else {
@@ -230,7 +228,6 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
     let key = blue_key(investigation_id, BLUE_KEY_EVIDENCE);
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Prepare all items: validate, build JSON, compute dedup keys
     struct PreparedItem {
         dedup_key: String,
         data: String,
@@ -365,7 +362,6 @@ pub async fn add_evidence_batch(args: &Value) -> Result<ToolOutput> {
         let _: () = conn.expire(&key, TTL_SECS).await?;
     }
 
-    // Build output summary
     let mut added_count = 0;
     let mut dup_count = 0;
     let mut output_lines = Vec::new();
@@ -502,7 +498,6 @@ pub async fn add_technique(args: &Value) -> Result<ToolOutput> {
         Err(e) => return Ok(make_error(&format!("Redis connection failed: {e}"))),
     };
 
-    // Add technique ID to the SET
     let tech_key = blue_key(investigation_id, BLUE_KEY_TECHNIQUES);
     let added: i64 = conn
         .sadd(&tech_key, &technique_id)
@@ -556,7 +551,6 @@ pub async fn add_lateral_connection(args: &Value) -> Result<ToolOutput> {
         Err(e) => return Ok(make_error(&format!("Redis connection failed: {e}"))),
     };
 
-    // Append to lateral LIST
     let lateral_key = blue_key(investigation_id, BLUE_KEY_LATERAL);
     let data = serde_json::to_string(&connection).unwrap_or_default();
     let _: () = conn
@@ -565,7 +559,6 @@ pub async fn add_lateral_connection(args: &Value) -> Result<ToolOutput> {
         .context("RPUSH failed")?;
     let _: () = conn.expire(&lateral_key, TTL_SECS).await?;
 
-    // Also track both hosts in the hosts SET
     let hosts_key = blue_key(investigation_id, BLUE_KEY_HOSTS);
     let _: () = conn.sadd(&hosts_key, source_host.to_lowercase()).await?;
     let _: () = conn
@@ -573,7 +566,6 @@ pub async fn add_lateral_connection(args: &Value) -> Result<ToolOutput> {
         .await?;
     let _: () = conn.expire(&hosts_key, TTL_SECS).await?;
 
-    // Track user if provided
     if let Some(u) = user {
         let users_key = blue_key(investigation_id, BLUE_KEY_USERS);
         let _: () = conn.sadd(&users_key, u.to_lowercase()).await?;

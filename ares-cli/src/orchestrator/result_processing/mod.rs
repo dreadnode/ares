@@ -2151,7 +2151,6 @@ async fn auto_chain_s4u_secretsdump(
                 let after = &fname[at_pos + 1..];
                 // Extract hostname: CIFS_dc01@REALM.ccache → CIFS.dc01
                 let host_part = after.split('@').next().unwrap_or(after).replace('_', ".");
-                // Remove the service prefix (CIFS. → dc01)
                 if let Some(dot_pos) = host_part.find('.') {
                     let candidate = &host_part[dot_pos + 1..];
                     if !candidate.is_empty() {
@@ -2171,7 +2170,6 @@ async fn auto_chain_s4u_secretsdump(
     // Resolve target IP if it's a hostname
     let resolved_ip = {
         let state = dispatcher.state.read().await;
-        // Check if target_ip is actually an IP already
         if target_ip.parse::<std::net::Ipv4Addr>().is_ok() {
             target_ip.clone()
         } else {
@@ -2662,7 +2660,6 @@ pub(crate) async fn extract_discoveries(
         }
     }
 
-    // Extract trusted_domains from parser output
     if let Some(trusts) = payload.get("trusted_domains").and_then(|v| v.as_array()) {
         for trust_val in trusts {
             if let Ok(trust) =

@@ -414,7 +414,6 @@ impl DatasetEvaluationResult {
             format!("  Avg Duration: {:.1}s", self.avg_duration_seconds()),
         ];
 
-        // Grade distribution
         let mut grade_counts = [0u32; 5]; // A, B, C, D, F
         for r in &self.results {
             match r.grade() {

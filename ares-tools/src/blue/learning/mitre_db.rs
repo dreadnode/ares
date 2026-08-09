@@ -434,7 +434,6 @@ pub(super) static EVIDENCE_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>
 pub fn lookup_technique(args: &Value) -> Result<ToolOutput> {
     let technique_id = required_str(args, "technique_id")?;
 
-    // Normalize: uppercase the T prefix if needed
     let normalized = if technique_id.starts_with('t') || technique_id.starts_with('T') {
         let mut s = technique_id.to_string();
         s.replace_range(0..1, "T");
@@ -513,7 +512,6 @@ pub fn lookup_technique(args: &Value) -> Result<ToolOutput> {
 pub fn suggest_techniques(args: &Value) -> Result<ToolOutput> {
     let evidence_type = required_str(args, "evidence_type")?;
 
-    // Normalize: lowercase, replace spaces/hyphens with underscores
     let normalized = evidence_type.to_lowercase().replace([' ', '-'], "_");
 
     if let Some(technique_ids) = EVIDENCE_MAP.get(normalized.as_str()) {

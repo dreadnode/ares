@@ -245,7 +245,6 @@ impl Throttler {
             return true;
         }
 
-        // Check exploit + vuln_type
         if CRITICAL_PATH_TASK_TYPES.contains(&task_type) {
             if let Some(p) = payload {
                 let vt = p
@@ -259,7 +258,6 @@ impl Throttler {
             }
         }
 
-        // Check delegation enumeration
         if task_type == "privesc_enumeration" {
             if let Some(techniques) = payload
                 .and_then(|p| p.get("techniques"))
@@ -275,7 +273,6 @@ impl Throttler {
             }
         }
 
-        // Check ESC8 coercion
         if task_type == "coercion" {
             if let Some(techniques) = payload
                 .and_then(|p| p.get("techniques"))

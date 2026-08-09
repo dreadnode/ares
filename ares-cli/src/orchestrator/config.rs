@@ -156,7 +156,6 @@ impl OrchestratorConfig {
                     _ => None,
                 }
             } else {
-                // Flat field fallback
                 match (
                     v["initial_username"].as_str(),
                     v["initial_password"].as_str(),

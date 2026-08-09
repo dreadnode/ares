@@ -425,8 +425,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         format!("{TASK_STATUS_PREFIX}:{task_id}")
     }
 
-    // Queue methods (NATS JetStream)
-
     /// Submit a task to a role's queue.
     ///
     /// Priority ≤ 2 publishes to `ares.tasks.urgent.{role}`, otherwise

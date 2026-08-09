@@ -149,7 +149,6 @@ pub(super) fn sanitize_credential(
     cred.password = strip_ansi(&cred.password);
     cred.domain = strip_ansi(&cred.domain);
 
-    // Trim whitespace
     cred.username = cred.username.trim().to_string();
     cred.password = cred.password.trim().to_string();
     cred.domain = cred.domain.trim().to_string();
@@ -252,7 +251,6 @@ pub(super) fn sanitize_credential(
     // keys built with `format!("{domain}\\{user}:{pass}")`.
     cred.domain = cred.domain.to_lowercase();
 
-    // Validate after sanitization
     if !crate::orchestrator::output_extraction::is_valid_credential(&cred.username, &cred.password)
     {
         return None;

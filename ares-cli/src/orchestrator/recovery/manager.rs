@@ -229,7 +229,6 @@ impl OperationRecoveryManager {
                     "Task collected for re-dispatch via LLM submission"
                 );
             } else {
-                // Exceeded max retries
                 task.status = TaskStatus::Failed;
                 task.error = Some(format!(
                     "Pod restart during execution (max retries {} exceeded)",
@@ -245,7 +244,6 @@ impl OperationRecoveryManager {
             }
         }
 
-        // Persist updated pending_tasks back to Redis
         for (task_id, task) in &pending_tasks {
             if let Ok(json) = serde_json::to_string(task) {
                 let _: Result<(), _> = conn.hset(&pending_tasks_key, task_id, &json).await;

@@ -26,13 +26,11 @@ pub fn extract_shares(output: &str) -> Vec<ParsedShare> {
             continue;
         }
 
-        // Extract host IP from SMB prefix
         let host = match SMB_SHARE_PREFIX_RE.captures(line) {
             Some(caps) => caps[1].to_string(),
             None => continue,
         };
 
-        // Remove the SMB prefix to get share details
         let after_prefix = SMB_SHARE_PREFIX_RE.replace(line, "");
         let rest = after_prefix.trim();
 
@@ -56,7 +54,6 @@ pub fn extract_shares(output: &str) -> Vec<ParsedShare> {
         // tokens[2..] = share name, permissions, comment
         let remaining = tokens[2..].join(" ");
 
-        // Try to match: SHARENAME  PERMISSIONS  COMMENT
         if let Some(caps) = SHARE_LINE_RE.captures(&remaining) {
             let name = caps[1].to_string();
             let permissions = caps[2].to_string();

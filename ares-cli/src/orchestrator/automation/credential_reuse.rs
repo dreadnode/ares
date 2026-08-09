@@ -305,7 +305,6 @@ pub async fn auto_credential_reuse(
             break;
         }
 
-        // Only fire if the technique is allowed
         if !dispatcher.is_technique_allowed("credential_reuse") {
             continue;
         }

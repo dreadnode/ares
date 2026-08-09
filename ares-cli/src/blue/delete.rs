@@ -172,7 +172,6 @@ pub(crate) async fn blue_cleanup(
             let count: usize = conn.del("ares:blue:active_investigations").await?;
             deleted += count;
         }
-        // Drain queued investigation requests from the NATS stream
         if queue_len > 0 {
             if let Ok(nats) = ares_core::nats::NatsBroker::connect_from_env().await {
                 if let Ok(stream) = nats

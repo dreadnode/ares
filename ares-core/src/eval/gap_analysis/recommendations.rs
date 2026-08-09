@@ -219,7 +219,6 @@ pub fn recommend_for_technique(tech: &ExpectedTechnique) -> Option<DetectionReco
         }
     }
 
-    // Generic recommendation for unknown techniques
     Some(DetectionRecommendation {
         category: "rule".to_string(),
         priority: if tech.required { "high" } else { "medium" }.to_string(),

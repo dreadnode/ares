@@ -119,11 +119,9 @@ pub(crate) async fn ops_submit(p: OpsSubmitParams) -> Result<String> {
         );
     }
 
-    // Generate operation ID if not provided
     let op_id =
         operation_id.unwrap_or_else(|| format!("op-{}", Utc::now().format("%Y%m%d-%H%M%S")));
 
-    // Build initial credential if username provided
     let initial_cred = username.as_ref().map(|uname| {
         let mut cred = serde_json::Map::new();
         cred.insert(
@@ -243,14 +241,12 @@ pub(crate) async fn follow_operation(
 
         let now = chrono::Utc::now().format("%H:%M:%S");
 
-        // Check if operation has been picked up
         let is_running = reader.is_running(&mut conn).await.unwrap_or(false);
         if !started && is_running {
             started = true;
             println!("[{now}] Operation started");
         }
 
-        // Read current state
         let Ok(meta) = reader.get_meta(&mut conn).await else {
             continue; // operation not yet initialized
         };
@@ -271,7 +267,6 @@ pub(crate) async fn follow_operation(
             .map(|v| v.len())
             .unwrap_or(0);
 
-        // Print milestones
         if meta.has_domain_admin && !prev_da {
             println!("[{now}] *** DOMAIN ADMIN ACHIEVED ***");
             prev_da = true;
@@ -281,7 +276,6 @@ pub(crate) async fn follow_operation(
             prev_gt = true;
         }
 
-        // Print count changes
         if creds != prev_creds || hosts != prev_hosts || vulns != prev_vulns {
             println!(
                 "[{now}] credentials: {} (+{})  hosts: {} (+{})  vulns: {} (+{})",
@@ -297,7 +291,6 @@ pub(crate) async fn follow_operation(
             prev_vulns = vulns;
         }
 
-        // Check for completion
         if meta.completed_at.is_some() {
             println!("[{now}] Operation completed");
             break;

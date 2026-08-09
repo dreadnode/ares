@@ -39,7 +39,6 @@ fn collect_searchconnector_work(state: &StateInner, listener: &str) -> Vec<Searc
             continue;
         }
 
-        // Find credential for the share's host
         let host_info = state.hosts.iter().find(|h| h.ip == share.host);
         let domain = host_info
             .and_then(|h| {

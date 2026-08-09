@@ -141,7 +141,6 @@ async fn blue_operation_status_once(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                // Track timestamps
                 if let Some(ref started) = started_at_str {
                     if let Ok(dt) = parse_datetime(started) {
                         if earliest_start.is_none_or(|prev| dt < prev) {
@@ -169,7 +168,6 @@ async fn blue_operation_status_once(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
-                // Check triage for escalated/routed/completed
                 let mut triage_decision = None;
                 if matches!(inv_status.as_str(), "escalated" | "routed" | "completed") {
                     let triage_key = format!("ares:blue:inv:{inv_id}:triage:decision");
@@ -214,7 +212,6 @@ async fn blue_operation_status_once(
         }
     }
 
-    // Calculate duration
     let now = Utc::now();
     let has_active_running = status_counts.contains_key("running")
         || status_counts.contains_key("in_progress")

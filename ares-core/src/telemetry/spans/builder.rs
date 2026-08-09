@@ -192,7 +192,6 @@ impl AgentSpanBuilder {
             None => self.name.clone(),
         };
 
-        // Resolve MITRE mappings.
         let (technique_id, tool_tactic) = self
             .tool_name
             .as_deref()
@@ -206,7 +205,6 @@ impl AgentSpanBuilder {
             .as_deref()
             .and_then(mitre::get_tool_yaml_category);
 
-        // Phase and tactic from role.
         let (phase_map, tactic_map) = match self.team {
             Team::Red => (&*mitre::ROLE_TO_PHASE, &*mitre::ROLE_TO_TACTIC),
             Team::Blue => (&*mitre::BLUE_ROLE_TO_PHASE, &*mitre::BLUE_ROLE_TO_TACTIC),
@@ -239,7 +237,6 @@ impl AgentSpanBuilder {
             })
         });
 
-        // Build the span with all attributes.
         let span = tracing::info_span!(
             "ares.agent",
             otel.name = %span_name,

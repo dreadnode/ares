@@ -12,7 +12,6 @@
 mod builder;
 mod helpers;
 
-// Re-export all public items at module level.
 pub use builder::{record_span_status, AgentSpanBuilder};
 pub use helpers::{
     client_span, consumer_span, extract_target_from_args, producer_span, server_span,

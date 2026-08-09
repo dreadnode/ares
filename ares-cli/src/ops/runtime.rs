@@ -271,7 +271,6 @@ pub(crate) async fn ops_runtime(
                     println!("Cost:   unavailable");
                 }
 
-                // Per-model breakdown for multi-model operations
                 if breakdown.len() > 1 {
                     for item in &breakdown {
                         println!("{}", format_model_cost_line(item));

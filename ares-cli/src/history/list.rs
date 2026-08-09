@@ -16,7 +16,6 @@ pub(crate) async fn history_list(
 
     let since = since_days.map(|days| Utc::now() - chrono::Duration::days(days));
 
-    // Build dynamic query
     let mut query = String::from(
         "SELECT operation_id, target_domain, target_ip::text, started_at, completed_at, \
          has_domain_admin, has_golden_ticket, \

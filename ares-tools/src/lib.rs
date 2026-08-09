@@ -250,7 +250,6 @@ mod tests {
         // Both pieces must appear in the merged output
         assert!(combined.contains("scan results here"), "stdout missing");
         assert!(combined.contains("some warning"), "stderr missing");
-        // Separator between them
         assert!(combined.contains("--- stderr ---"), "separator missing");
     }
 

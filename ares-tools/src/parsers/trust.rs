@@ -126,7 +126,6 @@ pub fn parse_domain_trusts(output: &str) -> Vec<Value> {
         }
     }
 
-    // Flush last block
     if let Some(trust) = flush(
         &cn,
         trust_direction,

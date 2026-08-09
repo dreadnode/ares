@@ -104,10 +104,8 @@ impl PersistentStore {
     pub async fn offload_operation(&self, state: &OperationOffload) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
 
-        // Upsert operation record
         let op_uuid = self.upsert_operation(&mut tx, state).await?;
 
-        // Batch upsert all collections
         self.upsert_credentials(&mut tx, op_uuid, &state.credentials)
             .await?;
         self.upsert_hashes(&mut tx, op_uuid, &state.hashes).await?;
@@ -121,7 +119,6 @@ impl PersistentStore {
         )
         .await?;
 
-        // Update aggregated stats
         sqlx::query(
             "UPDATE operations SET
                 credential_count = $2,

@@ -331,14 +331,12 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
         AgentRole::Coercion => coercion::tool_definitions(),
     };
 
-    // Role-specific callback tools
     match role {
         AgentRole::Cracker => tools.extend(cracker::callback_definitions()),
         AgentRole::Lateral => tools.extend(lateral::callback_definitions()),
         _ => {}
     }
 
-    // Universal tools for all roles
     tools.extend(reporting::tool_definitions());
     tools.extend(callback_tool_definitions());
 
