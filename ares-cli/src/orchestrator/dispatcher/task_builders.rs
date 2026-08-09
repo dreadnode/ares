@@ -122,6 +122,17 @@ fn vuln_type_is_preauth(vtype: &str) -> bool {
     )
 }
 
+fn lateral_backing_vuln_id(state: &StateInner, target_ip: &str, technique: &str) -> Option<String> {
+    if !technique.to_ascii_lowercase().contains("winrm") {
+        return None;
+    }
+    state
+        .discovered_vulnerabilities
+        .values()
+        .find(|v| v.vuln_type.eq_ignore_ascii_case("winrm_access") && v.target == target_ip)
+        .map(|v| v.vuln_id.clone())
+}
+
 /// Vuln types whose exploitation primitive lives in the `acl` worker's
 /// toolset (bloodyAD, pywhisker, dacl_edit). Used to route `request_exploit`
 /// to the right worker when the emitting parser left `recommended_agent`
@@ -519,6 +530,22 @@ impl Dispatcher {
                 return Ok(None);
             }
         }
+        let backing_vuln = {
+            let state = self.state.read().await;
+            lateral_backing_vuln_id(&state, target_ip, technique)
+        };
+        if let Some(vuln_id) = backing_vuln {
+            if self.state.is_exploit_abandoned(&vuln_id).await {
+                debug!(
+                    target_ip = target_ip,
+                    technique = technique,
+                    vuln_id = %vuln_id,
+                    "Skipping lateral — backing vuln abandoned at max exploit failures"
+                );
+                return Ok(None);
+            }
+        }
+
         let payload = json!({
             "technique": technique,
             "target_ip": target_ip,
@@ -1152,5 +1179,63 @@ mod tests {
         assert_eq!(passwords.len(), 2);
         assert!(passwords.contains(&"P@ssw0rd!".to_string()));
         assert!(passwords.contains(&"P@ssw0rd2!".to_string()));
+    }
+
+    fn winrm_access_vuln(vuln_id: &str, target: &str) -> ares_core::models::VulnerabilityInfo {
+        ares_core::models::VulnerabilityInfo {
+            vuln_id: vuln_id.into(),
+            vuln_type: "winrm_access".into(),
+            target: target.into(),
+            discovered_by: "test".into(),
+            discovered_at: chrono::Utc::now(),
+            details: Default::default(),
+            recommended_agent: String::new(),
+            priority: 1,
+        }
+    }
+
+    #[test]
+    fn winrm_lateral_resolves_the_backing_vuln() {
+        let mut state = StateInner::new("op-test".into());
+        state.discovered_vulnerabilities.insert(
+            "winrm_access_192_168_58_30".into(),
+            winrm_access_vuln("winrm_access_192_168_58_30", "192.168.58.30"),
+        );
+
+        assert_eq!(
+            lateral_backing_vuln_id(&state, "192.168.58.30", "winrm_exec").as_deref(),
+            Some("winrm_access_192_168_58_30"),
+            "without this the abandonment cap has no key to check and the planner \
+             re-dispatches the same dead winrm target every turn"
+        );
+    }
+
+    #[test]
+    fn non_winrm_lateral_has_no_backing_vuln() {
+        let mut state = StateInner::new("op-test".into());
+        state.discovered_vulnerabilities.insert(
+            "winrm_access_192_168_58_30".into(),
+            winrm_access_vuln("winrm_access_192_168_58_30", "192.168.58.30"),
+        );
+
+        assert!(
+            lateral_backing_vuln_id(&state, "192.168.58.30", "psexec").is_none(),
+            "psexec is not backed by winrm_access; gating it on that vuln would \
+             suppress an unrelated technique"
+        );
+    }
+
+    #[test]
+    fn winrm_lateral_against_another_host_has_no_backing_vuln() {
+        let mut state = StateInner::new("op-test".into());
+        state.discovered_vulnerabilities.insert(
+            "winrm_access_192_168_58_30".into(),
+            winrm_access_vuln("winrm_access_192_168_58_30", "192.168.58.30"),
+        );
+
+        assert!(
+            lateral_backing_vuln_id(&state, "192.168.58.40", "winrm_exec").is_none(),
+            "the cap is per target; one dead host must not suppress the others"
+        );
     }
 }
