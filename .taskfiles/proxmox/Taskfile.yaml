@@ -58,21 +58,7 @@ vars:
   REMOTE_BIN: '/usr/local/bin/ares'
   REMOTE_ENV_FILE: '/etc/default/ares'
   REMOTE_DISPATCH_LOG: '/var/log/ares/dispatch.log'
-  # SSH helpers (computed via sh: so they auto-resolve attacker IP)
-  ATTACKER_IP:
-    sh: |
-      ssh -o ConnectTimeout=10 -o BatchMode=yes {{.PROXMOX_SSH_HOST}} \
-        "qm guest cmd {{.ATTACKER_VMID}} network-get-interfaces 2>/dev/null" \
-        | python3 -c "
-      import sys, json
-      try:
-        for nic in json.load(sys.stdin):
-          if nic.get('name') == 'lo': continue
-          for ip in nic.get('ip-addresses', []):
-            if ip.get('ip-address-type') == 'ipv4' and not ip['ip-address'].startswith('127.'):
-              print(ip['ip-address']); sys.exit(0)
-      except Exception: pass
-      " 2>/dev/null || true
+  ATTACKER_IP_CMD: '{{.TASKFILE_DIR}}/scripts/attacker-ip.sh {{.PROXMOX_SSH_HOST}} {{.ATTACKER_VMID}}'
 
 tasks:
   # ============================================================================
@@ -91,7 +77,7 @@ tasks:
           echo -e "{{.WARN}} VM not running — start with: ssh {{.PROXMOX_SSH_HOST}} 'qm start {{.ATTACKER_VMID}}'"
           exit 0
         fi
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then
           echo -e "{{.WARN}} Could not resolve attacker IP via guest agent — VM may still be booting"
           exit 0
@@ -113,7 +99,7 @@ tasks:
     desc: "Print attacker IP only (for scripting)"
     silent: true
     cmds:
-      - echo "{{.ATTACKER_IP}}"
+      - '{{.ATTACKER_IP_CMD}}'
 
   # ============================================================================
   # Code Deploy
@@ -145,7 +131,7 @@ tasks:
         msg: "Binary not found at {{.LOCAL_BIN}}. Run: task proxmox:deploy:build"
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         echo -e "{{.INFO}} Pushing $(ls -lh {{.LOCAL_BIN}} | awk '{print $5}') to {{.ATTACKER_USER}}@$IP:{{.REMOTE_BIN}}"
         scp -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.LOCAL_BIN}} {{.ATTACKER_USER}}@$IP:/tmp/ares
@@ -157,7 +143,7 @@ tasks:
     silent: true
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         MODEL_SPEC="{{.DEFAULT_MODEL}}"
         # Pull optional endpoint overrides from the config `llm:` block (empty if commented/absent).
@@ -193,7 +179,7 @@ tasks:
     silent: true
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP /bin/bash <<'EOF'
         ARES_REDIS_URL=redis://localhost:6379 ares ops stop --latest 2>/dev/null | tail -1 || true
@@ -223,7 +209,7 @@ tasks:
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         echo -e "{{.INFO}} Submitting op against {{.IPS}} domain={{.DOMAIN}} model={{.MODEL}}"
         # `ops submit` does an LLM preflight that requires OPENAI_API_KEY in
@@ -283,7 +269,7 @@ tasks:
     silent: true
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP /bin/bash <<'EOF'
         ARES_REDIS_URL=redis://localhost:6379 ares ops stop --latest 2>&1 | tail -2
@@ -299,7 +285,7 @@ tasks:
       OP_ID: '{{.OP_ID | default ""}}'
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         FLAGS=""
         [ -n "{{.WATCH}}" ] && FLAGS="$FLAGS --watch {{.WATCH}}"
@@ -319,7 +305,7 @@ tasks:
       WATCH: '{{.WATCH | default ""}}'
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         FLAGS=""
         [ -n "{{.WATCH}}" ] && FLAGS="$FLAGS --watch {{.WATCH}}"
@@ -331,7 +317,7 @@ tasks:
     silent: true
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
           "ARES_REDIS_URL=redis://localhost:6379 ares ops list"
@@ -349,7 +335,7 @@ tasks:
         msg: "Either OP_ID=op-... or LATEST=true is required"
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         mkdir -p "{{.OUTPUT_DIR}}/red"
 
@@ -397,7 +383,7 @@ tasks:
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         mkdir -p "{{.OUTPUT_DIR}}/red"
 
@@ -450,7 +436,7 @@ tasks:
       FILTER: '{{.FILTER | default ""}}'
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         if [ -n "{{.FILTER}}" ]; then
           ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
@@ -467,7 +453,7 @@ tasks:
       FILTER: '{{.FILTER | default ""}}'
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         if [ -n "{{.FILTER}}" ]; then
           ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
@@ -484,7 +470,7 @@ tasks:
       CMD: '{{.CMD | default "hostname && uptime"}}'
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP "{{.CMD}}"
 
@@ -494,7 +480,7 @@ tasks:
     interactive: true
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         ssh -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP
 
@@ -505,7 +491,7 @@ tasks:
       LOCAL_PORT: '{{.LOCAL_PORT | default "16379"}}'
     cmds:
       - |
-        IP="{{.ATTACKER_IP}}"
+        IP="$({{.ATTACKER_IP_CMD}})"
         if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
         pkill -f "ssh.*-L {{.LOCAL_PORT}}:127.0.0.1:6379.*{{.ATTACKER_USER}}@$IP" 2>/dev/null || true
         ssh -fN -J {{.PROXMOX_SSH_HOST}} -L {{.LOCAL_PORT}}:127.0.0.1:6379 {{.ATTACKER_USER}}@$IP
