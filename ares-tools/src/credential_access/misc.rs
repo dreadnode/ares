@@ -3,6 +3,7 @@
 //! password policy, password spray, username-as-password, credman, autologon).
 
 use anyhow::Result;
+use ares_core::ldap::domain_to_base_dn;
 use ares_core::models::is_always_disabled_account;
 use serde_json::Value;
 
@@ -308,11 +309,7 @@ pub fn build_ldap_search_descriptions(args: &Value) -> Result<CommandBuilder> {
 
     let computed_base_dn = match base_dn {
         Some(dn) => dn.to_string(),
-        None => domain
-            .split('.')
-            .map(|part| format!("DC={part}"))
-            .collect::<Vec<_>>()
-            .join(","),
+        None => domain_to_base_dn(domain),
     };
 
     let ldap_uri = format!("ldap://{target}");
@@ -1056,41 +1053,42 @@ mod tests {
         assert!(optional_str(&args, "method").is_none());
     }
 
-    #[test]
-    fn base_dn_computation_from_domain() {
-        let domain = "contoso.local";
-        let computed_base_dn: String = domain
-            .split('.')
-            .map(|part| format!("DC={part}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(computed_base_dn, "DC=contoso,DC=local");
+    fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+        argv.iter()
+            .position(|a| a == flag)
+            .and_then(|i| argv.get(i + 1))
+            .map(String::as_str)
     }
 
     #[test]
-    fn base_dn_computation_three_levels() {
-        let domain = "child.contoso.local";
-        let computed_base_dn: String = domain
-            .split('.')
-            .map(|part| format!("DC={part}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(computed_base_dn, "DC=child,DC=contoso,DC=local");
+    fn base_dn_derived_from_domain_when_absent() {
+        let args = json!({
+            "target": "192.168.58.10",
+            "domain": "child.contoso.local",
+            "username": "alice",
+            "password": "P@ssw0rd!"
+        });
+        let cmd = super::build_ldap_search_descriptions(&args).unwrap();
+        assert_eq!(
+            flag_value(cmd.args_for_test(), "-b"),
+            Some("DC=child,DC=contoso,DC=local")
+        );
     }
 
     #[test]
     fn base_dn_explicit_overrides_computation() {
-        let base_dn = Some("OU=Users,DC=contoso,DC=local");
-        let domain = "contoso.local";
-        let computed = match base_dn {
-            Some(dn) => dn.to_string(),
-            None => domain
-                .split('.')
-                .map(|part| format!("DC={part}"))
-                .collect::<Vec<_>>()
-                .join(","),
-        };
-        assert_eq!(computed, "OU=Users,DC=contoso,DC=local");
+        let args = json!({
+            "target": "192.168.58.10",
+            "domain": "contoso.local",
+            "username": "alice",
+            "password": "P@ssw0rd!",
+            "base_dn": "OU=Users,DC=contoso,DC=local"
+        });
+        let cmd = super::build_ldap_search_descriptions(&args).unwrap();
+        assert_eq!(
+            flag_value(cmd.args_for_test(), "-b"),
+            Some("OU=Users,DC=contoso,DC=local")
+        );
     }
 
     #[test]

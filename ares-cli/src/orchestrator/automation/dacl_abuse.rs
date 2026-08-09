@@ -12,6 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ares_core::ldap::domain_to_base_dn;
 use serde_json::json;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
@@ -50,15 +51,6 @@ fn brace_wrapped_guid(raw: &str) -> Option<String> {
     Some(format!("{{{inner}}}"))
 }
 
-fn domain_base_dn(domain: &str) -> String {
-    domain
-        .split('.')
-        .filter(|part| !part.is_empty())
-        .map(|part| format!("DC={part}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 /// Build the distinguished name of a Group Policy container.
 ///
 /// Every GPO lives at `CN={GUID},CN=Policies,CN=System,<domain base DN>`; the
@@ -66,7 +58,7 @@ fn domain_base_dn(domain: &str) -> String {
 /// DN.
 pub(crate) fn gpo_container_dn(gpo_id: &str, domain: &str) -> Option<String> {
     let guid = brace_wrapped_guid(gpo_id)?;
-    let base = domain_base_dn(domain);
+    let base = domain_to_base_dn(domain);
     if base.is_empty() {
         return None;
     }

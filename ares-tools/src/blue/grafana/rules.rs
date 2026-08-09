@@ -292,8 +292,10 @@ pub async fn create_detection_rule(args: &Value) -> Result<ToolOutput> {
 }
 
 /// Get alert rule definitions from Grafana's provisioning API.
-pub async fn get_alert_history(args: &Value) -> Result<ToolOutput> {
-    let _hours = optional_i64(args, "hours_back"); // reserved for future use
+///
+/// The provisioning endpoint returns rule definitions, which carry no time
+/// dimension, so this executor takes no arguments.
+pub async fn get_alert_history(_args: &Value) -> Result<ToolOutput> {
     let client = build_client()?;
 
     let url = format!("{}/api/v1/provisioning/alert-rules", grafana_url());

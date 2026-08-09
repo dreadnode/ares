@@ -93,12 +93,7 @@ pub(super) fn grafana_tool_definitions() -> Vec<ToolDefinition> {
             description: "Get alert rule definitions from Grafana's provisioning API. Returns all configured alert rules with their UIDs, folders, and evaluation intervals.".into(),
             input_schema: json!({
                 "type": "object",
-                "properties": {
-                    "hours_back": {
-                        "type": "integer",
-                        "description": "Reserved for future use"
-                    }
-                }
+                "properties": {}
             }),
         },
         ToolDefinition {

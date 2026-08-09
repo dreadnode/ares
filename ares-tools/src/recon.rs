@@ -5,23 +5,13 @@
 //! `CommandBuilder`.
 
 use anyhow::{Context, Result};
+use ares_core::ldap::domain_to_base_dn;
 use serde_json::Value;
 
 use crate::args::{optional_bool, optional_str, required_str};
 use crate::credentials;
 use crate::executor::CommandBuilder;
 use crate::ToolOutput;
-
-/// Convert a domain name to an LDAP base DN.
-///
-/// e.g. `"contoso.local"` -> `"DC=contoso,DC=local"`
-fn domain_to_base_dn(domain: &str) -> String {
-    domain
-        .split('.')
-        .map(|part| format!("DC={part}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
 
 /// Run a multi-phase nmap TCP connect scan against a target.
 ///
@@ -979,24 +969,6 @@ for item in resp:
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn domain_to_base_dn_simple() {
-        assert_eq!(domain_to_base_dn("contoso.local"), "DC=contoso,DC=local");
-    }
-
-    #[test]
-    fn domain_to_base_dn_nested() {
-        assert_eq!(
-            domain_to_base_dn("child.contoso.local"),
-            "DC=child,DC=contoso,DC=local"
-        );
-    }
-
-    #[test]
-    fn domain_to_base_dn_single() {
-        assert_eq!(domain_to_base_dn("local"), "DC=local");
-    }
 
     // mock executor tests: exercise full CommandBuilder code paths
 

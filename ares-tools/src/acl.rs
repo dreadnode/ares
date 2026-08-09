@@ -4,23 +4,13 @@
 //! produced by running the corresponding CLI tool as a subprocess.
 
 use anyhow::Result;
+use ares_core::ldap::domain_to_base_dn;
 use serde_json::Value;
 
 use crate::args::{optional_bool, optional_str, required_str};
 use crate::credentials;
 use crate::executor::CommandBuilder;
 use crate::ToolOutput;
-
-/// Convert a domain name to an LDAP base DN.
-///
-/// e.g. `"contoso.local"` -> `"DC=contoso,DC=local"`
-fn domain_to_base_dn(domain: &str) -> String {
-    domain
-        .split('.')
-        .map(|part| format!("DC={part}"))
-        .collect::<Vec<_>>()
-        .join(",")
-}
 
 /// Add a user to a group via `bloodyAD add groupMember`.
 ///
@@ -906,37 +896,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn domain_to_base_dn_simple() {
-        assert_eq!(domain_to_base_dn("contoso.local"), "DC=contoso,DC=local");
-    }
-
-    #[test]
-    fn domain_to_base_dn_nested() {
-        assert_eq!(
-            domain_to_base_dn("child.contoso.local"),
-            "DC=child,DC=contoso,DC=local"
-        );
-    }
-
-    #[test]
-    fn domain_to_base_dn_single() {
-        assert_eq!(domain_to_base_dn("local"), "DC=local");
-    }
-
-    #[test]
-    fn domain_to_base_dn_fabrikam() {
-        assert_eq!(domain_to_base_dn("fabrikam.local"), "DC=fabrikam,DC=local");
-    }
-
-    #[test]
-    fn domain_to_base_dn_deep_nesting() {
-        assert_eq!(
-            domain_to_base_dn("sub.child.contoso.local"),
-            "DC=sub,DC=child,DC=contoso,DC=local"
-        );
-    }
-
-    #[test]
     fn adminsd_holder_dn_format() {
         let domain = "contoso.local";
         let base_dn = domain_to_base_dn(domain);
@@ -1462,19 +1421,6 @@ mod tests {
         let target =
             credentials::impacket_target(None, "admin", Some("P@ssw0rd!"), "192.168.58.10");
         assert_eq!(target, "admin:P@ssw0rd!@192.168.58.10");
-    }
-
-    #[test]
-    fn domain_to_base_dn_empty_string() {
-        assert_eq!(domain_to_base_dn(""), "DC=");
-    }
-
-    #[test]
-    fn domain_to_base_dn_child_domain() {
-        assert_eq!(
-            domain_to_base_dn("child.contoso.local"),
-            "DC=child,DC=contoso,DC=local"
-        );
     }
 
     // adminsd_holder_dn with nested domains

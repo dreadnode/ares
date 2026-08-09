@@ -16,6 +16,7 @@ pub mod correlation;
 pub mod detection;
 #[cfg(feature = "blue")]
 pub mod eval;
+pub mod ldap;
 pub mod models;
 pub mod nats;
 pub mod op_state_log;
