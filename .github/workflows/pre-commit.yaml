@@ -44,7 +44,7 @@ jobs:
       has-fixes: ${{ steps.capture.outputs.has-fixes }}
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # For cross-fork PRs the head branch lives on the contributor's fork,
           # not on this repo. Without an explicit repository the checkout tries
@@ -54,12 +54,12 @@ jobs:
           persist-credentials: false
 
       - name: Set up Python ${{ env.PYTHON_VERSION_ANSIBLE_LINT }} (for ansible-lint pre-commit hook)
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION_ANSIBLE_LINT }}
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -69,7 +69,7 @@ jobs:
         run: python3 -m pip install -r .hooks/requirements.txt
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -114,28 +114,9 @@ jobs:
           rm -f /tmp/install-task.sh
           task --version
 
-      - name: Prefetch remote Taskfile includes
-        # Root Taskfile.yaml pulls includes from raw.githubusercontent.com; task's
-        # default 10s download timeout occasionally trips on transient CDN latency
-        # and fails the job before any hook runs. Cache with retries + longer
-        # timeout so the pre-commit step below can then work offline.
-        run: |
-          for i in 1 2 3 4 5; do
-            task -y --download --timeout=60s && exit 0
-            echo "Attempt $i/5 failed, retrying in $((i * 10))s..."
-            sleep $((i * 10))
-          done
-          echo "All prefetch attempts failed"
-          exit 1
-
       - name: Run pre-commit
         id: precommit
-        env:
-          # Rust checks (fmt / clippy / check / test) run in parallel jobs in
-          # the dedicated 🦀 Rust workflow with their own caches. Skipping them
-          # here trims ~11 minutes off this job without losing coverage.
-          SKIP: cargo-fmt,cargo-clippy,cargo-check,cargo-test
-        run: task -y --timeout=60s pre-commit:run-pre-commit
+        run: task -y run-pre-commit
 
       - name: Capture autofix patch
         id: capture
@@ -180,7 +161,7 @@ jobs:
           private-key: "${{ secrets.BOT_APP_PRIVATE_KEY }}"
 
       - name: Checkout PR head
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           persist-credentials: false

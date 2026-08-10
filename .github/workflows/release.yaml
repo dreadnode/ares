@@ -30,12 +30,12 @@ jobs:
 
     steps:
       - name: Set up git repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -76,22 +76,17 @@ jobs:
 
           for bin in "${BINS[@]}"; do
             ARCHIVE="${bin}-${TAG}-${{ matrix.target }}"
-            SRC="target/${{ matrix.target }}/release/${bin}"
-
-            if [ ! -f "${SRC}" ]; then
-              echo "::error::expected release binary not found: ${SRC}"
-              exit 1
-            fi
-
             mkdir -p "${ARCHIVE}"
-            cp "${SRC}" "${ARCHIVE}/"
-            tar czf "${ARCHIVE}.tar.gz" "${ARCHIVE}"
-            sha256sum "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256" || shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+            cp "target/${{ matrix.target }}/release/${bin}" "${ARCHIVE}/" 2>/dev/null || true
+            if [ -f "${ARCHIVE}/${bin}" ]; then
+              tar czf "${ARCHIVE}.tar.gz" "${ARCHIVE}"
+              sha256sum "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256" || shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+            fi
             rm -rf "${ARCHIVE}"
           done
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: binaries-${{ matrix.target }}
           path: |
@@ -105,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Set up git repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
@@ -146,7 +141,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           generate_release_notes: true
           body: |

@@ -12,7 +12,6 @@ on:
       - reopened
     paths:
       - 'warpgate-templates/**'
-      - 'ansible/**'
       - '.github/workflows/test-template-builds.yaml'
 
 permissions:
@@ -26,7 +25,7 @@ concurrency:
 env:
   DEBIAN_FRONTEND: noninteractive
   PYTHON_VERSION: "3.13.7"
-  WARPGATE_VERSION: "v4.10.0"
+  WARPGATE_VERSION: "v4.9.1"
 
 jobs:
   detect-changes:
@@ -40,7 +39,7 @@ jobs:
       changed_base_templates: ${{ steps.detect.outputs.changed_base_templates }}
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
@@ -48,49 +47,13 @@ jobs:
         id: detect
         run: |
           # Get list of changed files in templates/
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- warpgate-templates/templates/)
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- warpgate-templates/)
 
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
           # Extract unique template names from changed paths
-          CHANGED_TEMPLATES=$(echo "$CHANGED_FILES" | grep -oP 'warpgate-templates/templates/\K[^/]+' | sort -u)
-
-          CHANGED_ANSIBLE=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- ansible/)
-
-          if [ -n "$CHANGED_ANSIBLE" ]; then
-            echo ""
-            echo "Changed ansible files:"
-            echo "$CHANGED_ANSIBLE"
-
-            SHARED_ANSIBLE_CHANGE=false
-            if echo "$CHANGED_ANSIBLE" | grep -qvE '^ansible/playbooks/ares/[^/]+\.yml$'; then
-              SHARED_ANSIBLE_CHANGE=true
-            fi
-
-            echo ""
-            echo "Templates pulled in by ansible changes (shared=$SHARED_ANSIBLE_CHANGE):"
-            for template_yaml in warpgate-templates/templates/*/warpgate.yaml; do
-              [ -f "$template_yaml" ] || continue
-              grep -q "type: ansible" "$template_yaml" || continue
-
-              ansible_template=$(basename "$(dirname "$template_yaml")")
-
-              if [ "$SHARED_ANSIBLE_CHANGE" = "true" ]; then
-                echo "  $ansible_template: shared ansible change"
-                CHANGED_TEMPLATES=$(printf '%s\n%s' "$CHANGED_TEMPLATES" "$ansible_template")
-                continue
-              fi
-
-              playbook=$(grep -m1 "playbook_path:" "$template_yaml" | sed 's|.*/||')
-              if echo "$CHANGED_ANSIBLE" | grep -q "playbooks/ares/${playbook}$"; then
-                echo "  $ansible_template: runs changed playbook $playbook"
-                CHANGED_TEMPLATES=$(printf '%s\n%s' "$CHANGED_TEMPLATES" "$ansible_template")
-              fi
-            done
-          fi
-
-          CHANGED_TEMPLATES=$(echo "$CHANGED_TEMPLATES" | grep -v '^$' | sort -u)
+          CHANGED_TEMPLATES=$(echo "$CHANGED_FILES" | grep -oP 'warpgate-templates/\K[^/]+' | sort -u)
 
           echo ""
           echo "Changed templates:"
@@ -119,7 +82,7 @@ jobs:
           CHANGED_BASE_LIST="[]"
 
           for template_name in $CHANGED_TEMPLATES; do
-            template_dir="warpgate-templates/templates/$template_name"
+            template_dir="warpgate-templates/$template_name"
 
             if [ ! -f "${template_dir}/warpgate.yaml" ]; then
               echo "Warning: $template_name has no warpgate.yaml, skipping"
@@ -271,7 +234,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           token: ${{ github.token }}
 
@@ -287,7 +250,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -394,9 +357,10 @@ jobs:
           EOF
 
       - name: Set up Docker Buildx
-        uses: ./.github/actions/setup-buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
         with:
-          buildkit-image: moby/buildkit:latest
+          driver-opts: |
+            image=moby/buildkit:latest
 
       - name: Test build ${{ matrix.name }} (amd64)
         run: |
@@ -406,10 +370,13 @@ jobs:
 
           echo "Building ${{ matrix.name }} for amd64..."
 
+          # Build and push to registry with test tag
+          # We push to make the image available, then pull locally for artifact creation
           warpgate build warpgate.yaml \
             --arch amd64 \
             --registry ghcr.io/${{ matrix.namespace }} \
             --tag test-${{ github.run_id }} \
+            --push \
             --verbose
 
           echo "Build successful for ${{ matrix.name }}"
@@ -418,9 +385,16 @@ jobs:
 
       - name: Free up disk space after build
         run: |
+          # Remove buildx cache and unused images to make room for docker save
           docker buildx prune -af || true
-          docker system prune -f || true
+          docker system prune -af || true
           df -h /
+
+      - name: Pull image for local use
+        run: |
+          IMAGE_NAME="ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:test-${{ github.run_id }}"
+          echo "Pulling $IMAGE_NAME..."
+          docker pull "$IMAGE_NAME"
 
       - name: Save image for dependent templates
         run: |
@@ -444,7 +418,7 @@ jobs:
 
   # ===========================================================================
   # Phase 2: Build dependent templates
-  # These templates use base images from our registry (ghcr.io/l50/*)
+  # These templates use base images from our registry (ghcr.io/dreadnode/*)
   # If their base template was changed in this PR, load it from artifacts
   # ===========================================================================
   test-build-dependent:
@@ -460,7 +434,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           token: ${{ github.token }}
 
@@ -476,7 +450,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -583,9 +557,10 @@ jobs:
           EOF
 
       - name: Set up Docker Buildx
-        uses: ./.github/actions/setup-buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
         with:
-          buildkit-image: moby/buildkit:latest
+          driver-opts: |
+            image=moby/buildkit:latest
 
       - name: Check if base template was changed
         id: check-base

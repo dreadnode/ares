@@ -7,6 +7,7 @@
     ':semanticCommits',
     ':enablePreCommit',
     ':automergeDigest',
+    ':automergeBranch',
     'helpers:pinGitHubActionDigests',
   ],
   dependencyDashboardLabels: [
@@ -53,7 +54,7 @@
         'patch',
       ],
       automerge: true,
-      automergeType: 'pr',
+      automergeType: 'branch',
     },
     {
       description: 'Auto merge warpgate patch and minor updates',
