@@ -1,0 +1,46 @@
+---
+# Vector release pinned for reproducibility, matching the home-cluster ingestor
+# (Helm chart vector-0.56.0). Must be a real tag at
+# github.com/vectordotdev/vector/releases.
+vector_version: "0.56.0"
+vector_download_base: "https://github.com/vectordotdev/vector/releases/download"
+vector_install_dir: "/usr/local/bin"
+vector_config_dir: "/etc/vector"
+vector_data_dir: "/var/lib/vector"
+
+# ---------------------------------------------------------------------------
+# S3 store-and-forward sink (the off-LAN path: ship to S3, the home-cluster
+# Vector replays into Loki). The bucket/region come from the DreadOps
+# ares-logging terragrunt unit:
+#   terragrunt output -raw bucket_name
+#   terragrunt output -raw aws_region
+# AWS auth uses the EC2 instance role (kali-ares already has AmazonS3FullAccess),
+# so no keys are templated here.
+# ---------------------------------------------------------------------------
+vector_s3_bucket: ""
+vector_s3_region: "us-east-1"
+
+# Object key layout under the bucket. The cluster notification + Vector source
+# are scoped to the logs/ prefix, so keep it.
+vector_s3_key_prefix: "logs"
+
+# Static labels stamped on every event (Grafana dashboards key off these).
+vector_deployment_name: "alpha-operator-range"
+vector_environment: "prod"
+
+# Log files to ship. The ares systemd workers write per-role logs to
+# /var/log/ares/<role>.log and the orchestrator to orchestrator.log.
+vector_log_includes:
+  - /var/log/ares/*.log
+  - /var/log/syslog
+  - /var/log/auth.log
+  - /var/log/user-data.log
+
+# Store-and-forward batching. Minutes of latency is acceptable for the bulk
+# audit path; lower timeout for fresher delivery at the cost of more/smaller
+# objects.
+vector_s3_batch_timeout_secs: 300
+vector_s3_batch_max_bytes: 10485760 # 10 MiB
+
+# Run `vector validate` after templating the config.
+vector_verify_install: false

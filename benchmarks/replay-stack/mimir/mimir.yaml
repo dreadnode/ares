@@ -1,0 +1,19 @@
+# Minimal monolithic Mimir — parity only (no blue tool queries it directly;
+# the agent hits Prometheus). Filesystem-backed, single tenant disabled.
+target: all
+multitenancy_enabled: false
+server:
+  http_listen_port: 9009
+common:
+  storage:
+    backend: filesystem
+    filesystem:
+      dir: /data/storage
+blocks_storage:
+  backend: filesystem
+  filesystem:
+    dir: /data/blocks
+ruler_storage:
+  backend: filesystem
+  filesystem:
+    dir: /data/ruler

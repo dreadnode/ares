@@ -1,6 +1,5 @@
 use anyhow::Result;
 use chrono::Utc;
-use sqlx::AssertSqlSafe;
 
 use super::connect_postgres;
 use super::types::OperationRow;
@@ -17,7 +16,6 @@ pub(crate) async fn history_list(
 
     let since = since_days.map(|days| Utc::now() - chrono::Duration::days(days));
 
-    // Build dynamic query
     let mut query = String::from(
         "SELECT operation_id, target_domain, target_ip::text, started_at, completed_at, \
          has_domain_admin, has_golden_ticket, \
@@ -49,7 +47,7 @@ pub(crate) async fn history_list(
     bind_idx += 1;
     query.push_str(&format!(" ORDER BY started_at DESC LIMIT ${bind_idx}"));
 
-    let mut q = sqlx::query_as::<_, OperationRow>(AssertSqlSafe(query));
+    let mut q = sqlx::query_as::<_, OperationRow>(sqlx::AssertSqlSafe(query.as_str()));
 
     if let Some(ref d) = domain {
         q = q.bind(format!("%{d}%"));

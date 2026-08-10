@@ -19,7 +19,20 @@
 
 **Attack Path**: {{ domain_admin_path | default(value="Path not recorded") }}
 
-{% if domain_admin_chain %}
+{% if domains_compromised %}
+**Domains Compromised**: {{ domains_compromised }} ({{ compromised_domains | join(sep=", ") }})
+{% endif %}
+
+{% if domain_admin_chains %}
+{% for chain in domain_admin_chains %}
+#### Credential Chain to Domain Admin — {{ chain.domain }}
+
+{% for step in chain.steps %}
+{{ loop.index }}. **{{ step.domain }}\{{ step.username }}** {% if step.type == "hash" %}({{ step.hash_type }} hash){% else %}(password){% endif %}
+   - Discovered via: {{ step.source }}
+{% endfor %}
+{% endfor %}
+{% elif domain_admin_chain %}
 #### Credential Chain to Domain Admin
 
 {% for step in domain_admin_chain %}
@@ -46,12 +59,14 @@ Persistent domain access has been established via Golden Ticket.
 | Domain Admin Access | {{ da_display }} |
 | Golden Ticket | {{ gt_display }} |
 | Domains Discovered | {{ domains | length }} |
+| Domains Compromised (krbtgt) | {{ domains_compromised | default(value=0) }} |
 | Hosts Discovered | {{ hosts | length }} ({{ dc_count }} DCs) |
 | Users Discovered | {{ users | length }} |
 | Credentials Obtained | {{ credentials | length }} |
 | NTLM Hashes Captured | {{ hashes | length }} |
 | Vulnerabilities Found | {{ vulnerabilities_found }} |
 | Vulnerabilities Exploited | {{ vulnerabilities_exploited }} |
+| Vulnerabilities Superseded | {{ vulnerabilities_superseded | default(value=0) }} |
 | Network Shares | {{ shares | length }} |
 
 ---

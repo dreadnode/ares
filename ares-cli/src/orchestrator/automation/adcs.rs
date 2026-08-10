@@ -1,5 +1,6 @@
 //! auto_adcs_enumeration -- detect ADCS servers via CertEnroll share.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +12,53 @@ use ares_llm::ToolCall;
 
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
+
+/// Principals whose secrets land in state but which can never complete an
+/// LDAP bind, so `certipy_find` must not be dispatched as them.
+///
+/// `krbtgt` is the load-bearing case: it is permanently disabled, its NTLM
+/// hash and AES key enter state on every successful DCSync, and the
+/// newest-first tier ordering pushes that fresh row to the FRONT of the
+/// candidate list. Each CA host then burns a certipy_find that the worker's
+/// credential resolver refuses before dispatch. `Guest` is disabled by default
+/// in AD and fails the same way.
+fn is_non_logon_principal(username: &str) -> bool {
+    let u = username.trim().to_ascii_lowercase();
+    let bare = u.split_once('@').map_or(u.as_str(), |(user, _)| user);
+    matches!(bare, "krbtgt" | "guest")
+}
+
+/// Whether a zero-vulnerability `certipy_find` result came back without the
+/// tool ever completing an authenticated bind.
+///
+/// `vulns_found == 0` is produced by two very different outcomes: the CA was
+/// enumerated and genuinely holds no vulnerable template, or the bind never
+/// succeeded so nothing was enumerated at all. Only the first justifies
+/// locking the dedup key for the rest of the operation — the second locks a CA
+/// host against every credential that lands later, which is how the ADCS route
+/// into a foreign forest stays closed after one forged-ticket attempt.
+///
+/// certipy exits 0 either way and the worker reports no transport error, so
+/// the raw output is the only thing separating them. `invalidCredentials
+/// (data 52e)` is the LDAP bind rejection documented in
+/// `ares-tools/src/privesc/adcs.rs`; the `KDC_ERR_` family covers the Kerberos
+/// path a forged inter-realm ticket fails on. A successful enumeration always
+/// prints the `CA Name` line `parse_certipy_find` keys on, so seeing one
+/// vetoes the retry no matter what else is in the output.
+fn find_result_is_unauthenticated(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    if lower.contains("ca name") {
+        return false;
+    }
+    [
+        "invalidcredentials",
+        "data 52e",
+        "kdc_err_",
+        "status_logon_failure",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
 
 /// Extract domain from an ADCS host's FQDN.
 /// e.g. "srv01.fabrikam.local" -> "fabrikam.local"
@@ -176,20 +224,33 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
             // Same-domain creds first, same-forest cross-domain creds second,
             // and stop at the first unprocessed dedup key. Chained iterators —
             // no intermediate Vec — to satisfy clippy::needless_collect.
+            // Within each tier iterate NEWEST-first (`.rev()` over the
+            // insertion-ordered credential list). A principal freshly owned via
+            // an ACL kill-chain (ForceChangePassword / shadow credentials on a
+            // target user) is appended last; only one certipy_find is dispatched
+            // per CA host per tick, so oldest-first parks the just-gained
+            // principal at the back of the backlog and in a time-bounded op it
+            // never gets enumerated as itself — its ESC1/ESC4-controlled
+            // templates stay invisible. Newest-first hands the fresh win priority
+            // so the ACL→ADCS re-enum fires next tick. Dedup still guarantees
+            // older creds each get their turn — this only reorders, never drops.
             let cred = state
                 .credentials
                 .iter()
+                .rev()
                 .filter(|c| {
                     !c.password.is_empty()
                         && c.domain.to_lowercase() == domain_lower
+                        && !is_non_logon_principal(&c.username)
                         && !state.is_delegation_account(&c.username)
                         && !state.is_principal_quarantined(&c.username, &c.domain)
                 })
-                .chain(state.credentials.iter().filter(|c| {
+                .chain(state.credentials.iter().rev().filter(|c| {
                     let cd = c.domain.to_lowercase();
                     !c.password.is_empty()
                         && cd != domain_lower
                         && state.forest_root_of(&cd) == target_forest
+                        && !is_non_logon_principal(&c.username)
                         && !state.is_delegation_account(&c.username)
                         && !state.is_principal_quarantined(&c.username, &c.domain)
                 }))
@@ -198,57 +259,66 @@ fn collect_adcs_work(state: &StateInner) -> Vec<AdcsWork> {
 
             // Look for NTLM hash (PTH) only if cred path is exhausted (no
             // unprocessed cred candidate exists). Same identity-aware dedup.
-            let hash_pick = if cred.is_none() {
-                let pred_admin_same = |h: &&ares_core::models::Hash| {
-                    h.hash_type.eq_ignore_ascii_case("ntlm")
-                        && (h.domain.to_lowercase() == domain_lower || h.domain.is_empty())
-                        && h.username.to_lowercase() == "administrator"
-                };
-                let pred_any_same = |h: &&ares_core::models::Hash| {
-                    h.hash_type.eq_ignore_ascii_case("ntlm")
-                        && (h.domain.to_lowercase() == domain_lower || h.domain.is_empty())
-                        && !state.is_delegation_account(&h.username)
-                };
-                let same_forest = |h: &&ares_core::models::Hash| -> bool {
-                    let hd = h.domain.to_lowercase();
-                    !hd.is_empty() && state.forest_root_of(&hd) == target_forest
-                };
-                let pred_admin_xdom = |h: &&ares_core::models::Hash| {
-                    h.hash_type.eq_ignore_ascii_case("ntlm")
-                        && same_forest(h)
-                        && h.username.to_lowercase() == "administrator"
-                };
-                let pred_any_xdom = |h: &&ares_core::models::Hash| {
-                    h.hash_type.eq_ignore_ascii_case("ntlm")
-                        && same_forest(h)
-                        && !state.is_delegation_account(&h.username)
-                };
+            let hash_pick =
+                if cred.is_none() {
+                    let pred_admin_same = |h: &&ares_core::models::Hash| {
+                        h.hash_type.eq_ignore_ascii_case("ntlm")
+                            && (h.domain.to_lowercase() == domain_lower || h.domain.is_empty())
+                            && h.username.to_lowercase() == "administrator"
+                    };
+                    let pred_any_same = |h: &&ares_core::models::Hash| {
+                        h.hash_type.eq_ignore_ascii_case("ntlm")
+                            && (h.domain.to_lowercase() == domain_lower || h.domain.is_empty())
+                            && !is_non_logon_principal(&h.username)
+                            && !state.is_delegation_account(&h.username)
+                    };
+                    let same_forest = |h: &&ares_core::models::Hash| -> bool {
+                        let hd = h.domain.to_lowercase();
+                        !hd.is_empty() && state.forest_root_of(&hd) == target_forest
+                    };
+                    let pred_admin_xdom = |h: &&ares_core::models::Hash| {
+                        h.hash_type.eq_ignore_ascii_case("ntlm")
+                            && same_forest(h)
+                            && h.username.to_lowercase() == "administrator"
+                    };
+                    let pred_any_xdom = |h: &&ares_core::models::Hash| {
+                        h.hash_type.eq_ignore_ascii_case("ntlm")
+                            && same_forest(h)
+                            && !is_non_logon_principal(&h.username)
+                            && !state.is_delegation_account(&h.username)
+                    };
 
-                let mut candidates: Vec<&ares_core::models::Hash> = Vec::new();
-                candidates.extend(state.hashes.iter().filter(pred_admin_same));
-                candidates.extend(state.hashes.iter().filter(pred_any_same).filter(|h| {
-                    h.username.to_lowercase() != "administrator"
-                        || (h.domain.to_lowercase() != domain_lower && !h.domain.is_empty())
-                }));
-                candidates.extend(
-                    state.hashes.iter().filter(pred_admin_xdom).filter(|h| {
-                        h.domain.to_lowercase() != domain_lower && !h.domain.is_empty()
-                    }),
-                );
-                candidates.extend(
-                    state
-                        .hashes
-                        .iter()
-                        .filter(pred_any_xdom)
-                        .filter(|h| h.username.to_lowercase() != "administrator"),
-                );
-                candidates
-                    .into_iter()
-                    .find(|h| !state.is_processed(DEDUP_ADCS_SERVERS, &dedup_key_hash(&host_ip, h)))
-                    .cloned()
-            } else {
-                None
-            };
+                    // NEWEST-first within each tier (see the cred comment above): a
+                    // hash freshly dumped from a just-owned principal jumps its tier's
+                    // queue instead of waiting behind stale hashes.
+                    let mut candidates: Vec<&ares_core::models::Hash> = Vec::new();
+                    candidates.extend(state.hashes.iter().rev().filter(pred_admin_same));
+                    candidates.extend(state.hashes.iter().rev().filter(pred_any_same).filter(
+                        |h| {
+                            h.username.to_lowercase() != "administrator"
+                                || (h.domain.to_lowercase() != domain_lower && !h.domain.is_empty())
+                        },
+                    ));
+                    candidates.extend(state.hashes.iter().rev().filter(pred_admin_xdom).filter(
+                        |h| h.domain.to_lowercase() != domain_lower && !h.domain.is_empty(),
+                    ));
+                    candidates.extend(
+                        state
+                            .hashes
+                            .iter()
+                            .rev()
+                            .filter(pred_any_xdom)
+                            .filter(|h| h.username.to_lowercase() != "administrator"),
+                    );
+                    candidates
+                        .into_iter()
+                        .find(|h| {
+                            !state.is_processed(DEDUP_ADCS_SERVERS, &dedup_key_hash(&host_ip, h))
+                        })
+                        .cloned()
+                } else {
+                    None
+                };
             // Kerberos ticket fallback — when no same-forest plaintext cred
             // or NTLM hash exists (common for a freshly-discovered foreign
             // forest), a pre-forged inter-realm ccache is enough for
@@ -364,12 +434,16 @@ pub async fn auto_adcs_enumeration(
                 .collect();
             let ce_count = certenroll_shares.len();
             let ce_hosts: Vec<_> = certenroll_shares.iter().map(|s| s.host.as_str()).collect();
-            let cred_domains: Vec<_> = state
-                .credentials
-                .iter()
-                .map(|c| c.domain.as_str())
-                .collect();
-            let hash_domains: Vec<_> = state.hashes.iter().map(|h| h.domain.as_str()).collect();
+            let cred_domains: BTreeMap<&str, usize> =
+                state.credentials.iter().fold(BTreeMap::new(), |mut m, c| {
+                    *m.entry(c.domain.as_str()).or_insert(0) += 1;
+                    m
+                });
+            let hash_domains: BTreeMap<&str, usize> =
+                state.hashes.iter().fold(BTreeMap::new(), |mut m, h| {
+                    *m.entry(h.domain.as_str()).or_insert(0) += 1;
+                    m
+                });
             let domains: Vec<_> = state.domains.iter().map(|d| d.as_str()).collect();
             let w = collect_adcs_work(&state);
             info!(
@@ -481,10 +555,49 @@ pub async fn auto_adcs_enumeration(
                             "Deterministic certipy_find completed"
                         );
                         // No vulns + no transport error → genuine "nothing
-                        // vulnerable here". Keep dedup locked. The exec
+                        // vulnerable here", PROVIDED the bind actually
+                        // succeeded. Keep dedup locked only then. The exec
                         // path may also emit an error if creds were
                         // missing — in which case clear dedup to allow a
                         // later credential to retry.
+                        if exec.error.is_none()
+                            && vulns_found == 0
+                            && find_result_is_unauthenticated(&exec.output)
+                        {
+                            let (attempts, may_retry) = dispatcher_bg
+                                .state
+                                .record_adcs_unauth_retry(&dedup_key_bg)
+                                .await;
+                            if may_retry {
+                                warn!(
+                                    task_id = %task_id_bg,
+                                    ca_host = %host_ip_bg,
+                                    attempts,
+                                    max_attempts = crate::orchestrator::state::MAX_ADCS_UNAUTH_RETRIES,
+                                    "Deterministic certipy_find enumerated nothing because the bind never authenticated — clearing dedup so a later credential can retry this CA"
+                                );
+                                dispatcher_bg
+                                    .state
+                                    .write()
+                                    .await
+                                    .unmark_processed(DEDUP_ADCS_SERVERS, &dedup_key_bg);
+                                let _ = dispatcher_bg
+                                    .state
+                                    .unpersist_dedup(
+                                        &dispatcher_bg.queue,
+                                        DEDUP_ADCS_SERVERS,
+                                        &dedup_key_bg,
+                                    )
+                                    .await;
+                            } else {
+                                warn!(
+                                    task_id = %task_id_bg,
+                                    ca_host = %host_ip_bg,
+                                    attempts,
+                                    "Deterministic certipy_find bind never authenticated after the retry cap — keeping dedup locked for this credential; a different credential gets its own key"
+                                );
+                            }
+                        }
                         if let Some(err) = exec.error {
                             warn!(
                                 task_id = %task_id_bg,
@@ -575,8 +688,6 @@ mod tests {
         }
     }
 
-    // --- collect_adcs_work tests ---
-
     #[test]
     fn collect_empty_state_returns_no_work() {
         let state = StateInner::new("test-op".into());
@@ -608,6 +719,91 @@ mod tests {
         assert_eq!(work[0].host_ip, "192.168.58.50");
         assert_eq!(work[0].domain, "contoso.local");
         assert_eq!(work[0].credential.username, "admin");
+    }
+
+    fn make_hash(username: &str, domain: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("h-{username}"),
+            username: username.into(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee:abcdef0123456789".into(),
+            hash_type: "ntlm".into(),
+            domain: domain.into(),
+            cracked_password: None,
+            source: "test".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    /// A DC in `domain` reachable over LDAP, nothing else in state.
+    fn state_with_ldap_dc(domain: &str, ip: &str) -> StateInner {
+        let mut state = StateInner::new("test-op".into());
+        let mut dc = make_host(ip, &format!("dc01.{domain}"), true);
+        dc.services.push("389/tcp ldap".into());
+        state.hosts.push(dc);
+        state.domains.push(domain.into());
+        state
+    }
+
+    #[test]
+    fn collect_never_selects_krbtgt_as_the_enumeration_principal() {
+        let mut state = state_with_ldap_dc("contoso.local", "192.168.58.10");
+        state.hashes.push(make_hash("krbtgt", "contoso.local"));
+
+        assert!(
+            collect_adcs_work(&state).is_empty(),
+            "krbtgt is permanently disabled — certipy_find can never bind as it"
+        );
+    }
+
+    #[test]
+    fn collect_never_selects_guest_as_the_enumeration_principal() {
+        let mut state = state_with_ldap_dc("contoso.local", "192.168.58.10");
+        state.hashes.push(make_hash("Guest", "contoso.local"));
+
+        assert!(collect_adcs_work(&state).is_empty());
+    }
+
+    #[test]
+    fn collect_skips_krbtgt_but_still_uses_a_usable_principal_behind_it() {
+        let mut state = state_with_ldap_dc("contoso.local", "192.168.58.10");
+        state.hashes.push(make_hash("alice", "contoso.local"));
+        // Newest-first ordering puts the freshly-DCSynced krbtgt row in front.
+        state.hashes.push(make_hash("krbtgt", "contoso.local"));
+
+        let work = collect_adcs_work(&state);
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].credential.username, "alice",
+            "krbtgt must be skipped over, not block the CA host entirely"
+        );
+    }
+
+    #[test]
+    fn collect_never_selects_a_krbtgt_cleartext_credential() {
+        let mut state = state_with_ldap_dc("contoso.local", "192.168.58.10");
+        state
+            .credentials
+            .push(make_credential("krbtgt", "P@ssw0rd!", "contoso.local")); // pragma: allowlist secret
+
+        assert!(collect_adcs_work(&state).is_empty());
+    }
+
+    #[test]
+    fn non_logon_principal_matches_case_and_upn_forms() {
+        assert!(is_non_logon_principal("krbtgt"));
+        assert!(is_non_logon_principal("KRBTGT"));
+        assert!(is_non_logon_principal(" krbtgt@contoso.local "));
+        assert!(is_non_logon_principal("Guest"));
+        assert!(!is_non_logon_principal("alice"));
+        assert!(!is_non_logon_principal("krbtgt_svc"));
+        assert!(!is_non_logon_principal("guestuser"));
     }
 
     #[test]
@@ -967,5 +1163,69 @@ mod tests {
         });
         assert!(selected.is_some());
         assert_eq!(selected.unwrap().domain, "fabrikam.local");
+    }
+
+    #[test]
+    fn enumerated_ca_with_no_vulnerable_template_stays_locked() {
+        let output = "Certificate Authorities\n                      CA Name                             : CONTOSO-CA\n                      DNS Name                            : ca01.contoso.local\n                      [*] No vulnerable certificate templates found";
+        assert!(
+            !find_result_is_unauthenticated(output),
+            "the bind worked and the CA was read — locking dedup is correct here"
+        );
+    }
+
+    #[test]
+    fn ldap_bind_rejection_is_not_treated_as_a_clean_enumeration() {
+        let output = "[-] Got error while trying to authenticate: \
+                      invalidCredentials (data 52e, v4563)";
+        assert!(find_result_is_unauthenticated(output));
+    }
+
+    #[test]
+    fn kerberos_failure_from_a_forged_cross_forest_ticket_is_retryable() {
+        for output in [
+            "[-] Kerberos SessionError: KDC_ERR_S_PRINCIPAL_UNKNOWN",
+            "[-] KDC_ERR_WRONG_REALM",
+            "[-] KDC_ERR_PREAUTH_FAILED",
+        ] {
+            assert!(
+                find_result_is_unauthenticated(output),
+                "unexpectedly locked on: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn smb_logon_failure_is_retryable() {
+        assert!(find_result_is_unauthenticated(
+            "[-] SMB SessionError: STATUS_LOGON_FAILURE"
+        ));
+    }
+
+    #[test]
+    fn a_ca_name_vetoes_the_retry_even_alongside_an_auth_error() {
+        let output =
+            "CA Name : CONTOSO-CA\n[-] Got error: KDC_ERR_PREAUTH_FAILED on a later template";
+        assert!(
+            !find_result_is_unauthenticated(output),
+            "the CA was enumerated, so 0 vulns is a real answer"
+        );
+    }
+
+    #[test]
+    fn a_host_that_simply_runs_no_adcs_stays_locked() {
+        assert!(
+            !find_result_is_unauthenticated(
+                "[*] Finding certificate templates\n[*] Got 0 templates"
+            ),
+            "no auth-failure marker means the bind was fine and this host just has no CA"
+        );
+    }
+
+    #[test]
+    fn auth_failure_markers_are_case_insensitive() {
+        assert!(find_result_is_unauthenticated(
+            "InvalidCredentials (DATA 52E)"
+        ));
     }
 }

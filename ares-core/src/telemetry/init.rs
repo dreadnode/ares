@@ -88,7 +88,6 @@ pub fn init_telemetry(config: TelemetryConfig) -> TelemetryGuard {
         .with_file(false)
         .with_line_number(false);
 
-    // Try to set up OTLP exporter if endpoint is configured.
     let otel = try_init_otel_provider(&config.service_name);
 
     match otel {
@@ -129,18 +128,39 @@ pub fn shutdown_telemetry(guard: &mut TelemetryGuard) {
 
 /// Attempt to build an OTLP span exporter + tracer provider. Returns `None` if
 /// no OTLP endpoint is configured (neither `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
-/// nor `OTEL_EXPORTER_OTLP_ENDPOINT`).
+/// nor `OTEL_EXPORTER_OTLP_ENDPOINT`). Every return path says why: a run that
+/// exports no spans is indistinguishable from a healthy one at the collector,
+/// so the reason has to be on stderr or the empty Tempo pane is undiagnosable.
 fn try_init_otel_provider(service_name: &str) -> Option<SdkTracerProvider> {
     // The OTel SDK reads OTEL_EXPORTER_OTLP_* env vars automatically.
     // We check presence and validity so we can skip provider creation entirely
     // when no collector is reachable — avoids noisy connection-refused or
     // RelativeUrlWithoutBase errors from the BatchSpanProcessor.
-    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+    let raw = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT"))
-        .ok()
-        .filter(|v| !v.is_empty());
+        .ok();
 
-    let endpoint = endpoint?;
+    // Set-but-blank is almost always a config var that never got substituted.
+    // Exporting nothing looks identical to a healthy exporter from the outside,
+    // so say it out loud instead of dropping every span in silence. Unset is a
+    // legitimate local-dev case and stays quiet.
+    let endpoint = match raw {
+        Some(v) if v.is_empty() => {
+            eprintln!(
+                "OTEL endpoint is set but empty: traces are disabled. Set \
+                 OTEL_EXPORTER_OTLP_TRACES_ENDPOINT to an absolute URL to export spans."
+            );
+            return None;
+        }
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "OTEL endpoint is not set: traces are disabled and Tempo will be empty for \
+                 this run. Set OTEL_EXPORTER_OTLP_ENDPOINT to an absolute URL to export spans."
+            );
+            return None;
+        }
+    };
 
     // Reject non-absolute URLs early (e.g. un-substituted template placeholders)
     // to avoid noisy BatchSpanProcessor errors every flush interval.

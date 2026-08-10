@@ -44,6 +44,16 @@ pub struct OrchestratorConfig {
     /// How long before an in-progress task with no activity is considered stale.
     pub stale_task_timeout: Duration,
 
+    /// Stale timeout for non-LLM tasks (`crack`, `command`). Hashcat cracks can
+    /// run for a long AES Kerberoast budget and may wait behind the
+    /// AES-exclusive permit, so reaping these on the LLM `stale_task_timeout`
+    /// throws away in-flight cracks the tool would have completed. Kept above
+    /// the dispatch ceiling and never halved under LLM hard-cap pressure so the
+    /// reaper is a true backstop, not a premature killer.
+    pub non_llm_task_timeout: Duration,
+
+    pub task_hard_timeout: Duration,
+
     /// Maximum age for deferred tasks before eviction (seconds).
     pub deferred_task_max_age: Duration,
 
@@ -70,6 +80,10 @@ pub struct OrchestratorConfig {
     /// Resolved from `ARES_LISTENER_IP` env var, or auto-detected via UDP socket
     /// probe toward the first target IP.
     pub listener_ip: Option<String>,
+}
+
+fn clamp_task_hard_timeout(requested_secs: u64, non_llm_task_timeout_secs: u64) -> u64 {
+    requested_secs.max(non_llm_task_timeout_secs.saturating_add(1))
 }
 
 /// A credential provided at operation launch time.
@@ -127,28 +141,36 @@ impl OrchestratorConfig {
                     ic.get("username").and_then(|v| v.as_str()),
                     ic.get("password").and_then(|v| v.as_str()),
                 ) {
-                    (Some(user), Some(pass)) => Some(InitialCredential {
-                        username: user.to_string(),
-                        password: pass.to_string(),
-                        domain: ic
-                            .get("domain")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(&domain)
-                            .to_string(),
-                    }),
+                    (Some(user), Some(pass)) if !user.is_empty() && !pass.is_empty() => {
+                        Some(InitialCredential {
+                            username: user.to_string(),
+                            password: pass.to_string(),
+                            domain: ic
+                                .get("domain")
+                                .and_then(|v| v.as_str())
+                                .filter(|d| !d.is_empty())
+                                .unwrap_or(&domain)
+                                .to_string(),
+                        })
+                    }
                     _ => None,
                 }
             } else {
-                // Flat field fallback
                 match (
                     v["initial_username"].as_str(),
                     v["initial_password"].as_str(),
                 ) {
-                    (Some(user), Some(pass)) => Some(InitialCredential {
-                        username: user.to_string(),
-                        password: pass.to_string(),
-                        domain: v["initial_domain"].as_str().unwrap_or(&domain).to_string(),
-                    }),
+                    (Some(user), Some(pass)) if !user.is_empty() && !pass.is_empty() => {
+                        Some(InitialCredential {
+                            username: user.to_string(),
+                            password: pass.to_string(),
+                            domain: v["initial_domain"]
+                                .as_str()
+                                .filter(|d| !d.is_empty())
+                                .unwrap_or(&domain)
+                                .to_string(),
+                        })
+                    }
                     _ => None,
                 }
             };
@@ -190,6 +212,13 @@ impl OrchestratorConfig {
         let max_tasks_per_role = parse_env("ARES_MAX_TASKS_PER_ROLE", 3);
         let dispatch_delay_ms = parse_env("ARES_DISPATCH_DELAY_MS", 200);
         let stale_task_timeout_secs = parse_env("ARES_STALE_TASK_TIMEOUT_SECS", 300);
+        // Above DEFAULT_TOOL_TIMEOUT_SECS (5700) so the dispatcher's own result
+        // — success or timeout-failure — always lands before this backstop fires.
+        let non_llm_task_timeout_secs = parse_env("ARES_NON_LLM_TASK_TIMEOUT_SECS", 6000);
+        let task_hard_timeout_secs = clamp_task_hard_timeout(
+            parse_env("ARES_TASK_HARD_TIMEOUT_SECS", 7200u64),
+            non_llm_task_timeout_secs,
+        );
         let deferred_task_max_age_secs = parse_env("ARES_DEFERRED_TASK_MAX_AGE_SECS", 300);
         let max_deferred_per_type = parse_env("ARES_MAX_DEFERRED_PER_TYPE", 50);
         let max_deferred_total = parse_env("ARES_MAX_DEFERRED_TOTAL", 200);
@@ -207,6 +236,8 @@ impl OrchestratorConfig {
             max_tasks_per_role,
             dispatch_delay: Duration::from_millis(dispatch_delay_ms),
             stale_task_timeout: Duration::from_secs(stale_task_timeout_secs),
+            non_llm_task_timeout: Duration::from_secs(non_llm_task_timeout_secs),
+            task_hard_timeout: Duration::from_secs(task_hard_timeout_secs),
             deferred_task_max_age: Duration::from_secs(deferred_task_max_age_secs),
             max_deferred_per_type,
             max_deferred_total,
@@ -216,6 +247,58 @@ impl OrchestratorConfig {
             strategy,
             listener_ip,
         })
+    }
+
+    /// Expand `target_ips` to cover the entire /24 around any cluster of
+    /// 2+ existing target IPs. Returns the count of IPs added.
+    ///
+    /// Bootstrap launches in CTF / lab scenarios typically pass just the
+    /// known DC IPs (`192.168.58.10,11,12,22,23`). The interesting attack
+    /// surface lives elsewhere in the same /24 — SQL server, web server,
+    /// CA web enrollment, workstation. With `target_ips` limited to the
+    /// 5 DCs, [`crate::orchestrator::dispatcher::Dispatcher::request_recon`]
+    /// only probes those five and [`ares_tools::scope::OperationScope`]
+    /// rejects single-target attacks against anything else, leaving the
+    /// agent loop unable to pivot onto discovered hosts.
+    ///
+    /// Gated on `ARES_SCOPE_EXPAND_SUBNETS=1` so production engagements
+    /// keep the strict "only authorized IPs" guarantee. When enabled, we
+    /// add every host in each clustered /24 (`a.b.c.1` through `a.b.c.254`,
+    /// skipping the network and broadcast addresses) to `target_ips`.
+    pub fn expand_scope_to_subnets(&mut self) -> usize {
+        if std::env::var("ARES_SCOPE_EXPAND_SUBNETS").ok().as_deref() != Some("1") {
+            return 0;
+        }
+        use std::collections::BTreeSet;
+        use std::net::Ipv4Addr;
+        let mut prefixes: std::collections::BTreeMap<[u8; 3], usize> =
+            std::collections::BTreeMap::new();
+        for s in &self.target_ips {
+            if let Ok(ip) = s.parse::<Ipv4Addr>() {
+                let oc = ip.octets();
+                *prefixes.entry([oc[0], oc[1], oc[2]]).or_insert(0) += 1;
+            }
+        }
+        let cluster_prefixes: Vec<[u8; 3]> = prefixes
+            .into_iter()
+            .filter(|(_, n)| *n >= 2)
+            .map(|(p, _)| p)
+            .collect();
+        if cluster_prefixes.is_empty() {
+            return 0;
+        }
+        let mut existing: BTreeSet<String> = self.target_ips.iter().cloned().collect();
+        let mut added = 0;
+        for p in cluster_prefixes {
+            for host in 1u8..=254 {
+                let ip = format!("{}.{}.{}.{}", p[0], p[1], p[2], host);
+                if existing.insert(ip.clone()) {
+                    self.target_ips.push(ip);
+                    added += 1;
+                }
+            }
+        }
+        added
     }
 
     /// Hard cap = 1.5x the soft concurrency limit. Tasks above this are deferred.
@@ -275,7 +358,7 @@ fn detect_local_ip(target: Option<&str>) -> Option<String> {
 }
 
 /// Parse an environment variable into a numeric type, falling back to `default`.
-fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> T {
+pub(super) fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> T {
     env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
@@ -309,6 +392,8 @@ mod tests {
             max_tasks_per_role: 3,
             dispatch_delay: Duration::from_millis(0),
             stale_task_timeout: Duration::from_secs(900),
+            non_llm_task_timeout: Duration::from_secs(6000),
+            task_hard_timeout: Duration::from_secs(7200),
             deferred_task_max_age: Duration::from_secs(300),
             max_deferred_per_type: 50,
             max_deferred_total: 200,
@@ -445,6 +530,47 @@ mod tests {
     }
 
     #[test]
+    fn expand_scope_to_subnets_combined() {
+        // Single test to avoid env-var races between parallel tests. Mirrors
+        // the from_env_plain_and_json_and_missing test pattern.
+        std::env::remove_var("ARES_SCOPE_EXPAND_SUBNETS");
+
+        // Env unset → no expansion even when targets are clustered.
+        {
+            let mut cfg = make_config(8);
+            cfg.target_ips = vec!["192.168.58.10".into(), "192.168.58.11".into()];
+            assert_eq!(cfg.expand_scope_to_subnets(), 0);
+            assert_eq!(cfg.target_ips.len(), 2);
+        }
+
+        // Env set, but no /24 has 2+ targets → no expansion.
+        std::env::set_var("ARES_SCOPE_EXPAND_SUBNETS", "1");
+        {
+            let mut cfg = make_config(8);
+            cfg.target_ips = vec!["192.168.58.10".into(), "192.168.59.10".into()];
+            assert_eq!(cfg.expand_scope_to_subnets(), 0);
+        }
+
+        // Env set + clustered targets → fans out to full /24 (skipping .0/.255).
+        {
+            let mut cfg = make_config(8);
+            cfg.target_ips = vec![
+                "192.168.58.10".into(),
+                "192.168.58.11".into(),
+                "192.168.58.12".into(),
+            ];
+            assert_eq!(cfg.expand_scope_to_subnets(), 251);
+            assert_eq!(cfg.target_ips.len(), 254);
+            assert!(cfg.target_ips.contains(&"192.168.58.50".to_string()));
+            assert!(cfg.target_ips.contains(&"192.168.58.254".to_string()));
+            assert!(!cfg.target_ips.contains(&"192.168.58.0".to_string()));
+            assert!(!cfg.target_ips.contains(&"192.168.58.255".to_string()));
+        }
+
+        std::env::remove_var("ARES_SCOPE_EXPAND_SUBNETS");
+    }
+
+    #[test]
     fn detect_local_ip_returns_some() {
         // Uses 8.8.8.8 as default destination — should resolve to a local interface
         // unless we're running in a network-less sandbox.
@@ -466,5 +592,22 @@ mod tests {
         assert!(cfg.initial_credential.is_none());
         // Default strategy should be Fast
         assert!(!cfg.strategy.should_continue_after_da());
+    }
+
+    #[test]
+    fn task_hard_timeout_is_raised_above_the_reaper_when_set_too_low() {
+        assert_eq!(clamp_task_hard_timeout(60, 6000), 6001);
+        assert_eq!(clamp_task_hard_timeout(6000, 6000), 6001);
+    }
+
+    #[test]
+    fn task_hard_timeout_is_left_alone_when_already_above_the_reaper() {
+        assert_eq!(clamp_task_hard_timeout(7200, 6000), 7200);
+        assert_eq!(clamp_task_hard_timeout(u64::MAX, 6000), u64::MAX);
+    }
+
+    #[test]
+    fn task_hard_timeout_clamp_cannot_overflow() {
+        assert_eq!(clamp_task_hard_timeout(0, u64::MAX), u64::MAX);
     }
 }

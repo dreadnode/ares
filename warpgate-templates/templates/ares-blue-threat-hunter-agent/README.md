@@ -91,21 +91,10 @@ docker run --rm --entrypoint mcp-grafana ares-blue-threat-hunter-agent:latest --
   - `mcp-grafana` for Grafana observability integration
 - **Build Process:**
   - Installs `mcp-grafana` binary (architecture-specific)
-  - Clones ares repository from `feature/rust-cli` branch
+  - Clones ares repository from the `main` branch
   - Compiles Rust binary with `--features python` for Python interop
   - Installs binary to `/usr/local/bin/ares`
   - Cleans up build artifacts
-
----
-
-## Differences from ares-blue-threat-hunter-agent (Python)
-
-| Component | Python | Rust |
-| ----------- | ---------------------- | ------------------ |
-| Entrypoint | `python -m ares --args.multi-agent` | `ares worker` (binary) |
-| Runtime | Python interpreter | Compiled Rust + embedded Python |
-| Build | No compilation needed | Rust compilation with PyO3 |
-| mcp-grafana | Included | Included |
 
 ---
 

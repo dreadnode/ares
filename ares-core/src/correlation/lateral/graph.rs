@@ -73,7 +73,6 @@ impl LateralGraph {
         };
         self.connections.push(conn);
 
-        // Mark destination as pending if not yet investigated
         if !self.investigated_hosts.contains(&destination) {
             self.pending_hosts.insert(destination.clone());
             info!(host = %destination, "Added pending host for lateral investigation");

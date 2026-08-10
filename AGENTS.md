@@ -57,7 +57,7 @@ task remote:rust:deploy:config
 task ec2:deploy
 task ec2:deploy:config
 
-# EC2 full clean test cycle (mirrors K8s `red:multi:sync:align && red:multi`):
+# EC2 full clean test cycle (mirrors K8s `k8s:reset && k8s:deploy && red:multi`):
 ulimit -n 65536                      # zig linker chokes on huge fd limits
 export S3_BUCKET=your-deploy-bucket
 

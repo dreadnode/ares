@@ -39,7 +39,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-This builds **Ares Credential Access Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares Credential Access Agent** Docker images for `amd64` and `arm64` architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -65,13 +65,13 @@ After building the Docker image, you can push it to GHCR:
 
 ```bash
 # Tag the image
-docker tag ares-credential-access-agent:latest ghcr.io/dreadnode/ares-credential-access-agent:latest
+docker tag ares-credential-access-agent:latest ghcr.io/l50/ares-credential-access-agent:latest
 
 # Authenticate with GHCR
 echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
 
 # Push the image
-docker push ghcr.io/dreadnode/ares-credential-access-agent:latest
+docker push ghcr.io/l50/ares-credential-access-agent:latest
 ```
 
 ---
@@ -100,8 +100,9 @@ warpgate validate ares-credential-access-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_credential_access_tools` - Kerberos and credential tools
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-- Installed to `/usr/local/bin/ares`- **Installed Tools:**
+  - Compiled from the `main` branch with PyO3 Python bindings
+  - Installed to `/usr/local/bin/ares`
+- **Installed Tools:**
   - **Kerberos Tools** - Rubeus, GetNPUsers, GetUserSPNs for Kerberoasting and AS-REP roasting
   - **Impacket** - secretsdump, ntlmrelayx for credential extraction
   - **DCSync Tools** - mimikatz, pypykatz for domain credential extraction
@@ -109,7 +110,8 @@ warpgate validate ares-credential-access-agent
 - **Directory Structure:**
   - `/ares/` - Main Ares workspace directory
   - `/ares/.venv/` - Python virtual environment
-- `/usr/local/bin/ares` - Compiled Ares binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+  - `/usr/local/bin/ares` - Compiled Ares binary
+- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

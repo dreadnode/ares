@@ -10,12 +10,12 @@ mod util;
 
 #[cfg(feature = "blue")]
 pub use blue::{
-    BlueTaskInfo, Evidence, InvestigationStage, PyramidLevel, SharedBlueTeamState, TimelineEvent,
-    TriageDecision, TriageRecord,
+    BlueTaskInfo, Evidence, InvestigationStage, LateralMovement, PyramidLevel, SharedBlueTeamState,
+    TimelineEvent, TriageDecision, TriageRecord, SWEEP_TIMELINE_SOURCE,
 };
 pub use core::{
-    is_always_disabled_account, CandidateDomain, Credential, DomainEvidence, Hash, Host,
-    KerberosTicket, Share, Target, TrustInfo, User,
+    is_always_disabled_account, CandidateDomain, Credential, DomainEvidence,
+    ForceInterRealmForgeRequest, Hash, Host, KerberosTicket, Share, Target, TrustInfo, User,
 };
 pub use op_state_event::{OpStateEvent, OpStateEventPayload};
 pub use operation::{AttackChainStep, OperationMeta, SharedRedTeamState};

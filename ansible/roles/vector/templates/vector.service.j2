@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Vector (ares log shipper -> S3)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as root so it can read /var/log/ares and /var/log/{syslog,auth.log}.
+# AWS credentials resolve from the EC2 instance role (default credential chain).
+User=root
+Environment=VECTOR_LOG=info
+ExecStart={{ vector_install_dir }}/vector --config {{ vector_config_dir }}/vector.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

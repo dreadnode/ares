@@ -1,0 +1,113 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+  name: ares-attack-box-proxmox
+  version: 1.0.0
+  description: Proxmox VE VM template with all Ares red team tools - recon, credential access, privesc, cracking, lateral movement, ACL abuse, and coercion
+  author: Dreadnode <info@dreadnode.io>
+  license: MIT
+  tags:
+    - ares
+    - attack-box
+    - red-team
+    - proxmox
+    - reconnaissance
+    - credential-access
+    - privilege-escalation
+    - password-cracking
+    - lateral-movement
+    - acl
+    - coercion
+  requires:
+    warpgate: '>=4.8.0'
+
+name: ares-attack-box-proxmox
+version: latest
+
+# No `base:` block: the Proxmox target carries its own source via
+# `targets[].source_template_name`. Warpgate >= v4.8.0 treats a
+# proxmox-only build as self-sourced and skips the base.image requirement.
+
+sources:
+  # Use the in-repo ansible/ tree directly so builds match the working copy
+  # (no GITHUB_TOKEN, no branch ref drift). Path is relative to this template's
+  # directory; requires warpgate >= v4.7.0 (local source type).
+  - name: ansible
+    local:
+      path: ../../../ansible
+
+provisioners:
+  # Install pipx and Ansible. Provisioner runs over SSH as cloud-init's
+  # default user, so commands that touch system paths use sudo.
+  - type: shell
+    inline:
+      # Wait for cloud-init + apt-daily to release the apt-lists and dpkg
+      # locks — warpgate SSHes in fast enough to race them on fresh clones.
+      # cloud-init status --wait blocks until cloud-init finishes; the fuser
+      # loop also covers apt-daily timer activity that runs after that.
+      - sudo cloud-init status --wait >/dev/null 2>&1 || true
+      - sudo bash -c 'for i in $(seq 1 300); do fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; sleep 2; done'
+      - sudo apt-get -o DPkg::Lock::Timeout=300 update
+      - sudo apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends ca-certificates git procps sudo python3-apt python3-pip python3-venv pipx
+      - 'sudo sed -i ''s|^PATH="|PATH="/root/.local/bin:/root/.cargo/bin:|'' /etc/environment || echo ''PATH="/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'' | sudo tee /etc/environment'
+      # No --force: a pre-warmed base template may already have these
+      # installed, and `pipx install --force` calls `uv venv` which refuses
+      # to overwrite an existing venv ("A virtual environment already exists
+      # at: ."). Plain `install` is a no-op when already present.
+      - sudo pipx install --global uv
+      - sudo pipx install --global ansible-core
+      - sudo pipx ensurepath --global
+
+  # Copy the in-repo ansible/ subtree (the dreadnode.nimbus_range collection)
+  # into the build VM. Keeps the `nimbus_range` name because the collection
+  # is published as `dreadnode.nimbus_range`. `sudo: true` lets warpgate
+  # write into /root via `sudo tar -xf -` on the remote.
+  - type: file
+    sudo: true
+    source: ${sources.ansible}
+    destination: /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
+
+  # Run the goad_attack_box.yml playbook. GPU support is gated by
+  # CRACKING_TOOLS_GPU_SUPPORT (default false). Pass via warpgate
+  # --var CRACKING_TOOLS_GPU_SUPPORT=true (or export it as an env var)
+  # when you want hashcat-from-source + NVIDIA OpenCL ICD installed.
+  - type: shell
+    inline:
+      - sudo PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-galaxy collection install -r /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/requirements.yml --force
+      - 'GPU=${CRACKING_TOOLS_GPU_SUPPORT:-false}; sudo HOME=/root ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-playbook /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/playbooks/ares/goad_attack_box.yml -i localhost, -c local -e ansible_shell_executable=/bin/bash -e ansible_python_interpreter=/usr/bin/python3 -e cloud_provider=proxmox -e cracking_tools_gpu_support=${GPU} -e cracking_tools_hashcat_from_source=${GPU} -e cracking_tools_nvidia_opencl_icd=${GPU} -e cracking_tools_install_nvidia_driver=${GPU} -e cracking_tools_install_cuda_toolkit=${GPU}'
+
+  # NVIDIA driver + CUDA toolkit (only when GPU support requested). Requires
+  # the Proxmox host to be passing through a GPU (PCIe passthrough) for the
+  # nvidia kernel module build to be useful at runtime.
+  - type: shell
+    inline:
+      - 'if [ "${CRACKING_TOOLS_GPU_SUPPORT:-false}" = "true" ]; then sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-headers-$(uname -r) dkms nvidia-driver nvidia-cuda-toolkit; else echo "Skipping NVIDIA driver install (CRACKING_TOOLS_GPU_SUPPORT=false)"; fi'
+
+  # Cleanup so the resulting template is small and starts clean on first boot.
+  - type: shell
+    inline:
+      - sudo apt-get clean
+      - sudo rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+      - sudo cloud-init clean --logs || true
+      - echo "Ares attack-box (Proxmox) build completed successfully"
+
+targets:
+  # Endpoint + API token come from ~/.config/warpgate/config.yaml
+  # (proxmox.endpoint) and the PROXMOX_API_TOKEN environment variable.
+  # Override node / storage / pool with --proxmox-node, --proxmox-storage,
+  # --proxmox-pool at build time if you don't want them hard-coded.
+  - type: proxmox
+    node: ${PROXMOX_NODE}
+    source_template_name: ${PROXMOX_SOURCE_TEMPLATE}
+    template_name: ares-attack-box
+    storage: ${PROXMOX_STORAGE}
+    pool: ${PROXMOX_POOL}
+    linked_clone: false
+    agent_timeout_seconds: 600
+    cloud_init_user: kali
+    cloud_init_password: ${PROXMOX_CI_PASSWORD}
+    cloud_init_ssh_key: ${PROXMOX_CI_SSH_KEY}
+    cloud_init_ipconfig: ip=dhcp
+    cloud_init_nameserver: 1.1.1.1
+    ssh_username: kali
+    ssh_private_key: ${PROXMOX_SSH_PRIVATE_KEY}
+    ssh_port: 22

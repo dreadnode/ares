@@ -1,0 +1,19 @@
+# Tempo for visual replay: accepts OTLP-HTTP push on :4318 so captured
+# traces (see `ares benchmark capture` → `tempo/traces.jsonl.gz`) can be
+# re-ingested at replay time and render on the demo dashboard's
+# attack-graph panel. Query API stays on :3200 so the Grafana datasource
+# resolves the same way it did in the parity-only build.
+server:
+  http_listen_port: 3200
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal

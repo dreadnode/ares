@@ -1,8 +1,0 @@
-# OOMScoreAdjust: survive system-wide OOM when Ares workers exhaust memory.
-# Children (RunCommand, Session Manager) inherit this — fine here since heavy
-# subprocesses run under a separate unit.
-# MemoryMax: cgroup self-cap (containment for SSM leaks). Cgroup-local OOM
-# ignores OOMScoreAdjust, so the two are independent protections.
-[Service]
-OOMScoreAdjust=-900
-MemoryMax={{ aws_ssm_agent_memory_max }}

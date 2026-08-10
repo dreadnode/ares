@@ -80,7 +80,6 @@ pub fn blue_tools_for_role(role: BlueAgentRole) -> Vec<ToolDefinition> {
         }
     }
 
-    // Lateral connection tool only for lateral_analyst
     if role == BlueAgentRole::LateralAnalyst {
         tools.push(state::lateral_connection_tool_definition());
     }
@@ -91,6 +90,10 @@ pub fn blue_tools_for_role(role: BlueAgentRole) -> Vec<ToolDefinition> {
 fn triage_tool_definitions() -> Vec<ToolDefinition> {
     let mut tools = loki::loki_tool_definitions();
     tools.extend(grafana::grafana_tool_definitions());
+    // Triage is stage 1 (initial scoping) and must be able to invoke the
+    // pre-built detection templates (ADCS / AS-REP / cross-realm) directly,
+    // not just re-derive their LogQL by hand.
+    tools.extend(detection::detection_query_tool_definitions());
     tools.extend(learning::learning_tool_definitions());
     tools.extend(callbacks::worker_callback_definitions());
     tools
@@ -113,4 +116,88 @@ fn lateral_analyst_tool_definitions() -> Vec<ToolDefinition> {
     tools.extend(learning::learning_tool_definitions());
     tools.extend(callbacks::worker_callback_definitions());
     tools
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_names(role: BlueAgentRole) -> Vec<String> {
+        blue_tools_for_role(role)
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    }
+
+    #[test]
+    fn triage_has_detection_query_tools() {
+        // Triage is stage 1 and must be able to invoke the pre-built ADCS /
+        // AS-REP / cross-realm detection templates directly (P1).
+        let names = tool_names(BlueAgentRole::Triage);
+        assert!(
+            names.iter().any(|n| n == "run_detection_query"),
+            "triage should expose run_detection_query, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "run_parallel_detections"),
+            "triage should expose run_parallel_detections, got: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "list_detection_templates"),
+            "triage should expose list_detection_templates, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn threat_hunter_and_lateral_still_have_detection_tools() {
+        for role in [BlueAgentRole::ThreatHunter, BlueAgentRole::LateralAnalyst] {
+            let names = tool_names(role);
+            assert!(
+                names.iter().any(|n| n == "run_detection_query"),
+                "{role:?} should expose run_detection_query, got: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_detection_rule_is_offered_only_when_opted_in() {
+        use ares_core::detection::RULE_CREATION_ENV;
+
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var(RULE_CREATION_ENV).ok();
+
+        let roles = [
+            BlueAgentRole::Triage,
+            BlueAgentRole::ThreatHunter,
+            BlueAgentRole::LateralAnalyst,
+        ];
+
+        std::env::remove_var(RULE_CREATION_ENV);
+        for role in roles {
+            let names = tool_names(role);
+            assert!(
+                !names.iter().any(|n| n == "create_detection_rule"),
+                "{role:?} must not be offered create_detection_rule while gated off, got: {names:?}"
+            );
+            assert!(
+                names.iter().any(|n| n == "get_alerts_in_time_range"),
+                "{role:?} should keep its other grafana tools, got: {names:?}"
+            );
+        }
+
+        std::env::set_var(RULE_CREATION_ENV, "1");
+        for role in roles {
+            let names = tool_names(role);
+            assert!(
+                names.iter().any(|n| n == "create_detection_rule"),
+                "{role:?} should regain create_detection_rule when opted in, got: {names:?}"
+            );
+        }
+
+        match prior {
+            Some(v) => std::env::set_var(RULE_CREATION_ENV, v),
+            None => std::env::remove_var(RULE_CREATION_ENV),
+        }
+    }
 }

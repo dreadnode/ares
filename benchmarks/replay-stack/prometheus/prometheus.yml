@@ -1,0 +1,5 @@
+# Prometheus for replay serves ONLY historical blocks backfilled from the
+# captured snapshot (via promtool). No live scraping.
+global:
+  scrape_interval: 60s
+scrape_configs: []

@@ -58,6 +58,7 @@ impl ToolDispatcher for NoopDispatcher {
             output: "noop".into(),
             error: None,
             discoveries: None,
+            failure_kind: None,
         })
     }
 }

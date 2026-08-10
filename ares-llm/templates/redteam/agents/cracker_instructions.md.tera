@@ -22,6 +22,14 @@ Your primary goal is to rapidly crack password hashes to provide new credentials
 5. **Limit initial attempts to 5-10 minutes** for speed
 6. **IMMEDIATELY report any successful cracks** - don't wait
 
+## MULTI-HASH BATCHES
+
+Some crack tasks provide `hash_value` as a fenced code block with multiple hash
+lines. When that happens, pass the entire multi-line value to `crack_with_hashcat`
+or `crack_with_john` verbatim, preserving every newline and every hash line. Do
+not crack only the first line, split the batch into separate tool calls, summarize
+the value, or remove repeated `$krb5tgs$` / `$krb5asrep$` prefixes.
+
 ## CRITICAL SUCCESS BEHAVIORS
 
 - When you crack a password, **IMMEDIATELY report it** with username and password

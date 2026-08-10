@@ -3,6 +3,7 @@
 //! password policy, password spray, username-as-password, credman, autologon).
 
 use anyhow::Result;
+use ares_core::ldap::domain_to_base_dn;
 use ares_core::models::is_always_disabled_account;
 use serde_json::Value;
 
@@ -65,6 +66,29 @@ const SPRAY_DEFAULT_JITTER_SECS: i64 = 1;
 /// allowed attempts-per-account budget. Keeps spraying one attempt below the
 /// lockout line in case any account already has stale failed attempts.
 const SPRAY_LOCKOUT_BUFFER: i64 = 1;
+
+/// Total passwords per account allowed across the whole observation window
+/// when the caller waived the policy check with `acknowledge_no_policy=true`.
+///
+/// This is a *window* allowance, not a per-call one. It first meant
+/// "unbounded", so one call sprayed the whole `DEFAULT_SPRAY_PASSWORDS` list —
+/// past a 5-attempt threshold three times over. Capping it per call was not
+/// enough either: `attempts_used` was ignored on this branch, so every call
+/// got a fresh allowance and repeated sprays still summed past the threshold
+/// (op-20260727-230409 locked essos with 8 sprays x 2 = 16 bad logons per
+/// account). Not knowing the policy is a reason to spray *less*, and to keep
+/// counting what has already been spent.
+const NO_POLICY_SPRAY_CAP: i64 = 2;
+
+const NO_POLICY_UAP_RESERVE: i64 = 1;
+
+fn no_policy_reserve(tool: &str) -> i64 {
+    if tool == "password_spray" {
+        NO_POLICY_UAP_RESERVE
+    } else {
+        0
+    }
+}
 
 /// Dump LSASS credentials remotely via `lsassy`.
 pub async fn lsassy(args: &Value) -> Result<ToolOutput> {
@@ -129,6 +153,34 @@ pub async fn smb_login_check(args: &Value) -> Result<ToolOutput> {
         .arg("smb")
         .arg(target)
         .args(cred_args)
+        .timeout_secs(60)
+        .execute()
+        .await
+}
+
+pub async fn smb_local_auth_check(args: &Value) -> Result<ToolOutput> {
+    let target = required_str(args, "target")?;
+    let username = required_str(args, "username")?;
+    let password = optional_str(args, "password");
+    let hash = optional_str(args, "hash");
+    if password.is_none() && hash.is_none() {
+        return Ok(ToolOutput {
+            stdout: format!(
+                "smb_local_auth_check: no local credential supplied for {username} on {target}; skipping login attempt.\n"
+            ),
+            stderr: String::new(),
+            exit_code: Some(0),
+            success: true,
+        });
+    }
+
+    let cred_args = credentials::netexec_creds(Some(username), password, hash, None);
+
+    CommandBuilder::new("netexec")
+        .arg("smb")
+        .arg(target)
+        .args(cred_args)
+        .arg("--local-auth")
         .timeout_secs(60)
         .execute()
         .await
@@ -237,31 +289,41 @@ pub async fn laps_dump(args: &Value) -> Result<ToolOutput> {
 /// (`user@bind_domain`). Use when the credential belongs to a different
 /// domain than the one being queried. Defaults to `domain`.
 pub async fn ldap_search_descriptions(args: &Value) -> Result<ToolOutput> {
+    build_ldap_search_descriptions(args)?.execute().await
+}
+
+/// Build the `ldapsearch` invocation for [`ldap_search_descriptions`].
+///
+/// Exposed so the resolver-side Bug B contract test can confirm an
+/// injected `ticket_path` surfaces as `KRB5CCNAME` on the child process
+/// and that a supplied password reaches `-w`.
+#[doc(hidden)]
+pub fn build_ldap_search_descriptions(args: &Value) -> Result<CommandBuilder> {
     let target = required_str(args, "target")?;
     let domain = required_str(args, "domain")?;
     let username = optional_str(args, "username");
     let password = optional_str(args, "password");
     let bind_domain = optional_str(args, "bind_domain");
     let base_dn = optional_str(args, "base_dn");
-    let ticket_path = optional_str(args, "ticket_path");
+    let ticket_path = optional_str(args, "ticket_path").filter(|s| !s.is_empty());
 
     let computed_base_dn = match base_dn {
         Some(dn) => dn.to_string(),
-        None => domain
-            .split('.')
-            .map(|part| format!("DC={part}"))
-            .collect::<Vec<_>>()
-            .join(","),
+        None => domain_to_base_dn(domain),
     };
 
     let ldap_uri = format!("ldap://{target}");
 
     let mut cmd = CommandBuilder::new("ldapsearch")
-        .flag("-H", &ldap_uri)
+        .flag_visible("-H", &ldap_uri)
         .timeout_secs(120);
 
     if let Some(ccache) = ticket_path {
-        cmd = cmd.env("KRB5CCNAME", ccache).arg("-Y").arg("GSSAPI");
+        cmd = cmd
+            .env("KRB5CCNAME", ccache)
+            .env("KRB5_CONFIG", format!("{ccache}.krb5.conf:/etc/krb5.conf"))
+            .arg("-Y")
+            .arg("GSSAPI");
     } else {
         let u = username.ok_or_else(|| anyhow::anyhow!("missing required arg: username"))?;
         let p = password.ok_or_else(|| anyhow::anyhow!("missing required arg: password"))?;
@@ -270,13 +332,12 @@ pub async fn ldap_search_descriptions(args: &Value) -> Result<ToolOutput> {
         cmd = cmd.arg("-x").flag("-D", &bind_dn).flag("-w", p);
     }
 
-    cmd.flag("-b", &computed_base_dn)
+    Ok(cmd
+        .flag("-b", &computed_base_dn)
         .arg("(&(objectClass=user)(description=*))")
         .arg("sAMAccountName")
         .arg("description")
-        .arg("userPrincipalName")
-        .execute()
-        .await
+        .arg("userPrincipalName"))
 }
 
 /// Spider SMB shares for interesting files via `netexec smb -M spider_plus`.
@@ -311,7 +372,6 @@ pub async fn smbclient_spider(args: &Value) -> Result<ToolOutput> {
         .execute()
         .await?;
 
-    // Append downloaded file contents
     let extra = read_spider_downloads(target).await;
     if !extra.is_empty() {
         output.stdout.push_str(&extra);
@@ -336,7 +396,6 @@ async fn read_spider_downloads(target: &str) -> String {
         extra.push_str(&meta);
     }
 
-    // Walk the download directory and include text file contents
     if tokio::fs::metadata(&spider_dir).await.is_err() {
         return extra;
     }
@@ -485,11 +544,15 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
     let attempts_used = optional_i64(args, "attempts_used_per_account").unwrap_or(0);
     let acknowledge_no_policy = optional_bool(args, "acknowledge_no_policy").unwrap_or(false);
 
-    if let Some(refusal) =
-        check_spray_budget(lockout_threshold, attempts_used, acknowledge_no_policy)
-    {
-        return Ok(refusal);
-    }
+    let password_cap = match check_spray_budget(
+        lockout_threshold,
+        attempts_used,
+        acknowledge_no_policy,
+        "password_spray",
+    ) {
+        SprayBudget::Refuse(refusal) => return Ok(*refusal),
+        SprayBudget::Allow(cap) => cap,
+    };
 
     // Use provided file or generate a default wordlist. When the caller
     // supplies a users_file, strip AD built-in always-disabled accounts so
@@ -511,7 +574,10 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
         (Some(p), _) => p.to_string(),
         (None, true) => {
             tmp_password_file = format!("/tmp/spray_pwlist_{}.txt", std::process::id());
-            std::fs::write(&tmp_password_file, DEFAULT_SPRAY_PASSWORDS)?;
+            std::fs::write(
+                &tmp_password_file,
+                cap_password_list(DEFAULT_SPRAY_PASSWORDS, password_cap),
+            )?;
             tmp_password_file
         }
         (None, false) => anyhow::bail!(
@@ -549,37 +615,138 @@ pub async fn password_spray(args: &Value) -> Result<ToolOutput> {
 /// Enforce the lockout-aware preconditions for `password_spray`. Returns
 /// `Some(refusal_output)` when the call must be blocked, `None` when the
 /// caller is clear to spray.
+/// Outcome of the pre-spray lockout-budget check.
+///
+/// `Allow` carries the number of passwords the call may try *per account*.
+/// Returning a bare "yes" here is what locked the range out: the budget was
+/// computed correctly, then discarded, and the spray proceeded with the full
+/// `DEFAULT_SPRAY_PASSWORDS` list regardless. The budget is a cap, not a gate.
+enum SprayBudget {
+    Refuse(Box<ToolOutput>),
+    /// `None` means genuinely unlimited — AD reported no lockout policy.
+    Allow(Option<usize>),
+}
+
 fn check_spray_budget(
     lockout_threshold: Option<i64>,
     attempts_used: i64,
     acknowledge_no_policy: bool,
-) -> Option<ToolOutput> {
+    tool: &str,
+) -> SprayBudget {
     match lockout_threshold {
         Some(t) => {
             // A threshold of 0 in AD means "no lockout" — spray freely.
             if t <= 0 {
-                return None;
+                return SprayBudget::Allow(None);
             }
             let budget = t - attempts_used - SPRAY_LOCKOUT_BUFFER;
             if budget < 1 {
-                return Some(spray_refusal(format!(
-                    "Refusing password_spray: lockout budget exhausted (threshold={t}, \
+                return SprayBudget::Refuse(Box::new(spray_refusal(format!(
+                    "Refusing {tool}: lockout budget exhausted (threshold={t}, \
                      attempts_used_per_account={attempts_used}, safety_buffer={SPRAY_LOCKOUT_BUFFER}, \
                      remaining={budget}). Wait for the AD observation window to reset, \
                      reset attempts_used_per_account to 0, then resume."
-                )));
+                ))));
             }
-            None
+            SprayBudget::Allow(Some(budget as usize))
         }
-        None if acknowledge_no_policy => None,
-        None => Some(spray_refusal(
-            "Refusing password_spray: no lockout policy provided. Run password_policy \
+        // The waiver still spends from a budget — it just spends from an
+        // assumed one. Subtracting `attempts_used` here is what stops repeated
+        // blind-start sprays from each starting over at a full allowance.
+        None if acknowledge_no_policy => {
+            let allowance = NO_POLICY_SPRAY_CAP - no_policy_reserve(tool);
+            let budget = allowance - attempts_used;
+            if budget < 1 {
+                return SprayBudget::Refuse(Box::new(spray_refusal(format!(
+                    "Refusing {tool}: no-policy spray allowance exhausted \
+                     (allowance={allowance} per observation window, \
+                     attempts_used_per_account={attempts_used}). Wait for the AD \
+                     observation window to reset, or run password_policy and pass \
+                     lockout_threshold to spray against the real budget."
+                ))));
+            }
+            SprayBudget::Allow(Some(budget as usize))
+        }
+        None => SprayBudget::Refuse(Box::new(spray_refusal(format!(
+            "Refusing {tool}: no lockout policy provided. Run password_policy \
              first and pass lockout_threshold (and attempts_used_per_account if accounts \
              already have failed logons this window). To override when policy retrieval \
              is impossible, set acknowledge_no_policy=true — but expect lockouts."
-                .to_string(),
-        )),
+        )))),
     }
+}
+
+/// Trim `list` to the first `cap` non-empty entries, or return it unchanged
+/// when there is no cap.
+fn cap_password_list(list: &str, cap: Option<usize>) -> String {
+    let Some(cap) = cap else {
+        return list.to_string();
+    };
+    let mut out: String = list
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(cap)
+        .map(|l| format!("{l}\n"))
+        .collect();
+    if out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// How many passwords a `password_spray` call with `args` will try *per
+/// account*, assuming `attempts_used` have already been spent against those
+/// accounts this observation window. `0` means the call will be refused or
+/// will bail before authenticating, so it costs no lockout budget.
+///
+/// The orchestrator debits its per-domain accumulator by this value before
+/// dispatch. It lives here, next to the logic it mirrors, so the estimate
+/// cannot drift from what [`password_spray`] actually spends — the whole
+/// failure mode this guards against is a budget that gets computed in one
+/// place and ignored in another.
+pub fn spray_attempt_cost(args: &Value, attempts_used: i64) -> usize {
+    let cap = match check_spray_budget(
+        optional_i64(args, "lockout_threshold"),
+        attempts_used,
+        optional_bool(args, "acknowledge_no_policy").unwrap_or(false),
+        "password_spray",
+    ) {
+        SprayBudget::Refuse(_) => return 0,
+        SprayBudget::Allow(cap) => cap,
+    };
+
+    // Mirrors the `password_arg` match in `password_spray`.
+    match (
+        optional_str(args, "password"),
+        optional_bool(args, "use_common_passwords").unwrap_or(false),
+    ) {
+        // An explicit single password is one authentication per account.
+        (Some(_), _) => 1,
+        (None, true) => cap_password_list(DEFAULT_SPRAY_PASSWORDS, cap)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count(),
+        // Neither supplied — the tool bails before touching the network.
+        (None, false) => 0,
+    }
+}
+
+/// Whether a one-attempt-per-account spray-style call (`username_as_password`)
+/// will be allowed given `attempts_used` already spent this window.
+///
+/// Mirrors the gate the tool applies to itself so the orchestrator debits only
+/// calls that will really authenticate — a refused call touches no account and
+/// must not consume budget, or the tally would run away on its own refusals.
+pub fn spray_budget_allows(args: &Value, attempts_used: i64) -> bool {
+    !matches!(
+        check_spray_budget(
+            optional_i64(args, "lockout_threshold"),
+            attempts_used,
+            optional_bool(args, "acknowledge_no_policy").unwrap_or(false),
+            "username_as_password",
+        ),
+        SprayBudget::Refuse(_)
+    )
 }
 
 fn spray_refusal(message: String) -> ToolOutput {
@@ -644,11 +811,32 @@ Password1\n";
 /// the wordlist before netexec runs so a re-spray doesn't keep pinging an
 /// already-locked principal (each ping bumps badPwdCount and prolongs the
 /// AD lockout window).
+///
+/// Budget-gated exactly like [`password_spray`]. This is a spray by another
+/// name — one password per account, the account's own name — so each call
+/// spends one attempt of the same per-domain lockout budget. It used to spend
+/// that budget without ever being refused: the dispatcher debited the tally
+/// for it (it is in `SPRAY_TOOLS`) while nothing here could decline, so N
+/// invocations burned N attempts per account unbounded and tightened
+/// `password_spray`'s budget while staying free itself.
 pub async fn username_as_password(args: &Value) -> Result<ToolOutput> {
     let target = required_str(args, "target")?;
     let users_file = optional_str(args, "users_file");
     let domain = required_str(args, "domain")?;
     let excluded_users = optional_str(args, "excluded_users").unwrap_or("");
+    let lockout_threshold = optional_i64(args, "lockout_threshold");
+    let attempts_used = optional_i64(args, "attempts_used_per_account").unwrap_or(0);
+    let acknowledge_no_policy = optional_bool(args, "acknowledge_no_policy").unwrap_or(false);
+
+    // One attempt per account, so any non-zero allowance is enough to proceed.
+    if let SprayBudget::Refuse(refusal) = check_spray_budget(
+        lockout_threshold,
+        attempts_used,
+        acknowledge_no_policy,
+        "username_as_password",
+    ) {
+        return Ok(*refusal);
+    }
 
     // Use provided file or generate a default wordlist. Caller-supplied
     // wordlists are filtered to drop AD built-in always-disabled accounts so
@@ -729,13 +917,13 @@ fn drop_excluded_users(path: &str, excluded_users: &str) -> (String, bool) {
     if !filtered_any {
         return (path.to_string(), false);
     }
-    // Make the temp filename unique per call: parallel callers (and parallel
-    // unit tests) share the process and would otherwise overwrite each other.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = format!("/tmp/spray_users_excl_{}_{}.txt", std::process::id(), nanos);
+    // Per-call counter, matching `sanitize_spray_userlist`. A wall-clock stamp
+    // is not unique enough: macOS resolves `SystemTime::now` to microseconds,
+    // so two callers in the same microsecond derive the same path and clobber
+    // (or delete) each other's filtered userlist.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = format!("/tmp/spray_users_excl_{}_{}.txt", std::process::id(), seq);
     if std::fs::write(&tmp, kept.join("\n")).is_err() {
         return (path.to_string(), false);
     }
@@ -757,6 +945,31 @@ pub async fn check_credman_entries(args: &Value) -> Result<ToolOutput> {
         .args(cred_args)
         .flag("-x", "cmdkey /list")
         .timeout_secs(120)
+        .execute()
+        .await
+}
+
+/// Probe whether a credential or NTLM hash authenticates against a host, via a
+/// bare `netexec smb` bind with no `-x` payload.
+///
+/// This is an authentication test, not an extraction: it answers "does this
+/// principal work here" for cross-forest reuse, where the only other available
+/// dispatch is `secretsdump` and that requires replication rights the probed
+/// principal does not have.
+pub async fn netexec_auth_check(args: &Value) -> Result<ToolOutput> {
+    let target = required_str(args, "target")?;
+    let username = required_str(args, "username")?;
+    let domain = required_str(args, "domain")?;
+    let hash = optional_str(args, "hash");
+    let password = optional_str(args, "password");
+
+    let cred_args = credentials::netexec_creds(Some(username), password, hash, Some(domain));
+
+    CommandBuilder::new("netexec")
+        .arg("smb")
+        .arg(target)
+        .args(cred_args)
+        .timeout_secs(60)
         .execute()
         .await
 }
@@ -787,8 +1000,6 @@ mod tests {
     use crate::args::{optional_i64, optional_str, required_str};
     use crate::credentials;
     use serde_json::json;
-
-    // --- lsassy hash formatting ---
 
     #[test]
     fn lsassy_hash_without_colon_gets_prefix() {
@@ -840,43 +1051,42 @@ mod tests {
         assert!(optional_str(&args, "method").is_none());
     }
 
-    // --- ldap_search_descriptions ---
-
-    #[test]
-    fn base_dn_computation_from_domain() {
-        let domain = "contoso.local";
-        let computed_base_dn: String = domain
-            .split('.')
-            .map(|part| format!("DC={part}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(computed_base_dn, "DC=contoso,DC=local");
+    fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+        argv.iter()
+            .position(|a| a == flag)
+            .and_then(|i| argv.get(i + 1))
+            .map(String::as_str)
     }
 
     #[test]
-    fn base_dn_computation_three_levels() {
-        let domain = "child.contoso.local";
-        let computed_base_dn: String = domain
-            .split('.')
-            .map(|part| format!("DC={part}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(computed_base_dn, "DC=child,DC=contoso,DC=local");
+    fn base_dn_derived_from_domain_when_absent() {
+        let args = json!({
+            "target": "192.168.58.10",
+            "domain": "child.contoso.local",
+            "username": "alice",
+            "password": "P@ssw0rd!"
+        });
+        let cmd = super::build_ldap_search_descriptions(&args).unwrap();
+        assert_eq!(
+            flag_value(cmd.args_for_test(), "-b"),
+            Some("DC=child,DC=contoso,DC=local")
+        );
     }
 
     #[test]
     fn base_dn_explicit_overrides_computation() {
-        let base_dn = Some("OU=Users,DC=contoso,DC=local");
-        let domain = "contoso.local";
-        let computed = match base_dn {
-            Some(dn) => dn.to_string(),
-            None => domain
-                .split('.')
-                .map(|part| format!("DC={part}"))
-                .collect::<Vec<_>>()
-                .join(","),
-        };
-        assert_eq!(computed, "OU=Users,DC=contoso,DC=local");
+        let args = json!({
+            "target": "192.168.58.10",
+            "domain": "contoso.local",
+            "username": "alice",
+            "password": "P@ssw0rd!",
+            "base_dn": "OU=Users,DC=contoso,DC=local"
+        });
+        let cmd = super::build_ldap_search_descriptions(&args).unwrap();
+        assert_eq!(
+            flag_value(cmd.args_for_test(), "-b"),
+            Some("OU=Users,DC=contoso,DC=local")
+        );
     }
 
     #[test]
@@ -908,8 +1118,6 @@ mod tests {
         assert!(required_str(&args, "domain").is_ok());
     }
 
-    // --- netexec_creds helper ---
-
     #[test]
     fn netexec_creds_for_domain_admin_checker() {
         let cred_args =
@@ -940,8 +1148,6 @@ mod tests {
         assert!(required_str(&args, "targets").is_err());
     }
 
-    // --- gpp_password_finder ---
-
     #[test]
     fn gpp_password_finder_all_required() {
         let args = json!({
@@ -956,7 +1162,7 @@ mod tests {
         assert!(required_str(&args, "domain").is_ok());
     }
 
-    // --- laps_dump auth-arg validation gate ---
+    // laps_dump auth-arg validation gate
 
     #[tokio::test]
     async fn laps_dump_rejects_missing_password_and_nt_hash() {
@@ -975,8 +1181,6 @@ mod tests {
             "unexpected error: {err}"
         );
     }
-
-    // --- DEFAULT_SPRAY_USERNAMES ---
 
     #[test]
     fn default_spray_usernames_is_non_empty() {
@@ -1008,8 +1212,6 @@ mod tests {
             );
         }
     }
-
-    // --- password_spray ---
 
     #[test]
     fn password_spray_delay_seconds_parsing() {
@@ -1050,8 +1252,6 @@ mod tests {
         assert!(required_str(&args, "domain").is_err());
     }
 
-    // --- ntds_dit_extract ---
-
     #[test]
     fn ntds_dit_extract_auth_with_password() {
         let (auth_string, extra_args) = credentials::impacket_auth(
@@ -1077,8 +1277,6 @@ mod tests {
         assert_eq!(auth_string, "contoso.local/admin@192.168.58.1");
         assert_eq!(extra_args, vec!["-hashes", ":aabbccdd"]);
     }
-
-    // --- smbclient_spider ---
 
     #[test]
     fn smbclient_spider_optional_pattern() {
@@ -1121,8 +1319,6 @@ mod tests {
         );
     }
 
-    // --- check_credman_entries / check_autologon_registry ---
-
     #[test]
     fn credman_requires_all_fields() {
         let args = json!({
@@ -1149,8 +1345,6 @@ mod tests {
         assert_eq!(cred_args[5], "contoso.local");
     }
 
-    // --- username_as_password ---
-
     #[test]
     fn username_as_password_requires_target() {
         let args = json!({"domain": "contoso.local"});
@@ -1172,8 +1366,6 @@ mod tests {
         });
         assert_eq!(optional_str(&args, "users_file"), Some("/tmp/myusers.txt"));
     }
-
-    // --- mock executor tests ---
 
     use crate::executor::mock;
 
@@ -1203,6 +1395,36 @@ mod tests {
             "domain": "contoso.local", "method": "comsvcs"
         });
         assert!(super::lsassy(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smb_local_auth_check_executes() {
+        mock::push(mock::success());
+        let args = json!({
+            "target": "192.168.58.31", "username": "admin",
+            "hash": "abcdef1234567890abcdef1234567890"
+        });
+        assert!(super::smb_local_auth_check(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn smb_local_auth_check_without_credential_is_a_soft_skip() {
+        let args = json!({"target": "192.168.58.31", "username": "admin"});
+        let out = super::smb_local_auth_check(&args).await.unwrap();
+        assert!(out.success);
+        assert!(out.stdout.contains("skipping login attempt"));
+    }
+
+    #[test]
+    fn smb_local_auth_check_creds_omit_the_domain_flag() {
+        let cred_args = credentials::netexec_creds(
+            Some("admin"),
+            None,
+            Some("abcdef1234567890abcdef1234567890"),
+            None,
+        );
+        assert!(!cred_args.iter().any(|a| a == "-d"));
+        assert!(cred_args.iter().any(|a| a == "-H"));
     }
 
     #[tokio::test]
@@ -1284,6 +1506,51 @@ mod tests {
             "base_dn": "OU=Users,DC=contoso,DC=local"
         });
         assert!(super::ldap_search_descriptions(&args).await.is_ok());
+    }
+
+    // Bug B: ticket_path → KRB5CCNAME env wiring
+
+    #[test]
+    fn ldap_search_descriptions_invocation_exports_krb5ccname_when_ticket_path_set() {
+        let args = json!({
+            "target": "dc02.fabrikam.local",
+            "domain": "fabrikam.local",
+            "ticket_path": "/tmp/ares-tickets/z.ccache",
+        });
+        let cmd = super::build_ldap_search_descriptions(&args).unwrap();
+        assert!(
+            cmd.env_vars_for_test()
+                .iter()
+                .any(|(k, v)| k == "KRB5CCNAME" && v == "/tmp/ares-tickets/z.ccache"),
+            "ticket_path must export KRB5CCNAME for ldap_search_descriptions"
+        );
+        let args_vec = cmd.args_for_test();
+        assert!(args_vec.iter().any(|a| a == "-Y"));
+        assert!(args_vec.iter().any(|a| a == "GSSAPI"));
+        assert!(args_vec.iter().all(|a| a != "-w"));
+    }
+
+    #[test]
+    fn ldap_search_descriptions_password_branch_passes_w_flag() {
+        let args = json!({
+            "target": "192.168.58.1",
+            "domain": "contoso.local",
+            "username": "admin",
+            "password": "P@ss",
+        });
+        let cmd = super::build_ldap_search_descriptions(&args).unwrap();
+        let args_vec = cmd.args_for_test();
+        let w_idx = args_vec
+            .iter()
+            .position(|a| a == "-w")
+            .expect("password must reach -w for ldap_search_descriptions");
+        assert_eq!(args_vec.get(w_idx + 1).map(String::as_str), Some("P@ss"));
+        assert!(
+            cmd.env_vars_for_test()
+                .iter()
+                .all(|(k, _)| k != "KRB5CCNAME"),
+            "simple-bind branch must not export KRB5CCNAME"
+        );
     }
 
     #[tokio::test]
@@ -1408,31 +1675,235 @@ mod tests {
         assert!(out.success, "threshold=0 means no lockout policy in AD");
     }
 
-    #[test]
-    fn check_spray_budget_blocks_without_policy() {
-        let refusal = super::check_spray_budget(None, 0, false);
-        assert!(refusal.is_some());
+    fn budget_cap(
+        threshold: Option<i64>,
+        used: i64,
+        ack: bool,
+    ) -> Result<Option<usize>, &'static str> {
+        match super::check_spray_budget(threshold, used, ack, "password_spray") {
+            super::SprayBudget::Allow(cap) => Ok(cap),
+            super::SprayBudget::Refuse(_) => Err("refused"),
+        }
+    }
+
+    fn uap_budget_cap(
+        threshold: Option<i64>,
+        used: i64,
+        ack: bool,
+    ) -> Result<Option<usize>, &'static str> {
+        match super::check_spray_budget(threshold, used, ack, "username_as_password") {
+            super::SprayBudget::Allow(cap) => Ok(cap),
+            super::SprayBudget::Refuse(_) => Err("refused"),
+        }
     }
 
     #[test]
-    fn check_spray_budget_allows_with_ack() {
-        assert!(super::check_spray_budget(None, 0, true).is_none());
+    fn check_spray_budget_blocks_without_policy() {
+        assert!(budget_cap(None, 0, false).is_err());
+    }
+
+    #[test]
+    fn check_spray_budget_allows_with_ack_but_caps_it() {
+        // The waiver used to mean "unbounded" — that is what let one call
+        // spray the whole default list and lock the account.
+        assert_eq!(
+            uap_budget_cap(None, 0, true),
+            Ok(Some(super::NO_POLICY_SPRAY_CAP as usize))
+        );
+    }
+
+    #[test]
+    fn check_spray_budget_no_policy_allowance_shrinks_as_attempts_are_spent() {
+        // op-20260727-230409: this branch ignored `attempts_used` entirely, so
+        // every blind-start spray got a fresh allowance and 8 of them summed to
+        // 16 bad logons per account against a threshold of 5.
+        assert_eq!(uap_budget_cap(None, 0, true), Ok(Some(2)));
+        assert_eq!(uap_budget_cap(None, 1, true), Ok(Some(1)));
+    }
+
+    #[test]
+    fn check_spray_budget_no_policy_refuses_once_the_allowance_is_spent() {
+        assert!(
+            uap_budget_cap(None, 2, true).is_err(),
+            "the allowance is per observation window, not per call"
+        );
+        assert!(uap_budget_cap(None, 99, true).is_err());
+    }
+
+    #[test]
+    fn no_policy_password_spray_never_takes_the_last_attempt() {
+        assert_eq!(
+            budget_cap(None, 0, true),
+            Ok(Some(1)),
+            "op-20260801-134438: this was Allow(Some(2)), spent on Password1 \
+             and Welcome1 before username_as_password ever ran"
+        );
+        assert!(
+            budget_cap(None, 1, true).is_err(),
+            "the reserved attempt belongs to username_as_password"
+        );
+        assert_eq!(uap_budget_cap(None, 1, true), Ok(Some(1)));
+    }
+
+    #[test]
+    fn no_policy_reservation_does_not_widen_the_window_ceiling() {
+        let spent = super::spray_attempt_cost(
+            &serde_json::json!({ "use_common_passwords": true, "acknowledge_no_policy": true }),
+            0,
+        ) as i64;
+        assert_eq!(spent, 1);
+        assert!(super::spray_budget_allows(
+            &serde_json::json!({ "acknowledge_no_policy": true }),
+            spent
+        ));
+        assert!(
+            !super::spray_budget_allows(
+                &serde_json::json!({ "acknowledge_no_policy": true }),
+                spent + 1
+            ),
+            "total exposure stays at NO_POLICY_SPRAY_CAP failed logons per account"
+        );
+    }
+
+    #[test]
+    fn no_policy_reservation_does_not_touch_the_observed_policy_path() {
+        assert_eq!(
+            budget_cap(Some(5), 0, false),
+            uap_budget_cap(Some(5), 0, false)
+        );
+        assert_eq!(budget_cap(Some(0), 100, false), Ok(None));
     }
 
     #[test]
     fn check_spray_budget_keeps_safety_buffer() {
-        // threshold=5, used=3 -> budget = 5-3-1 = 1 (allowed)
-        assert!(super::check_spray_budget(Some(5), 3, false).is_none());
+        // threshold=5, used=3 -> budget = 5-3-1 = 1 (allowed, cap 1)
+        assert_eq!(budget_cap(Some(5), 3, false), Ok(Some(1)));
         // threshold=5, used=4 -> budget = 0 (refused)
-        assert!(super::check_spray_budget(Some(5), 4, false).is_some());
+        assert!(budget_cap(Some(5), 4, false).is_err());
     }
 
     #[test]
-    fn check_spray_budget_threshold_zero_passes() {
-        assert!(super::check_spray_budget(Some(0), 100, false).is_none());
+    fn check_spray_budget_threshold_zero_is_the_only_unlimited_path() {
+        assert_eq!(budget_cap(Some(0), 100, false), Ok(None));
     }
 
-    // --- sanitize_spray_userlist ---
+    #[test]
+    fn check_spray_budget_cap_tracks_remaining_attempts() {
+        // The range policy that locked us out: threshold 5, nothing used yet.
+        assert_eq!(budget_cap(Some(5), 0, false), Ok(Some(4)));
+    }
+
+    #[test]
+    fn cap_password_list_truncates_to_the_budget() {
+        let got = super::cap_password_list(super::DEFAULT_SPRAY_PASSWORDS, Some(4));
+        assert_eq!(got.lines().count(), 4, "got: {got:?}");
+        assert!(got.starts_with("Password123!\n"));
+    }
+
+    #[test]
+    fn cap_password_list_is_a_noop_without_a_cap() {
+        let full = super::DEFAULT_SPRAY_PASSWORDS;
+        assert_eq!(super::cap_password_list(full, None), full);
+    }
+
+    #[test]
+    fn spray_attempt_cost_matches_the_capped_list_length() {
+        let args = serde_json::json!({
+            "lockout_threshold": 5,
+            "use_common_passwords": true,
+        });
+        // threshold 5 - used 0 - buffer 1 = 4
+        assert_eq!(super::spray_attempt_cost(&args, 0), 4);
+        assert_eq!(super::spray_attempt_cost(&args, 2), 2);
+    }
+
+    #[test]
+    fn spray_attempt_cost_is_zero_when_the_call_will_be_refused() {
+        let args = serde_json::json!({
+            "lockout_threshold": 5,
+            "use_common_passwords": true,
+        });
+        // budget = 5 - 4 - 1 = 0 -> refused, so it spends nothing.
+        assert_eq!(super::spray_attempt_cost(&args, 4), 0);
+
+        let no_policy = serde_json::json!({ "use_common_passwords": true });
+        assert_eq!(super::spray_attempt_cost(&no_policy, 0), 0);
+    }
+
+    #[test]
+    fn spray_attempt_cost_counts_an_explicit_password_as_one() {
+        let args = serde_json::json!({
+            "lockout_threshold": 5,
+            "password": "Password123!",
+        });
+        assert_eq!(
+            super::spray_attempt_cost(&args, 0),
+            1,
+            "an explicit password is a single authentication per account"
+        );
+    }
+
+    #[test]
+    fn spray_attempt_cost_is_zero_when_the_tool_would_bail() {
+        // Neither `password` nor `use_common_passwords` — password_spray
+        // bails before touching the network, so it costs no budget.
+        let args = serde_json::json!({ "lockout_threshold": 5 });
+        assert_eq!(super::spray_attempt_cost(&args, 0), 0);
+    }
+
+    #[test]
+    fn spray_attempt_cost_is_unbounded_only_when_ad_reports_no_lockout() {
+        let args = serde_json::json!({
+            "lockout_threshold": 0,
+            "use_common_passwords": true,
+        });
+        let full = super::DEFAULT_SPRAY_PASSWORDS
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        assert_eq!(super::spray_attempt_cost(&args, 0), full);
+    }
+
+    #[test]
+    fn spray_attempt_cost_respects_the_no_policy_waiver_cap() {
+        let args = serde_json::json!({
+            "use_common_passwords": true,
+            "acknowledge_no_policy": true,
+        });
+        assert_eq!(
+            super::spray_attempt_cost(&args, 0),
+            (super::NO_POLICY_SPRAY_CAP - super::NO_POLICY_UAP_RESERVE) as usize
+        );
+        // ...and the allowance is consumed, not reissued per call.
+        assert_eq!(
+            super::spray_attempt_cost(&args, 1),
+            0,
+            "a spent allowance must cost nothing further — the call is refused"
+        );
+        assert_eq!(super::spray_attempt_cost(&args, 2), 0);
+    }
+
+    #[test]
+    fn cap_password_list_never_exceeds_a_five_attempt_policy() {
+        // Regression: the default list is ~3x a 5-attempt lockout threshold,
+        // so an uncapped call locked the account inside a single spray.
+        let full_count = super::DEFAULT_SPRAY_PASSWORDS
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        assert!(
+            full_count > 5,
+            "default list must be big enough for this to matter: {full_count}"
+        );
+        let capped = super::cap_password_list(super::DEFAULT_SPRAY_PASSWORDS, Some(4));
+        assert!(capped.lines().count() <= 4);
+    }
+
+    #[test]
+    fn cap_password_list_handles_a_cap_larger_than_the_list() {
+        let got = super::cap_password_list("a\nb\n", Some(99));
+        assert_eq!(got, "a\nb\n");
+    }
 
     #[test]
     fn sanitize_spray_userlist_strips_disabled_accounts() {
@@ -1509,9 +1980,75 @@ mod tests {
         mock::push(mock::success());
         let args = json!({
             "target": "192.168.58.1", "domain": "contoso.local",
-            "users_file": "/tmp/users.txt"
+            "users_file": "/tmp/users.txt",
+            "lockout_threshold": 5
         });
-        assert!(super::username_as_password(&args).await.is_ok());
+        let out = super::username_as_password(&args).await.unwrap();
+        assert!(
+            out.success,
+            "should run with budget available: {}",
+            out.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn username_as_password_refuses_without_policy() {
+        // Previously unguarded: it advertised "zero lockout risk" and would
+        // run unconditionally, spending budget it could never be denied.
+        let args = json!({"target": "192.168.58.1", "domain": "contoso.local"});
+        let out = super::username_as_password(&args).await.unwrap();
+        assert!(!out.success);
+        assert!(
+            out.stdout.contains("Refusing username_as_password"),
+            "refusal must name the right tool, got: {}",
+            out.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn username_as_password_refuses_when_budget_exhausted() {
+        let args = json!({
+            "target": "192.168.58.1", "domain": "contoso.local",
+            "lockout_threshold": 5, "attempts_used_per_account": 4
+        });
+        let out = super::username_as_password(&args).await.unwrap();
+        assert!(
+            !out.success,
+            "threshold 5 with 4 spent leaves 0 after the buffer — must refuse"
+        );
+    }
+
+    #[test]
+    fn spray_budget_allows_tracks_the_same_gate_as_the_tool() {
+        let args = json!({"lockout_threshold": 5});
+        assert!(super::spray_budget_allows(&args, 0));
+        assert!(super::spray_budget_allows(&args, 3));
+        assert!(
+            !super::spray_budget_allows(&args, 4),
+            "orchestrator must not debit a call the tool will refuse"
+        );
+        // No policy and no waiver is a refusal, so it costs nothing.
+        assert!(!super::spray_budget_allows(&json!({}), 0));
+    }
+
+    #[test]
+    fn every_spray_style_tool_is_budget_gated() {
+        // Structural guard. `username_as_password` sat in SPRAY_TOOLS having
+        // its cost debited by the dispatcher while nothing could decline it,
+        // so it spent the shared budget for free and squeezed password_spray.
+        // Any future spray-style tool must be refusable the same way.
+        for tool in ["password_spray", "username_as_password"] {
+            let exhausted = json!({"lockout_threshold": 5, "attempts_used_per_account": 99});
+            let refused = matches!(
+                super::check_spray_budget(Some(5), 99, false, tool),
+                super::SprayBudget::Refuse(_)
+            );
+            assert!(refused, "{tool} must refuse once the budget is spent");
+            assert!(
+                !super::spray_budget_allows(&exhausted, 99),
+                "{tool} must cost nothing once refused"
+            );
+        }
     }
 
     #[test]

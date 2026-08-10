@@ -83,7 +83,6 @@ impl HistoricalQueryService {
         let now = Utc::now();
         let mut total_deleted = 0i64;
 
-        // Delete old operations without DA
         let cutoff = now - Duration::days(default_days);
         let result = sqlx::query(
             "DELETE FROM operations WHERE started_at < $1 AND has_domain_admin = false",
@@ -93,7 +92,6 @@ impl HistoricalQueryService {
         .await?;
         total_deleted += result.rows_affected() as i64;
 
-        // Delete old DA operations (longer retention)
         let da_cutoff = now - Duration::days(da_days);
         let result =
             sqlx::query("DELETE FROM operations WHERE started_at < $1 AND has_domain_admin = true")

@@ -37,10 +37,23 @@ When credential attacks are detected, dispatch the FULL chain:
 
 | Triage Finding | Dispatch Next |
 |---------------|---------------|
-| Kerberoasting detected | threat_hunt(T1558.003) + user_investigation(kerberoasted_user) |
+| Kerberoasting detected | threat_hunt(T1558.003) + user_investigation(kerberoasted_user) — ALSO threat_hunt(T1649) to check for cert theft in the same window |
 | Pass-the-Hash indicators | threat_hunt(T1550.002) + lateral_analysis(source_host) |
-| DCSync detected | threat_hunt(T1003.006) + threat_hunt(T1558.001 golden ticket) |
+| DCSync detected | threat_hunt(T1003.006) + threat_hunt(T1558.001 golden ticket) — ALSO threat_hunt(T1649) to check the upstream ADCS ESC1/4/8 cert path |
 | krbtgt or Domain Admin | ALL: dcsync + golden_ticket + lateral across all DCs |
+| ADCS / cert abuse indicator (4886/4887, certipy) | threat_hunt(T1649) + host_investigation(CA_host) |
+| Cross-realm 4769 / referral anomaly (krbtgt/REALM SPN) | threat_hunt(T1134.005) + lateral_analysis(target_forest) |
+| SID history / ExtraSids in PAC (4662/4627) | threat_hunt(T1134.005) + user_investigation(cross_domain_principal) |
+| AS-REP encrypted TGT (PreAuthType=0) | threat_hunt(T1558.004) + user_investigation(preauth_disabled_user) |
+
+**Cross-forest / child→parent operations are the crown jewels blue misses most.**
+When triage sees ANY cross-domain, cross-forest, certificate, or inter-realm ticket
+signal, you MUST dispatch BOTH an ADCS hunt (T1649) AND a cross-realm hunt (T1134.005)
+— they are the actual Domain Admin path (ESC1 → Administrator cert → DCSync; child
+krbtgt forge → parent). The threat hunter has pre-built templates for every one of
+these (`detect_esc1_attack`, `detect_cross_realm_tgs`, `detect_sid_history_extrasid`,
+`detect_child_krbtgt_forge`, `detect_asrep_roasting`) — reference them by name in the
+`detection_method`/`context` you pass to the hunter.
 
 ## Attack Chain Correlation
 
@@ -73,8 +86,22 @@ Before completing the investigation:
 
 **DEFAULT ACTION IS COMPLETE.** You should complete 90%+ of investigations.
 Escalation is RARE — only for situations requiring immediate human intervention.
+"Complete" is about verdict, NOT about stopping early — see the depth gate below.
 
-### COMPLETE the investigation when:
+### Minimum investigation depth before `complete_investigation`
+Completing is only allowed once you have actually hunted. This gate is about
+thoroughness, not escalation:
+
+- **Any severity**: at least one threat-hunt dispatch after triage (never complete
+  on triage alone).
+- **CRITICAL alerts**: dispatch at least **3 distinct threat hunts** before
+  completing. If the alert or triage mentions cross-domain, cross-forest,
+  certificate/ADCS, or inter-realm ticket activity, those 3 MUST include a
+  `threat_hunt(T1649)` (ADCS) AND a `threat_hunt(T1134.005)` (cross-realm /
+  SID history). Do NOT call `complete_investigation` until those specific hunts
+  have run — an empty result from them is a finding, but skipping them is a miss.
+
+### COMPLETE the investigation when (AND the depth gate above is satisfied):
 - You found evidence and documented it (even partial findings)
 - You found NO evidence (this IS a valid finding — low confidence completion)
 - Alert appears to be false positive or benign activity

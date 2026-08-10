@@ -167,7 +167,6 @@ pub async fn auto_acl_discovery(dispatcher: Arc<Dispatcher>, mut shutdown: watch
 
     info!("auto_acl_discovery: spawned, waiting 45s for initial recon");
 
-    // Wait for initial recon to populate domain controllers.
     tokio::time::sleep(Duration::from_secs(45)).await;
 
     info!("auto_acl_discovery: initial wait complete, entering main loop");
@@ -248,6 +247,12 @@ pub async fn auto_acl_discovery(dispatcher: Arc<Dispatcher>, mut shutdown: watch
                     "to ldap_search so the LDAP bind uses user@bind_domain.\n\n",
                     "If a password IS provided, use ldap_search with filter ",
                     "'(objectCategory=*)' and request the nTSecurityDescriptor attribute.\n\n",
+                    "LDAP AUTH FAILURE FALLBACK: If ldap_search returns Invalid credentials (49) / data 52e, ",
+                    "do NOT call request_assistance. Retry ldap_search once without bind_domain if bind_domain ",
+                    "was used. If an NTLM hash is available, use rpcclient_command with hash=<ntlm_hash>. ",
+                    "If no credential works, use rpcclient_command with null_session=true for basic ",
+                    "domain enumeration, then call task_complete with a concise summary if ACL data ",
+                    "cannot be retrieved.\n\n",
                     "For each dangerous ACE found (GenericAll, WriteDacl, ForceChangePassword, ",
                     "GenericWrite, WriteOwner, Self-Membership on users/groups), register it as ",
                     "a vulnerability with EXACTLY these fields:\n",
@@ -474,8 +479,6 @@ mod tests {
         assert_eq!(work.known_users.len(), 2);
         assert_eq!(work.domain, "contoso.local");
     }
-
-    // --- collect_acl_discovery_work tests ---
 
     #[test]
     fn collect_empty_state_returns_no_work() {

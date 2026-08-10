@@ -40,7 +40,7 @@ pub async fn auto_rdp_lateral(dispatcher: Arc<Dispatcher>, mut shutdown: watch::
         };
 
         for item in work {
-            let payload = json!({
+            let mut payload = json!({
                 "technique": "rdp_lateral",
                 "target_ip": item.host_ip,
                 "hostname": item.hostname,
@@ -51,6 +51,9 @@ pub async fn auto_rdp_lateral(dispatcher: Arc<Dispatcher>, mut shutdown: watch::
                     "domain": item.credential.domain,
                 },
             });
+            if let Some(ref vid) = item.vuln_id {
+                payload["vuln_id"] = json!(vid);
+            }
 
             let priority = dispatcher.effective_priority("rdp_lateral");
             match dispatcher
@@ -115,7 +118,6 @@ fn collect_rdp_work(state: &crate::orchestrator::state::StateInner) -> Vec<RdpWo
             continue;
         }
 
-        // Infer domain from hostname
         let domain = host
             .hostname
             .find('.')
@@ -146,12 +148,19 @@ fn collect_rdp_work(state: &crate::orchestrator::state::StateInner) -> Vec<RdpWo
             continue;
         };
 
+        let vuln_id = state
+            .discovered_vulnerabilities
+            .values()
+            .find(|v| v.vuln_type.eq_ignore_ascii_case("rdp_access") && v.target == host.ip)
+            .map(|v| v.vuln_id.clone());
+
         items.push(RdpWork {
             dedup_key,
             host_ip: host.ip.clone(),
             hostname: host.hostname.clone(),
             domain,
             credential: cred,
+            vuln_id,
         });
     }
 
@@ -164,6 +173,7 @@ struct RdpWork {
     hostname: String,
     domain: String,
     credential: ares_core::models::Credential,
+    vuln_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -688,6 +698,7 @@ mod tests {
             hostname: "srv01.contoso.local".into(),
             domain: "contoso.local".into(),
             credential: cred,
+            vuln_id: None,
         };
         assert_eq!(work.host_ip, "192.168.58.22");
         assert_eq!(work.hostname, "srv01.contoso.local");

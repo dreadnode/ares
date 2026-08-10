@@ -13,7 +13,7 @@
       vars:
         base_update_cache: "{{ not _container_build }}"
 
-    - role: dreadnode.nimbus_range.recon_tools
+    - role: l50.arsenal.recon_tools
       vars:
         recon_tools_update_cache: "{{ not _container_build }}"
 

@@ -72,6 +72,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "NTLM hash for authentication (alternative to password)"
                     },
+                    "aes_key": {
+                        "type": "string",
+                        "description": "AES256 key (hex, 64 chars) of the delegating account. Pass it so getST requests AES-etype tickets — REQUIRED when the account or DC has RC4 disabled, otherwise the S4U TGS is rejected with KDC_ERR_ETYPE_NOSUPP. Resolved from operation state alongside the NT hash; look for the ':aes256-cts-hmac-sha1-96:' line in secretsdump output."
+                    },
                     "dc_ip": {
                         "type": "string",
                         "description": "Domain controller IP address"
@@ -83,7 +87,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "add_computer".into(),
             description: "Add a computer account to the domain. Useful for RBCD attacks where \
-                a controlled computer account is needed as the attacker principal."
+                a controlled computer account is needed as the attacker principal. \
+                Auth precedence: `ticket_path` (Kerberos ccache) > `hash` (NTLM \
+                pass-the-hash) > `password` (plaintext); the worker injects whichever \
+                material the operation actually holds, so a hash-only foothold works \
+                here. Supply `dc_host` — it is mandatory for the Kerberos path. \
+                The account name and password are minted for you and reported in the \
+                result (`Successfully added machine account ARES-…$ with password …`); \
+                do not choose them. Read the name from the result and pass it as \
+                `attacker_account` to `rbcd_write`."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -98,22 +110,26 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Password for authentication (used only when no `ticket_path` or `hash` is supplied)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to impacket-addcomputer as `-hashes LMHASH:NTHASH -no-pass`. Takes precedence over `password`."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a Kerberos ccache file. Highest auth precedence; invokes impacket-addcomputer with `-k -no-pass` and sets KRB5CCNAME. Requires `dc_host`."
                     },
                     "dc_ip": {
                         "type": "string",
                         "description": "Domain controller IP address"
                     },
-                    "computer_name": {
+                    "dc_host": {
                         "type": "string",
-                        "description": "Name for the new computer account"
+                        "description": "Domain controller DNS name (e.g. 'dc01.contoso.local'). Required when authenticating with a Kerberos ccache — impacket-addcomputer rejects `-k` without `-dc-host`."
                     },
-                    "computer_password": {
-                        "type": "string",
-                        "description": "Password for the new computer account"
-                    }
                 },
-                "required": ["domain", "username", "password", "dc_ip"]
+                "required": ["domain", "username", "dc_ip"]
             }),
         },
         // NOTE: addspn removed — bloodyAD not in privesc container (ACL role only).
@@ -121,7 +137,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: "rbcd_write".into(),
             description: "Write the msDS-AllowedToActOnBehalfOfOtherIdentity attribute on a \
                 target computer to enable Resource-Based Constrained Delegation (RBCD). \
-                Allows the attacker-controlled SID to impersonate users to the target."
+                Lets the attacker-controlled account impersonate users to the target. \
+                Auth precedence: `ticket_path` (Kerberos ccache) > `hash` (NTLM \
+                pass-the-hash) > `password` (plaintext); the worker injects whichever \
+                material the operation actually holds, so a hash-only foothold works here. \
+                Typically chained after `add_computer`: pass that machine account's NAME as \
+                `attacker_account`."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -130,9 +151,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Target computer account to write RBCD attribute on"
                     },
+                    "attacker_account": {
+                        "type": "string",
+                        "description": "sAMAccountName of the attacker-controlled account, e.g. 'EVILPC$' (include the trailing $ for a computer account). Passed to impacket-rbcd as `-delegate-from`, which resolves it with an (sAMAccountName=...) LDAP search — a SID here matches nothing and the write is silently skipped."
+                    },
                     "attacker_sid": {
                         "type": "string",
-                        "description": "SID of the attacker-controlled computer account"
+                        "description": "SID of the attacker-controlled account (e.g. 'S-1-5-21-...-1105'). Optional and NOT sent to impacket; teardown uses it to verify the delegation entry was removed, since the attribute reads back as SDDL containing raw SIDs. Supply it when known."
                     },
                     "domain": {
                         "type": "string",
@@ -144,49 +169,26 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "password": {
                         "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Password for authentication (used only when no `ticket_path` or `hash` is supplied)"
                     },
-                    "dc_ip": {
+                    "hash": {
                         "type": "string",
-                        "description": "Domain controller IP address"
-                    }
-                },
-                "required": ["target_computer", "attacker_sid", "domain", "username", "password", "dc_ip"]
-            }),
-        },
-        ToolDefinition {
-            name: "krbrelayup".into(),
-            description: "Perform local privilege escalation via Kerberos relay (KrbRelayUp). \
-                Abuses Kerberos authentication to relay credentials and escalate privileges \
-                on the local machine. Supports RBCD and Shadow Credentials methods."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "domain": {
+                        "description": "NTLM hash for pass-the-hash (LM:NT or bare NT), passed to impacket-rbcd as `-hashes LMHASH:NTHASH -no-pass`. Takes precedence over `password`."
+                    },
+                    "ticket_path": {
                         "type": "string",
-                        "description": "Target domain (e.g. contoso.local)"
+                        "description": "Path to a Kerberos ccache file. Highest auth precedence; invokes impacket-rbcd with `-k -no-pass` and sets KRB5CCNAME."
                     },
                     "dc_ip": {
                         "type": "string",
                         "description": "Domain controller IP address"
                     },
-                    "method": {
+                    "dc_host": {
                         "type": "string",
-                        "enum": ["rbcd", "shadowcred"],
-                        "description": "Relay method: 'rbcd' (default) creates a computer account and configures RBCD, 'shadowcred' uses shadow credentials",
-                        "default": "rbcd"
-                    },
-                    "create_user": {
-                        "type": "string",
-                        "description": "Computer account name to create (for RBCD method)"
-                    },
-                    "create_password": {
-                        "type": "string",
-                        "description": "Password for the created computer account"
+                        "description": "Domain controller DNS name (e.g. 'dc01.contoso.local'). Optional, but supplying it skips impacket-rbcd's anonymous SMB lookup of the DC's machine name, which a hardened DC refuses."
                     }
                 },
-                "required": ["domain", "dc_ip"]
+                "required": ["target_computer", "attacker_account", "domain", "username", "dc_ip"]
             }),
         },
     ]

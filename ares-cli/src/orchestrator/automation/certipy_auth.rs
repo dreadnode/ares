@@ -364,7 +364,7 @@ mod tests {
         assert!(work.dc_ip.is_none());
     }
 
-    // -- Tests exercising the extracted `collect_cert_auth_work` function --
+    // Tests exercising the extracted `collect_cert_auth_work` function
 
     use crate::orchestrator::state::SharedState;
 
@@ -730,6 +730,67 @@ mod tests {
         let ids: std::collections::HashSet<_> = work.iter().map(|w| w.vuln_id.as_str()).collect();
         assert!(ids.contains("cert-200"));
         assert!(ids.contains("cert-201"));
+    }
+
+    #[tokio::test]
+    async fn a_pywhisker_export_becomes_stage_two_work() {
+        let parsed = ares_tools::parsers::parse_tool_output(
+            "pywhisker",
+            "[+] Updated the msDS-KeyCredentialLink attribute of the target object\n\
+             [+] Saved PFX (#PKCS12) certificate & key at path: \
+             /tmp/ares_shadowcred_1754000000000-4242-0_svc_sql.pfx\n\
+             [*] Must be used with password: ares-shadow-cred",
+            &serde_json::json!({
+                "target_samaccountname": "svc_sql",
+                "domain": "contoso.local",
+                "dc_ip": "192.168.58.10",
+            }),
+        );
+        let vuln: ares_core::models::VulnerabilityInfo =
+            serde_json::from_value(parsed["vulnerabilities"].as_array().expect("vulns")[0].clone())
+                .expect("parser output must deserialize into a VulnerabilityInfo");
+
+        let shared = SharedState::new("test".into());
+        {
+            let mut s = shared.write().await;
+            s.domain_controllers
+                .insert("contoso.local".into(), "192.168.58.10".into());
+            s.discovered_vulnerabilities
+                .insert(vuln.vuln_id.clone(), vuln);
+        }
+        let state = shared.read().await;
+        let work = collect_cert_auth_work(&state);
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].pfx_path,
+            "/tmp/ares_shadowcred_1754000000000-4242-0_svc_sql.pfx"
+        );
+        assert_eq!(work[0].target_user, "svc_sql");
+        assert_eq!(work[0].domain, "contoso.local");
+        assert_eq!(work[0].dc_ip, Some("192.168.58.10".into()));
+
+        let argv = ares_tools::privesc::build_certipy_auth(&serde_json::json!({
+            "pfx_path": work[0].pfx_path,
+            "domain": work[0].domain,
+            "dc_ip": work[0].dc_ip,
+        }))
+        .expect("stage two builds from the dispatched payload alone")
+        .args_for_test()
+        .to_vec();
+        for expected in ["-pfx", "-username", "-password"] {
+            assert!(
+                argv.iter().any(|a| a == expected),
+                "the whole chain must reach certipy with {expected}: {argv:?}"
+            );
+        }
+        let idx = argv.iter().position(|a| a == "-username").unwrap();
+        assert_eq!(
+            argv[idx + 1],
+            "svc_sql",
+            "certipy reads identities from the SAN, and pywhisker's self-signed \
+             certificate has none — without this the run ends on `Could not find \
+             identity in the provided certificate`"
+        );
     }
 
     #[tokio::test]

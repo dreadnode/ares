@@ -33,17 +33,14 @@ impl From<&Host> for HostCtx {
         let mut services = Vec::new();
         for svc in &h.services {
             let svc_trimmed = svc.trim();
-            // Skip non-service entries
             if NON_SERVICE_ENTRIES
                 .iter()
                 .any(|ns| svc_trimmed.eq_ignore_ascii_case(ns))
             {
                 continue;
             }
-            // Normalize: strip trailing `?` inside parens for dedup key
             let key = svc_trimmed.replace("?)", ")").to_lowercase();
             if seen_ports.insert(key) {
-                // Prefer the non-`?` variant; strip the `?` from display too
                 services.push(svc_trimmed.replace("?)", ")").replace("?", ""));
             }
         }
@@ -255,6 +252,16 @@ pub(crate) struct ChainStepCtx {
     pub hash_type: String,
 }
 
+/// Tera context for one domain's credential chain.
+///
+/// The comprehensive report iterates these as `domain_admin_chains` so a
+/// multi-domain compromise renders every domain, not just the first.
+#[derive(Serialize)]
+pub(crate) struct DomainChainCtx {
+    pub domain: String,
+    pub steps: Vec<ChainStepCtx>,
+}
+
 #[derive(Serialize)]
 pub(crate) struct VulnCtx {
     pub vuln_id: String,
@@ -264,6 +271,7 @@ pub(crate) struct VulnCtx {
     pub target_host: String,
     pub priority: i32,
     pub exploited: bool,
+    pub superseded: bool,
     pub exploited_display: String,
     pub status_display: String,
     pub details: String,
@@ -275,8 +283,10 @@ pub(crate) fn build_vuln_ctx(
     vuln_id: &str,
     vuln: &VulnerabilityInfo,
     exploited_set: &HashSet<String>,
+    superseded_set: &HashSet<String>,
 ) -> VulnCtx {
-    let exploited = exploited_set.contains(vuln_id);
+    let superseded = superseded_set.contains(vuln_id);
+    let exploited = exploited_set.contains(vuln_id) && !superseded;
     let details_str = format_vuln_details(&vuln.details);
     let details_list = if details_str == "-" {
         Vec::new()
@@ -291,13 +301,18 @@ pub(crate) fn build_vuln_ctx(
         target_host: vuln.target.clone(),
         priority: vuln.priority,
         exploited,
+        superseded,
         exploited_display: if exploited {
             "\u{2713}".to_string() // checkmark
+        } else if superseded {
+            "\u{2261}".to_string()
         } else {
             "\u{2717}".to_string() // cross
         },
         status_display: if exploited {
             "EXPLOITED".to_string()
+        } else if superseded {
+            "SUPERSEDED (goal reached via another path; this technique unproven)".to_string()
         } else {
             "Not Exploited".to_string()
         },
@@ -355,6 +370,7 @@ mod tests {
             description: "Built-in admin".to_string(),
             is_admin: true,
             source: String::new(),
+            member_of: Vec::new(),
         };
         let ctx = UserCtx::from(&user);
         assert_eq!(ctx.username, "admin");
@@ -370,6 +386,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: String::new(),
+            member_of: Vec::new(),
         };
         let ctx = UserCtx::from(&user);
         assert_eq!(ctx.admin_display, "No");
@@ -490,7 +507,12 @@ mod tests {
             priority: 5,
         };
         let exploited = HashSet::new();
-        let ctx = build_vuln_ctx("smb_signing_192.168.58.10", &vuln, &exploited);
+        let ctx = build_vuln_ctx(
+            "smb_signing_192.168.58.10",
+            &vuln,
+            &exploited,
+            &HashSet::new(),
+        );
         assert!(!ctx.exploited);
         assert_eq!(ctx.status_display, "Not Exploited");
         assert_eq!(ctx.exploited_display, "\u{2717}");
@@ -513,7 +535,7 @@ mod tests {
             priority: 8,
         };
         let exploited = HashSet::new();
-        let ctx = build_vuln_ctx("cd_john", &vuln, &exploited);
+        let ctx = build_vuln_ctx("cd_john", &vuln, &exploited, &HashSet::new());
         assert!(ctx.details_list.len() >= 2);
         assert!(ctx.details_list.iter().any(|d| d.contains("john.smith")));
         assert!(ctx.details_list.iter().any(|d| d.contains("contoso.local")));
@@ -533,7 +555,7 @@ mod tests {
         };
         let mut exploited = HashSet::new();
         exploited.insert("esc1_192.168.58.10".to_string());
-        let ctx = build_vuln_ctx("esc1_192.168.58.10", &vuln, &exploited);
+        let ctx = build_vuln_ctx("esc1_192.168.58.10", &vuln, &exploited, &HashSet::new());
         assert!(ctx.exploited);
         assert_eq!(ctx.status_display, "EXPLOITED");
         assert_eq!(ctx.exploited_display, "\u{2713}");

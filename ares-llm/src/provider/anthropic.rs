@@ -292,7 +292,6 @@ impl LlmProvider for AnthropicProvider {
         if !status.is_success() {
             let message = if let Ok(err) = serde_json::from_str::<ApiError>(&body) {
                 let msg = format!("{} — {}", err.error.error_type, err.error.message);
-                // Classify by error type
                 if err.error.error_type == "request_too_large" {
                     return Err(LlmError::ContextTooLong(msg));
                 }
@@ -315,7 +314,6 @@ impl LlmProvider for AnthropicProvider {
             LlmError::Other(anyhow::anyhow!("Failed to parse Anthropic response: {e}"))
         })?;
 
-        // Extract text and tool calls from response blocks
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
 
@@ -497,7 +495,7 @@ mod tests {
     #[test]
     fn serialize_api_request_with_cache() {
         let req = ApiRequest {
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             max_tokens: 4096,
             messages: vec![ApiMessage {
                 role: "user".to_string(),
@@ -508,7 +506,7 @@ mod tests {
             temperature: None,
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["model"], "claude-sonnet-4-20250514");
+        assert_eq!(json["model"], "claude-sonnet-4-6");
         assert!(json["system"].is_array());
         assert_eq!(json["system"][0]["text"], "You are a recon agent.");
         assert_eq!(json["system"][0]["cache_control"]["type"], "ephemeral");
@@ -518,7 +516,7 @@ mod tests {
     #[test]
     fn serialize_api_request_no_cache_no_breakpoints() {
         let req = ApiRequest {
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             max_tokens: 4096,
             messages: vec![],
             system: build_system_blocks(Some("hi"), false),

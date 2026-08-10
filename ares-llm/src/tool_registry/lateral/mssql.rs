@@ -379,6 +379,60 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "mssql_far_host_secretsdump".into(),
+            description: "Harvest SAM/SYSTEM/SECURITY registry hives from a linked \
+                (typically cross-forest) MSSQL host via xp_cmdshell over the link hop, \
+                then parse them locally with `impacket-secretsdump LOCAL`. Use this \
+                after a `mssql_linked_server` sysadmin pivot when you need to convert \
+                the SQL-sysadmin foothold on the linked host into OS credentials \
+                (local admin hashes, LSA secrets, cached domain-service-account \
+                cleartext) — the standard SMB-based secretsdump path can't reach a \
+                cross-forest host without a far-forest admin credential. Pass \
+                `impersonate_user='sa'` when the connecting principal isn't sysadmin \
+                on the source but has IMPERSONATE. Output is the standard \
+                impacket-secretsdump text, parsed automatically."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Source MSSQL server IP or hostname (entry point)"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for source-side authentication"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for source-side authentication (omit if `hash` is set)"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NT hash for pass-the-hash source-side authentication (omit if `password` is set)"
+                    },
+                    "linked_server": {
+                        "type": "string",
+                        "description": "Name of the linked SQL server (the far host to dump)"
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Domain name for source-side Windows authentication"
+                    },
+                    "windows_auth": {
+                        "type": "boolean",
+                        "description": "Use Windows authentication instead of SQL auth",
+                        "default": true
+                    },
+                    "impersonate_user": {
+                        "type": "string",
+                        "description": "Optional source-side login to impersonate (EXECUTE AS LOGIN) before the hop. Use 'sa' when the connecting user isn't sysadmin but has IMPERSONATE."
+                    }
+                },
+                "required": ["target", "username", "linked_server"]
+            }),
+        },
+        ToolDefinition {
             name: "mssql_ntlm_coerce".into(),
             description: "Coerce NTLM authentication from a MSSQL server. Forces the SQL \
                 server to authenticate to a listener for hash capture via xp_dirtree."

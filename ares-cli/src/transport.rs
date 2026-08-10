@@ -10,9 +10,7 @@
 
 use std::process::Command;
 
-// ============================================================================
 // Argv pre-scanning (runs before clap)
-// ============================================================================
 
 /// Scan raw argv for `--k8s <namespace>` and `--k8s-deploy <deploy>`.
 /// Returns `(namespace, deploy)` if `--k8s` is present.
@@ -91,9 +89,7 @@ fn prescan_ec2_args() -> Option<(String, String, String)> {
     })
 }
 
-// ============================================================================
 // Argv stripping (shared by both transports)
-// ============================================================================
 
 /// Strip all transport and credential flags from argv.
 /// Returns the remaining args (without the binary name).
@@ -135,9 +131,7 @@ fn strip_transport_args() -> Vec<String> {
     result
 }
 
-// ============================================================================
 // K8s transport (kubectl exec — synchronous)
-// ============================================================================
 
 /// Auto-detect the K8s deployment name from the subcommand.
 fn detect_deploy(args: &[String]) -> &str {
@@ -181,28 +175,44 @@ pub(crate) fn maybe_exec_k8s() -> Option<i32> {
     }
 }
 
-// ============================================================================
 // EC2 transport (AWS SSM — async send/poll/fetch)
-// ============================================================================
+
+/// Return `["--profile", profile]` unless session env credentials are already
+/// exported (assume, aws-vault, instance metadata) — in that case the AWS CLI
+/// should use the env session, and passing `--profile` would send it looking
+/// for a named profile in `~/.aws/config` instead.
+fn profile_args(profile: &str) -> Vec<&str> {
+    if std::env::var_os("AWS_ACCESS_KEY_ID").is_some() {
+        Vec::new()
+    } else {
+        vec!["--profile", profile]
+    }
+}
 
 /// Resolve EC2 instance ID from a Name tag pattern.
 fn resolve_ec2_instance(name: &str, profile: &str, region: &str) -> Result<String, String> {
-    let output = Command::new("aws")
+    // Pass-through: if the caller already provided an instance ID (`i-…`),
+    // skip the tag lookup. Lets operators pin a specific box when the Name
+    // tag is ambiguous.
+    if name.starts_with("i-") && name.len() >= 10 {
+        return Ok(name.to_string());
+    }
+    let filter = format!("Name=tag:Name,Values=*{name}*");
+    let mut cmd = Command::new("aws");
+    cmd.args(["ec2", "describe-instances"])
+        .args(profile_args(profile))
         .args([
-            "ec2",
-            "describe-instances",
-            "--profile",
-            profile,
             "--region",
             region,
             "--filters",
             "Name=instance-state-name,Values=running",
-            &format!("Name=tag:Name,Values=*{name}*"),
+            &filter,
             "--query",
             "Reservations[*].Instances[*].InstanceId",
             "--output",
             "text",
-        ])
+        ]);
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to run aws: {e}"))?;
 
@@ -278,12 +288,11 @@ fn ssm_send_command(
     std::fs::write(&params_path, &params_json)
         .map_err(|e| format!("Failed to write params file: {e}"))?;
 
-    let output = Command::new("aws")
+    let parameters = format!("file://{params_path}");
+    let mut cmd = Command::new("aws");
+    cmd.args(["ssm", "send-command"])
+        .args(profile_args(profile))
         .args([
-            "ssm",
-            "send-command",
-            "--profile",
-            profile,
             "--region",
             region,
             "--instance-ids",
@@ -291,13 +300,13 @@ fn ssm_send_command(
             "--document-name",
             "AWS-RunShellScript",
             "--parameters",
-            &format!("file://{params_path}"),
+            &parameters,
             "--query",
             "Command.CommandId",
             "--output",
             "text",
-        ])
-        .output();
+        ]);
+    let output = cmd.output();
 
     // Clean up temp file regardless of outcome
     let _ = std::fs::remove_file(&params_path);
@@ -313,13 +322,16 @@ fn ssm_send_command(
 
 /// Poll SSM command invocation until it reaches a terminal state.
 fn ssm_poll(cmd_id: &str, instance_id: &str, profile: &str, region: &str, max_secs: u32) -> String {
-    for _ in 0..max_secs {
-        if let Ok(output) = Command::new("aws")
+    // Poll by wall-clock deadline (not iteration count) so a long-running remote
+    // command — e.g. the benchmark blue investigation, which can run tens of
+    // minutes — isn't cut off early by per-poll `aws` latency. Short commands
+    // still return the instant they reach a terminal state.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_secs as u64);
+    while std::time::Instant::now() < deadline {
+        let mut cmd = Command::new("aws");
+        cmd.args(["ssm", "get-command-invocation"])
+            .args(profile_args(profile))
             .args([
-                "ssm",
-                "get-command-invocation",
-                "--profile",
-                profile,
                 "--region",
                 region,
                 "--command-id",
@@ -330,9 +342,8 @@ fn ssm_poll(cmd_id: &str, instance_id: &str, profile: &str, region: &str, max_se
                 "Status",
                 "--output",
                 "text",
-            ])
-            .output()
-        {
+            ]);
+        if let Ok(output) = cmd.output() {
             let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
             match status.as_str() {
                 "Success" | "Failed" | "Cancelled" | "TimedOut" => return status,
@@ -352,12 +363,10 @@ fn ssm_get_output(
     region: &str,
     query_field: &str,
 ) -> Result<String, String> {
-    let output = Command::new("aws")
+    let mut cmd = Command::new("aws");
+    cmd.args(["ssm", "get-command-invocation"])
+        .args(profile_args(profile))
         .args([
-            "ssm",
-            "get-command-invocation",
-            "--profile",
-            profile,
             "--region",
             region,
             "--command-id",
@@ -368,7 +377,8 @@ fn ssm_get_output(
             query_field,
             "--output",
             "text",
-        ])
+        ]);
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to run aws: {e}"))?;
 
@@ -403,7 +413,9 @@ pub(crate) fn maybe_exec_ec2() -> Option<i32> {
         }
     };
 
-    let status = ssm_poll(&cmd_id, &instance_id, &profile, &region, 120);
+    // 50 min — covers the blue investigation's 45-min timeout plus setup/scoring.
+    // Short --ec2 commands (ops runtime/stop, etc.) return as soon as they finish.
+    let status = ssm_poll(&cmd_id, &instance_id, &profile, &region, 3000);
 
     if let Ok(stdout) = ssm_get_output(
         &cmd_id,
@@ -434,8 +446,6 @@ pub(crate) fn maybe_exec_ec2() -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── shell_join ──
 
     #[test]
     fn shell_join_simple_args() {
@@ -489,8 +499,6 @@ mod tests {
         assert_eq!(shell_join(&args), "'a|b'");
     }
 
-    // ── json_escape ──
-
     #[test]
     fn json_escape_plain() {
         assert_eq!(json_escape("hello"), "hello");
@@ -530,8 +538,6 @@ mod tests {
     fn json_escape_combined() {
         assert_eq!(json_escape("a\\b\n\"c\""), "a\\\\b\\n\\\"c\\\"");
     }
-
-    // ── detect_deploy ──
 
     #[test]
     fn detect_deploy_blue() {

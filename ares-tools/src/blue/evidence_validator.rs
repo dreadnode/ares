@@ -4,6 +4,7 @@
 //! extracts IOCs (IPs, hostnames, users, hashes) via regex, and validates
 //! evidence values against the stored results for confidence adjustment.
 
+use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
@@ -20,14 +21,30 @@ const UNVALIDATED_PENALTY: f64 = 0.15;
 /// Maximum suggested IOCs to return.
 const MAX_SUGGESTED_IOCS: usize = 50;
 
+/// Source label applied to a free-form query the analyst composed.
+pub const ANALYST_QUERY_SOURCE: &str = "loki_query";
+
+/// Prefix marking a result produced by running a catalog detection template.
+/// Matches the label `sweep.rs::record_fired` writes, so the report's
+/// analyst-vs-sweep split reads the same string either way.
+pub const CATALOG_QUERY_SOURCE_PREFIX: &str = "detection_sweep";
+
+/// Where a validated evidence value was actually observed.
+pub struct QueryProvenance {
+    pub query_id: String,
+    pub source: String,
+}
+
 struct StoredQueryResult {
     query_id: String,
+    source: String,
     extracted_values: HashSet<String>,
 }
 
 struct ValidatorState {
     results: VecDeque<StoredQueryResult>,
     counter: u32,
+    grounded_techniques: HashSet<String>,
 }
 
 fn state() -> &'static Mutex<ValidatorState> {
@@ -36,8 +53,39 @@ fn state() -> &'static Mutex<ValidatorState> {
         Mutex::new(ValidatorState {
             results: VecDeque::with_capacity(MAX_STORED_RESULTS),
             counter: 0,
+            grounded_techniques: HashSet::new(),
         })
     })
+}
+
+/// Returns true when `value` has the shape of a MITRE technique ID.
+pub fn is_technique_id(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    lower.starts_with('t') && lower.len() >= 5 && lower[1..5].chars().all(|c| c.is_ascii_digit())
+}
+
+/// Mark a technique as observed rather than asserted.
+///
+/// Called when a catalog detection template returns events, and when an
+/// evidence value that passed query grounding carries the technique as a tag.
+/// Until a technique is registered here, [`validate_evidence_value`] refuses it
+/// — otherwise any `T####`-shaped string would validate with no query behind it,
+/// which is the one gap that let an agent self-award technique coverage from a
+/// cold start.
+pub fn register_grounded_technique(technique_id: &str) {
+    if !is_technique_id(technique_id) {
+        return;
+    }
+    let mut st = state().lock().unwrap();
+    st.grounded_techniques
+        .insert(technique_id.to_lowercase().trim().to_string());
+}
+
+/// Whether `technique_id` has been observed by a query or a grounded evidence tag.
+pub fn technique_is_grounded(technique_id: &str) -> bool {
+    let normalized = technique_id.to_lowercase().trim().to_string();
+    let st = state().lock().unwrap();
+    st.grounded_techniques.contains(&normalized)
 }
 
 fn ipv4_re() -> &'static Regex {
@@ -131,11 +179,56 @@ fn is_hostname_like(value: &str) -> bool {
     true
 }
 
+fn decode_json_escapes(text: &str) -> Cow<'_, str> {
+    if !text.contains('\\') {
+        return Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                let decoded = (hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+                    .then(|| u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32))
+                    .flatten();
+                match decoded {
+                    Some(c) => out.push(c),
+                    None => {
+                        out.push_str("\\u");
+                        out.push_str(&hex);
+                    }
+                }
+            }
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('b') => out.push('\u{8}'),
+            Some('f') => out.push('\u{c}'),
+            Some('"') => out.push('"'),
+            Some('/') => out.push('/'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Extract IOC values from a text string (query result output).
 fn extract_iocs_from_text(text: &str) -> HashSet<String> {
+    let decoded = decode_json_escapes(text);
+    let text: &str = decoded.as_ref();
     let mut values = HashSet::new();
 
-    // IPv4 addresses
     for cap in ipv4_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let ip = m.as_str();
@@ -149,7 +242,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // Hostnames/FQDNs
     for cap in hostname_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let host = m.as_str();
@@ -159,7 +251,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // DOMAIN\user
     for cap in domain_user_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let user = m.as_str();
@@ -176,7 +267,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // JSON user fields
     for cap in json_user_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let user = m.as_str().trim();
@@ -186,7 +276,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // JSON computer fields
     for cap in json_computer_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let host = m.as_str().trim();
@@ -196,7 +285,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // JSON process fields (only .exe or .dll)
     for cap in json_process_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let proc = m.as_str().trim();
@@ -207,7 +295,6 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
         }
     }
 
-    // JSON service fields
     for cap in json_service_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let svc = m.as_str().trim();
@@ -241,6 +328,15 @@ fn extract_iocs_from_text(text: &str) -> HashSet<String> {
 ///
 /// Returns the assigned query ID.
 pub fn store_query_result(result_text: &str) -> String {
+    store_query_result_from(result_text, ANALYST_QUERY_SOURCE)
+}
+
+/// Store a query result together with the label describing how it was produced.
+///
+/// The label travels with the extracted values so evidence written later can
+/// be attributed to the query that actually observed it, rather than to a
+/// free-text `source` the agent supplies at write time.
+pub fn store_query_result_from(result_text: &str, source: &str) -> String {
     let extracted = extract_iocs_from_text(result_text);
 
     let mut st = state().lock().unwrap();
@@ -253,6 +349,7 @@ pub fn store_query_result(result_text: &str) -> String {
 
     st.results.push_back(StoredQueryResult {
         query_id: query_id.clone(),
+        source: source.to_string(),
         extracted_values: extracted,
     });
 
@@ -261,13 +358,13 @@ pub fn store_query_result(result_text: &str) -> String {
 
 /// Check if an evidence value was seen in any recent query result.
 ///
-/// Returns `(validated, source_query_id)`.
-pub fn validate_evidence_value(value: &str) -> (bool, Option<String>) {
-    // MITRE technique IDs are always valid
+/// Returns `(validated, provenance)`. Provenance is `None` for MITRE technique
+/// IDs, which belong to no particular query; they validate only once registered
+/// as grounded by [`register_grounded_technique`].
+pub fn validate_evidence_value(value: &str) -> (bool, Option<QueryProvenance>) {
     let lower = value.to_lowercase();
-    if lower.starts_with('t') && lower.len() >= 5 && lower[1..5].chars().all(|c| c.is_ascii_digit())
-    {
-        return (true, None);
+    if is_technique_id(value) {
+        return (technique_is_grounded(value), None);
     }
 
     let normalized = lower.trim().to_string();
@@ -276,7 +373,13 @@ pub fn validate_evidence_value(value: &str) -> (bool, Option<String>) {
     // Search most recent first
     for result in st.results.iter().rev() {
         if result.extracted_values.contains(&normalized) {
-            return (true, Some(result.query_id.clone()));
+            return (
+                true,
+                Some(QueryProvenance {
+                    query_id: result.query_id.clone(),
+                    source: result.source.clone(),
+                }),
+            );
         }
     }
 
@@ -333,7 +436,6 @@ pub fn get_suggested_iocs() -> Vec<ClassifiedIoc> {
 
 /// Classify an IOC value by type.
 fn classify_ioc(value: &str) -> Option<&'static str> {
-    // IP address
     if value.split('.').count() == 4
         && value.chars().all(|c| c.is_ascii_digit() || c == '.')
         && value
@@ -343,7 +445,6 @@ fn classify_ioc(value: &str) -> Option<&'static str> {
         return Some("ip");
     }
 
-    // Hashes
     if value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit()) {
         return Some("hash");
     }
@@ -354,17 +455,14 @@ fn classify_ioc(value: &str) -> Option<&'static str> {
         return Some("hash");
     }
 
-    // DOMAIN\user
     if value.contains('\\') && !value.starts_with("c:\\") && !value.starts_with("\\\\") {
         return Some("user");
     }
 
-    // user@domain
     if value.contains('@') && value.contains('.') {
         return Some("user");
     }
 
-    // Hostname/FQDN
     if is_hostname_like(value) {
         return Some("hostname");
     }
@@ -407,6 +505,59 @@ mod tests {
     }
 
     #[test]
+    fn xml_escape_does_not_glue_onto_the_account_name() {
+        let text = r"<Data Name='TargetUserName'\u003ealice.admin\u003c/Data\u003e";
+        assert!(
+            text.contains(r"\u003e"),
+            "fixture must carry the escape the bug hinges on, else the test is vacuous"
+        );
+        let iocs = extract_iocs_from_text(text);
+        assert!(
+            iocs.contains("alice.admin"),
+            "expected the decoded account name, got {iocs:?}"
+        );
+        assert!(
+            !iocs.contains("u003ealice.admin"),
+            "escape payload must not survive into the IOC: {iocs:?}"
+        );
+    }
+
+    #[test]
+    fn truncated_unicode_escape_is_not_decoded_from_short_hex() {
+        assert_eq!(decode_json_escapes(r"\uAB"), r"\uAB");
+        assert_eq!(decode_json_escapes(r"\u00"), r"\u00");
+        assert_eq!(decode_json_escapes(r"\uZZZZ"), r"\uZZZZ");
+        assert_eq!(decode_json_escapes(r"\u+123"), r"\u+123");
+    }
+
+    #[test]
+    fn tab_escape_does_not_glue_onto_an_address() {
+        let iocs = extract_iocs_from_text(r"logon from\t192.168.58.172 as\talice.admin");
+        assert!(iocs.contains("192.168.58.172"), "got {iocs:?}");
+        assert!(!iocs.contains("t192.168.58.172"), "got {iocs:?}");
+        assert!(!iocs.contains("talice.admin"), "got {iocs:?}");
+    }
+
+    #[test]
+    fn escaped_backslash_yields_the_domain_user_pair() {
+        let iocs = extract_iocs_from_text(r"Account: CONTOSO\\alice.admin");
+        assert!(iocs.contains(r"contoso\alice.admin"), "got {iocs:?}");
+    }
+
+    #[test]
+    fn unrecognized_escapes_are_left_alone() {
+        assert_eq!(
+            decode_json_escapes(r"C:\Windows\System32"),
+            r"C:\Windows\System32"
+        );
+        assert_eq!(decode_json_escapes(r"\uZZZZ"), r"\uZZZZ");
+        assert_eq!(
+            decode_json_escapes("no backslash here"),
+            "no backslash here"
+        );
+    }
+
+    #[test]
     fn exclude_file_extensions() {
         assert!(!is_hostname_like("cmd.exe"));
         assert!(!is_hostname_like("config.json"));
@@ -415,8 +566,29 @@ mod tests {
 
     #[test]
     fn validate_mitre_technique() {
+        register_grounded_technique("T1003.006");
         let (valid, _) = validate_evidence_value("T1003.006");
         assert!(valid);
+    }
+
+    #[test]
+    fn unregistered_technique_is_rejected() {
+        assert!(!technique_is_grounded("T9042"));
+        let (valid, _) = validate_evidence_value("T9042");
+        assert!(
+            !valid,
+            "a T#### string must not validate before any query observed it"
+        );
+    }
+
+    #[test]
+    fn fabricated_ioc_is_rejected() {
+        let (valid, prov) = validate_evidence_value("192.168.58.253");
+        assert!(
+            !valid,
+            "a value that appeared in no query result must be refused"
+        );
+        assert!(prov.is_none());
     }
 
     #[test]
@@ -445,5 +617,48 @@ mod tests {
         assert_eq!(classify_ioc("CONTOSO\\jsmith"), Some("user"));
         assert_eq!(classify_ioc("jsmith@contoso.local"), Some("user"));
         assert_eq!(classify_ioc("random"), None);
+    }
+
+    /// A value observed by a catalog template run must be attributable to that
+    /// template, not to whatever `source` string the agent types at write time.
+    /// The report's analyst-vs-sweep split keys on this exact prefix.
+    #[test]
+    fn catalog_template_results_carry_catalog_provenance() {
+        store_query_result_from(
+            "logon from 192.168.58.171 for svc_catalogprov",
+            "detection_sweep:detect_s4u_delegation",
+        );
+        let (valid, prov) = validate_evidence_value("192.168.58.171");
+        assert!(valid);
+        let prov = prov.expect("a grounded value carries its query provenance");
+        assert_eq!(prov.source, "detection_sweep:detect_s4u_delegation");
+        assert!(prov.source.starts_with(CATALOG_QUERY_SOURCE_PREFIX));
+        assert!(prov.query_id.starts_with("q-"));
+    }
+
+    /// A free-form query the analyst composed stays analyst work.
+    #[test]
+    fn free_form_queries_stay_analyst_work() {
+        store_query_result("logon from 192.168.58.172 for svc_freeform");
+        let (valid, prov) = validate_evidence_value("192.168.58.172");
+        assert!(valid);
+        assert_eq!(prov.expect("provenance").source, ANALYST_QUERY_SOURCE);
+    }
+
+    /// MITRE IDs auto-validate and belong to no query, so they must not
+    /// inherit an unrelated query's source.
+    #[test]
+    fn a_mitre_id_has_no_query_provenance() {
+        register_grounded_technique("T1558.001");
+        let (valid, prov) = validate_evidence_value("T1558.001");
+        assert!(valid);
+        assert!(prov.is_none());
+    }
+
+    #[test]
+    fn grounded_technique_registration_is_case_insensitive() {
+        register_grounded_technique("T1550.002");
+        assert!(technique_is_grounded("t1550.002"));
+        assert!(technique_is_grounded("T1550.002"));
     }
 }

@@ -7,6 +7,33 @@ use super::strip_trailing_dot;
 pub(super) const WELL_KNOWN_ACCOUNTS: &[&str] =
     &["krbtgt", "administrator", "guest", "defaultaccount"];
 
+/// True when `domain` originated from a Windows workgroup or an auto-generated
+/// computer name rather than a real Kerberos realm.
+///
+/// Matches the literal `WORKGROUP`/`MSHOME` values and the Windows default
+/// computer-name prefix `WIN-` followed by 11 alphanumerics as the first label
+/// (e.g. `WIN-ABCDEFGHIJK.<anything>`). Such strings leak in via host FQDN
+/// suffixes and, left unfiltered, survive `normalize_state_domains` as phantom
+/// domains that inflate the `(N/M domains, X/Y forests)` counts even though they
+/// can never be compromised.
+pub(crate) fn looks_like_workgroup_pseudo_domain(domain: &str) -> bool {
+    let domain = domain.trim().trim_end_matches('.');
+    if domain.is_empty() {
+        return false;
+    }
+    if domain.eq_ignore_ascii_case("WORKGROUP") || domain.eq_ignore_ascii_case("MSHOME") {
+        return true;
+    }
+    let first_label = domain.split('.').next().unwrap_or("");
+    if first_label.len() == 15 && first_label[..4].eq_ignore_ascii_case("WIN-") {
+        let suffix = &first_label[4..];
+        if suffix.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn normalize_state_domains(
     users: &[User],
     credentials: &mut Vec<Credential>,
@@ -60,7 +87,6 @@ pub(crate) fn normalize_state_domains(
             if indices.len() == 1 {
                 let i = indices[0];
                 keep[i] = true;
-                // Correct domain if user exists in exactly one domain
                 if let Some(ds) = domains_for_user {
                     if ds.len() == 1 {
                         let correct = ds.iter().next().unwrap().clone();
@@ -81,7 +107,6 @@ pub(crate) fn normalize_state_domains(
                     }
                     Some(ds) if ds.len() == 1 => {
                         let correct = ds.iter().next().unwrap();
-                        // Keep only matching credential, or correct the best one
                         let matching = indices
                             .iter()
                             .find(|&&i| credentials[i].domain.to_lowercase() == *correct);
@@ -97,7 +122,6 @@ pub(crate) fn normalize_state_domains(
                         }
                     }
                     Some(ds) => {
-                        // Keep only creds whose domain matches a known user domain
                         for &i in indices {
                             if ds.contains(&credentials[i].domain.to_lowercase()) {
                                 keep[i] = true;
@@ -269,7 +293,8 @@ pub(crate) fn normalize_state_domains(
 
         domains.retain(|d| {
             let lower = d.to_lowercase();
-            valid_domains.contains(&lower)
+            !looks_like_workgroup_pseudo_domain(&lower)
+                && valid_domains.contains(&lower)
                 && (!host_fqdns.contains(&lower)
                     || confirmed_domains.contains(&lower)
                     || target_domain_lower.as_deref() == Some(lower.as_str())

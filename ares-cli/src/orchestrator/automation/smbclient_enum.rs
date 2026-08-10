@@ -26,7 +26,6 @@ fn collect_smbclient_work(state: &crate::orchestrator::state::StateInner) -> Vec
     let mut items = Vec::new();
 
     for host in &state.hosts {
-        // Check if host has SMB
         let has_smb = host.services.iter().any(|s| {
             let sl = s.to_lowercase();
             sl.contains("445") || sl.contains("smb") || sl.contains("cifs")
@@ -40,14 +39,12 @@ fn collect_smbclient_work(state: &crate::orchestrator::state::StateInner) -> Vec
             continue;
         }
 
-        // Infer domain from hostname
         let domain = host
             .hostname
             .find('.')
             .map(|i| host.hostname[i + 1..].to_string())
             .unwrap_or_default();
 
-        // Pick a credential for this domain
         let cred = match state
             .credentials
             .iter()
@@ -192,8 +189,6 @@ mod tests {
             owned: false,
         }
     }
-
-    // ---- collect_smbclient_work tests ----
 
     #[tokio::test]
     async fn collect_empty_state_returns_nothing() {
@@ -595,8 +590,6 @@ mod tests {
         let work = collect_smbclient_work(&state);
         assert!(work.is_empty());
     }
-
-    // ---- original tests ----
 
     #[test]
     fn dedup_key_format() {

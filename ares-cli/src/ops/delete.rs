@@ -78,7 +78,6 @@ pub(crate) async fn ops_cleanup(redis_url: Option<String>, max_age_hours: u64) -
 
 /// Parse a UTC timestamp from an operation ID with format `op-YYYYMMDD-HHMMSS`.
 pub(crate) fn parse_operation_timestamp(op_id: &str) -> Option<DateTime<Utc>> {
-    // Expected format: op-YYYYMMDD-HHMMSS (e.g., op-20250128-123456)
     if !op_id.starts_with("op-") || op_id.len() < 18 {
         return None;
     }

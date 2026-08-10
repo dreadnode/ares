@@ -65,7 +65,7 @@ impl Host {
 
 /// Discovered user account.
 ///
-/// Redis serialization: `{"username","domain","source"}`
+/// Redis serialization: `{"username","domain","source","member_of"}`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct User {
     pub username: String,
@@ -77,6 +77,48 @@ pub struct User {
     pub is_admin: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
+    /// Groups this principal belongs to, as returned by LDAP `memberOf`.
+    ///
+    /// Aliased because every producer emits the LDAP attribute name verbatim.
+    /// Without the alias this field silently defaulted to empty on every record
+    /// — the enumerators request `memberOf` in five places, and the value was
+    /// discarded at this deserialization boundary, which is why group-sourced
+    /// ACL edges had no principal to authenticate as.
+    #[serde(
+        default,
+        alias = "memberOf",
+        alias = "member_of",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub member_of: Vec<String>,
+}
+
+impl User {
+    /// Fold `incoming` group memberships into this record, case-insensitively
+    /// deduped, and report whether the set grew.
+    ///
+    /// A principal is discovered many times over an operation and only some of
+    /// those sightings carry `memberOf` — the LDAP roster does, a netexec RID
+    /// brute does not. Every dedup layer is first-writer-wins, so without an
+    /// explicit fold the membership arrives after the bare row and is dropped.
+    pub fn merge_member_of(&mut self, incoming: &[String]) -> bool {
+        let mut known: Vec<String> = self.member_of.iter().map(|g| g.to_lowercase()).collect();
+        let mut grew = false;
+        for group in incoming {
+            let trimmed = group.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let lower = trimmed.to_lowercase();
+            if known.contains(&lower) {
+                continue;
+            }
+            known.push(lower);
+            self.member_of.push(trimmed.to_string());
+            grew = true;
+        }
+        grew
+    }
 }
 
 /// AD built-in accounts that ship `userAccountControl & ACCOUNTDISABLE` set
@@ -382,6 +424,31 @@ mod tests {
     }
 
     #[test]
+    fn merge_member_of_folds_new_groups_and_dedups_case_insensitively() {
+        let mut user = User {
+            username: "alice".to_string(),
+            domain: "contoso.local".to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: "ldap_extraction".to_string(),
+            member_of: vec!["CN=Domain Admins,CN=Users,DC=contoso,DC=local".to_string()],
+        };
+
+        assert!(user.merge_member_of(&[
+            "cn=domain admins,cn=users,dc=contoso,dc=local".to_string(),
+            "CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string(),
+            "  ".to_string(),
+        ]));
+        assert_eq!(user.member_of.len(), 2);
+        assert_eq!(
+            user.member_of[0],
+            "CN=Domain Admins,CN=Users,DC=contoso,DC=local"
+        );
+
+        assert!(!user.merge_member_of(&["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".into()]));
+    }
+
+    #[test]
     fn share_serde_roundtrip() {
         let share = Share {
             host: "192.168.58.5".to_string(),
@@ -407,12 +474,39 @@ mod tests {
 
     #[test]
     fn user_serde_roundtrip() {
+        let ldap_shaped = serde_json::json!({
+            "username": "alice",
+            "domain": "contoso.local",
+            "memberOf": ["CN=Small Council,OU=Groups,DC=contoso,DC=local", "Domain Users"],
+        });
+        let parsed: User = serde_json::from_value(ldap_shaped).unwrap();
+        assert_eq!(
+            parsed.member_of,
+            vec![
+                "CN=Small Council,OU=Groups,DC=contoso,DC=local".to_string(),
+                "Domain Users".to_string()
+            ],
+            "the LDAP attribute name must survive deserialization"
+        );
+
+        let snake_shaped = serde_json::json!({
+            "username": "bob",
+            "member_of": ["Small Council"],
+        });
+        let parsed: User = serde_json::from_value(snake_shaped).unwrap();
+        assert_eq!(parsed.member_of, vec!["Small Council".to_string()]);
+
+        let absent: User =
+            serde_json::from_value(serde_json::json!({"username": "carol"})).unwrap();
+        assert!(absent.member_of.is_empty());
+
         let user = User {
             username: "jdoe".to_string(),
             domain: "CONTOSO".to_string(),
             description: "John Doe".to_string(),
             is_admin: true,
             source: "ldap".to_string(),
+            member_of: Vec::new(),
         };
         let json = serde_json::to_string(&user).unwrap();
         let deser: User = serde_json::from_str(&json).unwrap();
@@ -690,4 +784,40 @@ impl KerberosTicket {
             self.username.to_lowercase()
         )
     }
+}
+
+/// Operator escape hatch: a request to force an inter-realm ticket forge,
+/// bypassing the SID-filter check and trust_follow dedup in `auto_trust_follow`.
+///
+/// The `ares ops force-inter-realm-forge` CLI runs out-of-process from the
+/// orchestrator, so it cannot call `dispatch_create_inter_realm_ticket`
+/// directly. Instead it RPUSHes one of these onto the
+/// `ares:op:{id}:force_forge_requests` LIST, which the orchestrator's trust
+/// loop drains each tick and dispatches. Every field the forge needs is carried
+/// here so the request is self-contained even if the auto path never populated
+/// the target DC into state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForceInterRealmForgeRequest {
+    /// Source forest whose `<TARGET>$` trust key is used to forge.
+    pub source_domain: String,
+    /// Foreign forest the ticket is forged for.
+    pub target_domain: String,
+    /// NT hash of the inter-realm trust account (`{source}\\{TARGET}$`).
+    pub trust_key: String,
+    /// AES256 key of the trust account, when the trust/DC has RC4 disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aes_key: Option<String>,
+    /// Source-forest domain SID embedded in the forged TGT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sid: Option<String>,
+    /// Target-forest domain SID (informational / state priming).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_sid: Option<String>,
+    /// Target DC IP — primed into state so the forge can chain cifs/ + ldap/
+    /// service tickets into the ccache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_dc_ip: Option<String>,
+    /// Target DC FQDN (e.g. `dc01.fabrikam.local`), primed alongside the IP.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_dc_fqdn: Option<String>,
 }

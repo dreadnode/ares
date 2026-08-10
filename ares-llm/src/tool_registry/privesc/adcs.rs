@@ -4,8 +4,59 @@ use serde_json::json;
 
 use crate::ToolDefinition;
 
+pub fn certipy_shadow_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "certipy_shadow".into(),
+        description: "Exploit Shadow Credentials by adding a Key Credential to a target \
+            account's msDS-KeyCredentialLink attribute via Certipy, then authenticating \
+            with the resulting certificate. You MUST provide exactly one of `password` \
+            OR `hashes` — never pass an empty string for the unused field; omit it \
+            entirely. If the orchestrator handed you a plaintext password, pass \
+            `password` and DO NOT include `hashes` at all."
+            .into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "description": "Target domain (e.g. contoso.local)"
+                },
+                "username": {
+                    "type": "string",
+                    "description": "Username for authentication (must have write access to target)"
+                },
+                "password": {
+                    "type": "string",
+                    "description": "Plaintext password for the source account. Use this when the orchestrator provides a `password` field — do NOT also pass `hashes`."
+                },
+                "hashes": {
+                    "type": "string",
+                    "description": "NTLM hash for pass-the-hash (format: 'lmhash:nthash' or ':nthash'). Use ONLY when the orchestrator provides a `hash` / `nt_hash` field and NO password. Omit this field entirely — do not pass an empty string — when using `password`."
+                },
+                "dc_ip": {
+                    "type": "string",
+                    "description": "Domain controller IP address"
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Target account to add shadow credentials to"
+                },
+                "dc_host": {
+                    "type": "string",
+                    "description": "DC fully-qualified name (e.g. dc01.contoso.local). Only consulted on the cross-forest Kerberos path, where certipy needs it to build the `ldap/<host>` SPN — an IP alone yields KDC_ERR_S_PRINCIPAL_UNKNOWN. Filled in automatically by the credential resolver when omitted."
+                },
+                "ticket_path": {
+                    "type": "string",
+                    "description": "Path to a forged inter-realm Kerberos ccache for a cross-forest shadow-credentials write. Injected automatically by the credential resolver when the target forest has no reusable credential; when present, certipy authenticates via `-k -no-pass` (KRB5CCNAME) and password/hash are ignored. Auth precedence: ticket_path > hashes > password."
+                }
+            },
+            "required": ["domain", "username", "dc_ip", "target"]
+        }),
+    }
+}
+
 pub fn definitions() -> Vec<ToolDefinition> {
-    vec![
+    let mut tools = vec![
         ToolDefinition {
             name: "certipy_find".into(),
             description: "Find vulnerable certificate templates in Active Directory Certificate \
@@ -31,9 +82,17 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Domain controller IP address"
                     },
+                    "dc_host": {
+                        "type": "string",
+                        "description": "DC fully-qualified name (e.g. dc01.contoso.local). Only consulted on the cross-forest Kerberos path, where certipy needs it to build the `ldap/<host>` SPN — an IP alone yields KDC_ERR_S_PRINCIPAL_UNKNOWN. Filled in automatically by the credential resolver when omitted."
+                    },
                     "hashes": {
                         "type": "string",
                         "description": "NTLM hash for pass-the-hash (format: 'lmhash:nthash' or just ':nthash'). Use instead of password."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a forged inter-realm Kerberos ccache for cross-forest enumeration. Injected automatically by the credential resolver when the target forest has no reusable credential; when present, certipy authenticates via `-k -no-pass` (KRB5CCNAME) and password/hash are ignored. Auth precedence: ticket_path > hashes > password."
                     },
                     "vulnerable": {
                         "type": "boolean",
@@ -97,6 +156,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "application_policies": {
                         "type": "string",
                         "description": "Application policy OID to include in the certificate request. Used for ESC15 (CVE-2024-49019) exploitation where the template uses application policy OIDs for authorization."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a forged inter-realm Kerberos ccache for cross-forest enrollment. Injected automatically by the credential resolver when the target forest has no reusable credential; when present, certipy authenticates via `-k -no-pass` (KRB5CCNAME) and password is ignored. Auth precedence: ticket_path > password."
                     }
                 },
                 "required": ["domain", "username", "password", "dc_ip", "ca", "template"]
@@ -106,7 +169,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
             name: "certipy_auth".into(),
             description: "Authenticate to Active Directory using a PFX certificate file. \
                 Performs PKINIT Kerberos authentication and retrieves the NT hash of the \
-                certificate's subject."
+                certificate's subject. Works on both an unprotected PFX from certipy_req \
+                and the passphrase-protected PFX pywhisker writes — for the latter both \
+                the passphrase and the PKINIT identity (-username) are applied for you \
+                from the path, so pass only the path. Never abandon this call for want of \
+                a username, and never re-run pywhisker to get one."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -125,46 +192,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["domain", "dc_ip", "pfx_path"]
-            }),
-        },
-        ToolDefinition {
-            name: "certipy_shadow".into(),
-            description: "Exploit Shadow Credentials by adding a Key Credential to a target \
-                account's msDS-KeyCredentialLink attribute via Certipy, then authenticating \
-                with the resulting certificate. You MUST provide exactly one of `password` \
-                OR `hashes` — never pass an empty string for the unused field; omit it \
-                entirely. If the orchestrator handed you a plaintext password, pass \
-                `password` and DO NOT include `hashes` at all."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "domain": {
-                        "type": "string",
-                        "description": "Target domain (e.g. contoso.local)"
-                    },
-                    "username": {
-                        "type": "string",
-                        "description": "Username for authentication (must have write access to target)"
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "Plaintext password for the source account. Use this when the orchestrator provides a `password` field — do NOT also pass `hashes`."
-                    },
-                    "hashes": {
-                        "type": "string",
-                        "description": "NTLM hash for pass-the-hash (format: 'lmhash:nthash' or ':nthash'). Use ONLY when the orchestrator provides a `hash` / `nt_hash` field and NO password. Omit this field entirely — do not pass an empty string — when using `password`."
-                    },
-                    "dc_ip": {
-                        "type": "string",
-                        "description": "Domain controller IP address"
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "Target account to add shadow credentials to"
-                    }
-                },
-                "required": ["domain", "username", "dc_ip", "target"]
             }),
         },
         ToolDefinition {
@@ -214,7 +241,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "domain": {
                         "type": "string",
-                        "description": "Domain of the authenticating account (e.g. essos.local)"
+                        "description": "Domain of the authenticating account (e.g. contoso.local)"
                     },
                     "username": {
                         "type": "string",
@@ -287,6 +314,178 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "certipy_esc1_full_chain".into(),
+            description:
+                "Execute the full ESC1 (enrollee supplies subject) exploit chain: request \
+                a certificate with an attacker-chosen UPN and SID, PKINIT-authenticate with it to \
+                recover the impersonated principal's NT hash, and — when `dc_host` is supplied and \
+                the KDC refuses the u2u hash recovery (KDC_ERR_ETYPE_NOSUPP on RC4-disabled KDCs) \
+                — DCSync krbtgt with the resulting ccache. Use this when the template allows the \
+                enrollee to supply the subject. Both `upn` and `sid` are REQUIRED: KB5014754 \
+                strict certificate mapping rejects a certificate whose Security-Extension SID does \
+                not match the impersonated account. Do NOT use this for an issuance-policy \
+                template — use certipy_esc13_full_chain, which enrolls plainly."
+                    .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain (e.g. contoso.local)"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for authentication (needs Enroll rights on the template)"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "ca": {
+                        "type": "string",
+                        "description": "Certificate Authority name (e.g. 'contoso-CA01-CA')"
+                    },
+                    "template": {
+                        "type": "string",
+                        "description": "ESC1-vulnerable certificate template name"
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP address"
+                    },
+                    "upn": {
+                        "type": "string",
+                        "description": "UPN to impersonate (e.g. 'administrator@contoso.local'). REQUIRED — this is the enrollee-supplied subject."
+                    },
+                    "sid": {
+                        "type": "string",
+                        "description": "Object SID of the impersonated principal (domain SID + '-500' for Administrator). REQUIRED — KB5014754 strict mapping denies the PKINIT if it is absent or does not match the UPN."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "CA server IP or hostname for certificate enrollment. REQUIRED when the CA is on a different host than the DC — otherwise certipy hits the DC's RPC endpoint and fails with ept_s_not_registered. `ca_host` and `target_ip` are accepted as aliases."
+                    },
+                    "dc_host": {
+                        "type": "string",
+                        "description": "DC FQDN (e.g. 'dc01.contoso.local') enabling the DCSync tail when certipy auth obtains a TGT but cannot recover the NT hash. Must be the FQDN — an IP yields KDC_ERR_S_PRINCIPAL_UNKNOWN."
+                    }
+                },
+                "required": ["domain", "username", "password", "ca", "template", "dc_ip", "upn", "sid"]
+            }),
+        },
+        ToolDefinition {
+            name: "certipy_esc3_full_chain".into(),
+            description: "Execute the full ESC3 (enrollment agent) exploit chain: enroll an \
+                enrollment-agent certificate from `agent_template` (the template carrying the \
+                Certificate Request Agent application policy), use that agent certificate to \
+                request a second certificate on behalf of `on_behalf_of` from a SEPARATE \
+                `on_behalf_template`, then authenticate with the resulting PFX to obtain NT \
+                hashes. ESC3 needs BOTH templates — a single certipy_request cannot do it, \
+                because the on-behalf-of request must be signed by the agent PFX produced by the \
+                first enrollment."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain (e.g. contoso.local)"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Username for authentication (needs Enroll rights on the agent template)"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "ca": {
+                        "type": "string",
+                        "description": "Certificate Authority name (e.g. 'contoso-CA01-CA')"
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP address"
+                    },
+                    "agent_template": {
+                        "type": "string",
+                        "description": "Enrollment-agent template — the one with the 'Certificate Request Agent' application policy. This is the ESC3-vulnerable template reported by certipy_find."
+                    },
+                    "on_behalf_template": {
+                        "type": "string",
+                        "description": "Template used for the on-behalf-of request. Defaults to 'User' (the universal client-auth template). Override when the on-behalf-of target is a custom template that requires agent-signed enrollment.",
+                        "default": "User"
+                    },
+                    "on_behalf_of": {
+                        "type": "string",
+                        "description": "sAMAccountName of the principal to impersonate. Defaults to 'administrator'.",
+                        "default": "administrator"
+                    },
+                    "nt_domain": {
+                        "type": "string",
+                        "description": "NetBIOS/flat domain name for certipy's -on-behalf-of (NETBIOS\\principal). Derived from the first label of `domain`, uppercased, when omitted — certipy rejects an FQDN here and the CA then denies the request. `flat_name` is accepted as an alias."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "CA server IP or hostname for certificate enrollment. REQUIRED when the CA is on a different host than the DC. `ca_host` and `target_ip` are accepted as aliases."
+                    }
+                },
+                "required": ["domain", "username", "password", "ca", "dc_ip", "agent_template"]
+            }),
+        },
+        ToolDefinition {
+            name: "certipy_esc13_full_chain".into(),
+            description: "Execute the full ESC13 (issuance policy linked to a group) exploit \
+                chain: enroll the template AS THE LOW-PRIVILEGE USER with a PLAIN request, \
+                PKINIT-authenticate, then DCSync krbtgt with the now-elevated ccache. The \
+                template's issuance-policy OID is linked via msDS-OIDToGroupLink to a privileged \
+                group, so the DC stamps that group's SID into the enrolling user's own PKINIT TGT \
+                — there is no impersonation. This tool therefore takes NO `upn`/`sid` override: \
+                passing ESC1-style subject parameters makes the CA policy module deny the request \
+                (0x80070547) and trips KB5014754 strict mapping, because the certificate's \
+                Security-Extension SID is the requester's. Use certipy_esc1_full_chain instead \
+                when the template lets the enrollee supply the subject."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Target domain (e.g. contoso.local)"
+                    },
+                    "username": {
+                        "type": "string",
+                        "description": "Low-privilege user to enroll as — the OID-linked group lands in THIS account's ticket"
+                    },
+                    "password": {
+                        "type": "string",
+                        "description": "Password for authentication"
+                    },
+                    "ca": {
+                        "type": "string",
+                        "description": "Certificate Authority name (e.g. 'contoso-CA01-CA')"
+                    },
+                    "template": {
+                        "type": "string",
+                        "description": "Template whose issuance policy OID is linked to a privileged group"
+                    },
+                    "dc_ip": {
+                        "type": "string",
+                        "description": "Domain controller IP address"
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "CA server IP or hostname for certificate enrollment. REQUIRED when the CA is on a different host than the DC. `ca_host` and `target_ip` are accepted as aliases."
+                    },
+                    "dc_host": {
+                        "type": "string",
+                        "description": "DC FQDN (e.g. 'dc01.contoso.local') for the DCSync tail — without it the chain stops after PKINIT and only reports the enrolling user's hash. Must be the FQDN — an IP yields KDC_ERR_S_PRINCIPAL_UNKNOWN."
+                    }
+                },
+                "required": ["domain", "username", "password", "ca", "template", "dc_ip"]
+            }),
+        },
+        ToolDefinition {
             name: "certipy_ca".into(),
             description:
                 "Manage a Certificate Authority using Certipy. Can add yourself as a \
@@ -328,6 +527,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "backup": {
                         "type": "boolean",
                         "description": "Back up the CA private key + certificate to a PFX. Requires SYSTEM or local admin on the CA host (use the credential of an account with that access). Output PFX is the input to certipy_forge for offline Golden Certificate forgery."
+                    },
+                    "ticket_path": {
+                        "type": "string",
+                        "description": "Path to a forged inter-realm Kerberos ccache for a cross-forest CA operation. Injected automatically by the credential resolver when the target forest has no reusable credential; when present, certipy authenticates via `-k -no-pass` (KRB5CCNAME) and password is ignored. Auth precedence: ticket_path > password."
                     }
                 },
                 "required": ["domain", "username", "password", "dc_ip", "ca"]
@@ -444,11 +647,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "domain": {
                         "type": "string",
-                        "description": "Target domain (e.g. contoso.local)"
+                        "description": "Domain of the target CA (e.g. contoso.local). Scopes the impersonated UPN, NOT the login."
                     },
                     "username": {
                         "type": "string",
                         "description": "Username for authentication (must have ManageCA rights)"
+                    },
+                    "auth_domain": {
+                        "type": "string",
+                        "description": "Domain that issued `username`, if it differs from `domain` — pass `credential.domain` from the task payload. A credential from a child domain must bind as user@child; binding it as user@parent fails with invalidCredentials (data 52e). Defaults to `domain`."
                     },
                     "password": {
                         "type": "string",
@@ -479,5 +686,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "required": ["domain", "username", "password", "dc_ip", "ca"]
             }),
         },
-    ]
+    ];
+    tools.push(certipy_shadow_definition());
+    tools
 }

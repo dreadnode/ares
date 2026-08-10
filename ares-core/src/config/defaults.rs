@@ -69,6 +69,9 @@ pub fn default_max_rpm() -> u32 {
 pub fn default_novelty_scope() -> String {
     "per-campaign".to_string()
 }
+pub fn default_acl_publish_cap() -> u32 {
+    200
+}
 
 #[cfg(test)]
 mod tests {
@@ -189,5 +192,10 @@ mod tests {
     #[test]
     fn returns_default_novelty_scope() {
         assert_eq!(default_novelty_scope(), "per-campaign");
+    }
+
+    #[test]
+    fn returns_default_acl_publish_cap() {
+        assert_eq!(default_acl_publish_cap(), 200);
     }
 }

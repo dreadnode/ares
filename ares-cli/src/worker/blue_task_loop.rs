@@ -83,7 +83,6 @@ pub async fn run_blue_task_loop(deps: BlueTaskLoopDeps<'_>) -> Result<()> {
                     current_task: Some(task.task_id.clone()),
                 });
 
-                // Send blue team heartbeat
                 let _ = task_queue
                     .send_heartbeat(
                         &config.agent_name,
@@ -94,7 +93,6 @@ pub async fn run_blue_task_loop(deps: BlueTaskLoopDeps<'_>) -> Result<()> {
                     )
                     .await;
 
-                // Execute the blue team task
                 let result = execute_blue_task(
                     &task,
                     role,
@@ -105,7 +103,6 @@ pub async fn run_blue_task_loop(deps: BlueTaskLoopDeps<'_>) -> Result<()> {
                 )
                 .await;
 
-                // Push result
                 if let Err(e) = task_queue.send_result(&result).await {
                     error!(
                         task_id = %task.task_id,
@@ -178,7 +175,6 @@ async fn execute_blue_task(
         "Executing blue team task"
     );
 
-    // Build tools for this role
     let tools = blue::blue_tools_for_role(role);
     let capabilities: Vec<String> = tools
         .iter()
@@ -186,7 +182,6 @@ async fn execute_blue_task(
         .map(|t| t.name.clone())
         .collect();
 
-    // Build system prompt
     let system_prompt = match ares_llm::prompt::blue::build_blue_system_prompt(
         role.as_str(),
         &capabilities,
@@ -203,7 +198,6 @@ async fn execute_blue_task(
         }
     };
 
-    // Build task prompt
     // First try to load investigation state summary (best-effort)
     let state_summary = "Investigation in progress.".to_string();
 
@@ -231,10 +225,12 @@ async fn execute_blue_task(
         model: model_name.to_string(),
         max_steps: 50,
         max_tool_calls_per_name: 25,
+        // Capture the blue transcript when ARES_SESSION_LOG_DIR is set;
+        // `..default()` disables session logging otherwise.
+        session_log: ares_llm::SessionLogConfig::from_env(),
         ..AgentLoopConfig::default()
     };
 
-    // Run the agent loop
     let outcome = run_agent_loop(RunAgentLoopParams {
         provider,
         dispatcher,
@@ -372,33 +368,47 @@ impl ToolDispatcher for BlueLocalToolDispatcher {
     ) -> Result<ares_llm::ToolExecResult> {
         debug!(tool = %call.name, "Executing blue team tool locally");
 
-        // Check if this is a blue team HTTP tool
         if ares_tools::blue::is_blue_tool(&call.name) {
             match ares_tools::blue::dispatch_blue(&call.name, &call.arguments).await {
                 Ok(output) => {
-                    let error = if output.success {
-                        None
+                    let (error, failure_kind) = if output.success {
+                        (None, None)
                     } else {
-                        Some(output.stderr.clone())
+                        (
+                            Some(output.stderr.clone()),
+                            Some(ares_llm::ToolFailureKind::ToolError),
+                        )
                     };
                     Ok(ares_llm::ToolExecResult {
                         output: output.stdout,
                         error,
                         discoveries: None,
+                        failure_kind,
                     })
                 }
-                Err(e) => Ok(ares_llm::ToolExecResult {
-                    output: String::new(),
-                    error: Some(e.to_string()),
-                    discoveries: None,
-                }),
+                Err(e) => {
+                    let failure_kind = ares_tools::spawn_error_kind(&e).map(|kind| {
+                        if kind.is_not_found() {
+                            ares_llm::ToolFailureKind::BinaryNotFound
+                        } else {
+                            ares_llm::ToolFailureKind::TransientSpawn
+                        }
+                    });
+                    Ok(ares_llm::ToolExecResult {
+                        output: String::new(),
+                        error: Some(e.to_string()),
+                        discoveries: None,
+                        failure_kind,
+                    })
+                }
             }
         } else {
-            // Unknown tool
+            // Unknown tool — arg-level rejection, not a spawn failure.
             Ok(ares_llm::ToolExecResult {
                 output: String::new(),
                 error: Some(format!("Unknown blue team tool: {}", call.name)),
                 discoveries: None,
+                failure_kind: None,
             })
         }
     }

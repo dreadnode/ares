@@ -69,19 +69,31 @@ repos:
         args: ["--baseline", ".secrets.baseline"]
         pass_filenames: false
 
+  - repo: local
+    hooks:
+      - id: goad-token-sweep
+        name: DreadGOAD lab token sweep
+        entry: scripts/goad-token-sweep.sh
+        language: script
+        types: [text]
+
   # Rust checks
   - repo: local
     hooks:
       - id: cargo-fmt
         name: Rust format check
-        entry: cargo fmt --all
+        # --check exits non-zero on diff (matches CI behavior). Plain
+        # `cargo fmt --all` silently rewrites files and exits 0, so a
+        # local commit could slip through with formatting drift that CI
+        # then rejects.
+        entry: cargo fmt --all -- --check
         language: system
         files: '\.rs$'
         pass_filenames: false
 
       - id: cargo-clippy
         name: Rust clippy lint
-        entry: cargo clippy --all-targets -- -D warnings
+        entry: cargo clippy --workspace --all-targets -- -D warnings
         language: system
         files: '\.rs$'
         pass_filenames: false

@@ -6,6 +6,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Label keys that carry a hostname, checked when extracting/matching hosts.
+const HOST_KEYS: &[&str] = &["hostname", "host", "computer"];
+/// Label/annotation keys that carry a username, checked when extracting users.
+const USER_KEYS: &[&str] = &[
+    "user",
+    "username",
+    "account",
+    "TargetUserName",
+    "SubjectUserName",
+];
+
 /// A cluster of related alerts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertCluster {
@@ -41,9 +52,8 @@ impl AlertCluster {
         let labels = alert.get("labels").and_then(|v| v.as_object());
         let annotations = alert.get("annotations").and_then(|v| v.as_object());
 
-        // Extract hosts
         if let Some(labels) = labels {
-            for key in &["hostname", "host", "computer"] {
+            for key in HOST_KEYS {
                 if let Some(val) = labels.get(*key).and_then(|v| v.as_str()) {
                     self.common_hosts.insert(val.to_lowercase());
                 }
@@ -56,27 +66,18 @@ impl AlertCluster {
                 }
             }
 
-            // Extract users
-            for key in &[
-                "user",
-                "username",
-                "account",
-                "TargetUserName",
-                "SubjectUserName",
-            ] {
+            for key in USER_KEYS {
                 if let Some(val) = labels.get(*key).and_then(|v| v.as_str()) {
                     self.common_users.insert(val.to_lowercase());
                 }
             }
 
-            // Extract IPs
             for key in &["ip", "source_ip", "src_ip", "IpAddress", "ClientAddress"] {
                 if let Some(val) = labels.get(*key).and_then(|v| v.as_str()) {
                     self.common_ips.insert(val.to_string());
                 }
             }
 
-            // Extract techniques
             for key in &["mitre_technique", "technique", "technique_id"] {
                 if let Some(val) = labels.get(*key) {
                     match val {
@@ -96,22 +97,14 @@ impl AlertCluster {
             }
         }
 
-        // Also extract users from annotations
         if let Some(annotations) = annotations {
-            for key in &[
-                "user",
-                "username",
-                "account",
-                "TargetUserName",
-                "SubjectUserName",
-            ] {
+            for key in USER_KEYS {
                 if let Some(val) = annotations.get(*key).and_then(|v| v.as_str()) {
                     self.common_users.insert(val.to_lowercase());
                 }
             }
         }
 
-        // Update time range
         if let Some(starts_at) = alert.get("startsAt").and_then(|v| v.as_str()) {
             if let Ok(ts) = DateTime::parse_from_rfc3339(starts_at) {
                 let ts = ts.with_timezone(&Utc);
@@ -122,7 +115,6 @@ impl AlertCluster {
             }
         }
 
-        // Extract operation_id from operation_context
         if let Some(op_id) = alert
             .get("operation_context")
             .and_then(|v| v.get("operation_id"))
@@ -154,7 +146,7 @@ impl AlertCluster {
         if let Some(labels) = labels {
             // Host match: high weight
             let mut host_matched = false;
-            for key in &["hostname", "host", "computer"] {
+            for key in HOST_KEYS {
                 if let Some(val) = labels.get(*key).and_then(|v| v.as_str()) {
                     if self.common_hosts.contains(&val.to_lowercase()) {
                         score += 0.4;
@@ -163,7 +155,6 @@ impl AlertCluster {
                     }
                 }
             }
-            // Instance host check
             if !host_matched {
                 if let Some(instance) = labels.get("instance").and_then(|v| v.as_str()) {
                     let host = instance.split(':').next().unwrap_or("").to_lowercase();

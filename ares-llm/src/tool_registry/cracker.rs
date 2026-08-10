@@ -21,8 +21,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "hashcat_mode": {
                         "type": "integer",
-                        "description": "Hashcat hash mode. Common modes: 13100=Kerberos TGS-REP (Kerberoasting), 18200=Kerberos AS-REP (ASREPRoasting), 1000=NTLM, 5600=NetNTLMv2, 3000=LM. Defaults to 13100.",
-                        "default": 13100
+                        "description": "OPTIONAL override for the hashcat hash mode. Leave this UNSET for Kerberos (krb5tgs/krb5asrep) and NTLM hashes: the tool reads the Kerberos etype from the hash and auto-selects the correct mode, including the AES tickets impacket returns by default (etype 18 -> 19700, etype 17 -> 19600, etype 23 -> 13100; AS-REP -> 18200; NTLM -> 1000). Any value supplied here is IGNORED for Kerberos hashes. Only set it for non-Kerberos hashes the detector can't identify (e.g. 5600=NetNTLMv2, 3000=LM). Never force 13100 for Kerberoast — AES tickets require 19600/19700 and 13100 makes hashcat reject them with 'Separator unmatched'."
                     },
                     "wordlist_path": {
                         "type": "string",
@@ -46,6 +45,11 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "List of known usernames from the target domain, used to generate dynamic password candidates. Pass all discovered usernames for best coverage."
+                    },
+                    "known_passwords": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Plaintext passwords already recovered this op (cracked or harvested cleartext). Tried FIRST, before any wordlist, so a re-issued or different-etype ticket for an already-cracked account — or any account reusing a known password — cracks instantly. Pass every recovered plaintext."
                     }
                 },
                 "required": ["hash_value"]
@@ -66,8 +70,7 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "hash_format": {
                         "type": "string",
-                        "description": "John the Ripper hash format name. Common formats: krb5tgs (Kerberoasting), krb5asrep (ASREPRoasting), nt (NTLM), netntlmv2 (NetNTLMv2). Defaults to krb5tgs.",
-                        "default": "krb5tgs"
+                        "description": "OPTIONAL John the Ripper format override (e.g. krb5tgs, krb5asrep, nt, netntlmv2). Leave UNSET to let John auto-detect from the hash — its krb5tgs format already handles both the AES Kerberoast etypes (17/18) and RC4 (23), so do not pin a format for Kerberos hashes. Only set this if auto-detection fails to load the hash."
                     },
                     "wordlist_path": {
                         "type": "string",
@@ -87,6 +90,11 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "List of known usernames from the target domain, used to generate dynamic password candidates."
+                    },
+                    "known_passwords": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Plaintext passwords already recovered this op (cracked or harvested cleartext). Tried FIRST, before any wordlist, so a re-issued or different-etype ticket for an already-cracked account — or any account reusing a known password — cracks instantly. Pass every recovered plaintext."
                     }
                 },
                 "required": ["hash_value"]

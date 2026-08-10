@@ -22,6 +22,8 @@ use std::sync::{Arc, LazyLock};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use ares_core::blue_invalidation::{ContainmentAttribution, ContainmentKind};
+
 use crate::orchestrator::config::OrchestratorConfig;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::diversity;
@@ -31,30 +33,117 @@ use crate::orchestrator::throttling::{ThrottleDecision, Throttler};
 /// Redis key prefix for deferred queues.
 pub const DEFERRED_QUEUE_PREFIX: &str = "ares:deferred";
 
-/// Atomic enqueue: per-type cap → global cap → ZADD → INCR counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainAction {
+    Dispatch,
+    Recheck(std::time::Duration),
+    SetAside,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepOutcome {
+    Dropped,
+    Dispatched,
+    Blocked,
+    BlockedRequeue,
+    ShutdownRequeue,
+}
+
+fn step_budget(now: tokio::time::Instant, deadline: tokio::time::Instant) -> std::time::Duration {
+    deadline.saturating_duration_since(now)
+}
+
+fn drain_action(
+    decision: &ThrottleDecision,
+    now: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+) -> DrainAction {
+    match decision {
+        ThrottleDecision::Allow => DrainAction::Dispatch,
+        ThrottleDecision::Wait(d) if now + *d < deadline => DrainAction::Recheck(*d),
+        ThrottleDecision::Wait(_) | ThrottleDecision::Defer => DrainAction::SetAside,
+    }
+}
+
+/// Atomic enqueue: signature dedup → per-type cap → global cap → ZADD →
+/// INCR counter → SADD signature.
 ///
-/// KEYS[1] = per-type ZSET   KEYS[2] = total counter
-/// ARGV[1] = score   ARGV[2] = member JSON   ARGV[3] = max_per_type   ARGV[4] = max_total
+/// KEYS[1] = per-type ZSET
+/// KEYS[2] = total counter
+/// KEYS[3] = per-type signature SET
+/// ARGV[1] = score
+/// ARGV[2] = member JSON
+/// ARGV[3] = max_per_type
+/// ARGV[4] = max_total
+/// ARGV[5] = signature (stable hash of task identity)
 ///
-/// Returns: `1` accepted, `0` per-type full, `-1` global full, `-2` member already present.
+/// Returns: `1` accepted, `0` per-type full, `-1` global full,
+/// `-2` member already present (timestamp-identical re-enqueue),
+/// `-3` duplicate signature (logical duplicate already deferred — Bug J).
+///
+/// The signature dedup is the load-bearing change for Bug J: multiple
+/// automation rules race to enqueue equivalent tasks every tick. Without
+/// it, each call produces a JSON member with a distinct timestamp, ZADD
+/// accepts every one, and the cred-gated queue saturates within minutes
+/// against a tuple the worker pool is already happy to drain.
 static ENQUEUE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
     redis::Script::new(
         r"
+        if redis.call('SISMEMBER', KEYS[3], ARGV[5]) == 1 then return -3 end
         if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then return 0 end
         if tonumber(redis.call('GET', KEYS[2]) or '0') >= tonumber(ARGV[4]) then return -1 end
         local added = redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
         if added == 0 then return -2 end
         redis.call('INCR', KEYS[2])
+        redis.call('SADD', KEYS[3], ARGV[5])
         return 1
         ",
     )
 });
 
-/// Atomic ZREM + counter DECR.
+/// Atomic ZREM + counter DECR + signature SREM. Fully removes a task and
+/// releases its dedup signature — used by `evict_stale` where a stale task
+/// is being discarded outright and a future re-enqueue of equivalent work
+/// should succeed.
 ///
-/// KEYS[1] = per-type ZSET   KEYS[2] = total counter   ARGV[1] = member
-/// Returns the number of elements removed (0 or 1). Counter never goes negative.
+/// KEYS[1] = per-type ZSET
+/// KEYS[2] = total counter
+/// KEYS[3] = per-type signature SET
+/// ARGV[1] = member
+/// ARGV[2] = signature
+///
+/// Returns the number of elements removed (0 or 1). Counter never goes
+/// negative; signature SET shrinks in lockstep with the ZSET so a future
+/// enqueue of the same logical task is no longer treated as duplicate.
 static REMOVE_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
+    redis::Script::new(
+        r"
+        local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+        if removed > 0 then
+            local cur = tonumber(redis.call('GET', KEYS[2]) or '0')
+            if cur > 0 then redis.call('DECR', KEYS[2]) end
+            redis.call('SREM', KEYS[3], ARGV[2])
+        end
+        return removed
+        ",
+    )
+});
+
+/// Atomic ZREM + counter DECR, keeping the signature in the SET. Used by
+/// `pop_best` so the sig stays asserted while the caller decides whether
+/// to dispatch the task or drop it as contained. Closes the race that
+/// existed when the sig was released at pop-time and re-added post-drop:
+/// a producer squeezing an equivalent enqueue into that window used to
+/// slip past the tombstone and get counted as a second distinct drop.
+/// Callers must invoke `release_signature` once dispatch is decided
+/// (contained tasks leave the sig in place as the tombstone).
+///
+/// KEYS[1] = per-type ZSET
+/// KEYS[2] = total counter
+/// ARGV[1] = member
+///
+/// Returns the number of elements removed (0 or 1).
+static POP_HOLD_SCRIPT: LazyLock<redis::Script> = LazyLock::new(|| {
     redis::Script::new(
         r"
         local removed = redis.call('ZREM', KEYS[1], ARGV[1])
@@ -82,6 +171,121 @@ impl DeferredTask {
     pub fn score(&self) -> f64 {
         (self.priority as f64) * 1_000_000_000.0 + self.enqueue_time * 1000.0
     }
+
+    /// Stable signature used by the deferred queue's producer-side dedup
+    /// (Bug J). Hashes the task-identity tuple `(task_type, target_role,
+    /// technique, target_ip, credential_key, finding_key)` — explicitly
+    /// excluding the timestamp so two automation rules dispatching
+    /// equivalent work in the same tick produce the same signature and only
+    /// the first reaches the ZSET.
+    ///
+    /// `finding_key` is `(vuln_id, acl_type, source_user, target_user)`,
+    /// read from the payload root and from a nested `step` object. Without
+    /// it every ACL edge in a domain — same technique, same DC, same
+    /// credential, different principals — hashes identically, so paths
+    /// 2..N collapse into path 1 and the callers retire them as
+    /// successfully dispatched. That is the whole 19,453-collected /
+    /// 1-acted-on gap.
+    ///
+    /// A `crack` payload carries none of those fields — no technique, no
+    /// target_ip, no credential, no finding — so before `finding_key` learned
+    /// to identify hashes, every crack task in an op hashed to the same
+    /// signature. The second hash to be deferred collapsed onto the first and
+    /// `enqueue` returned `-3` → `Ok(true)`, so the caller was told the work
+    /// was queued while a *different* hash sat in the ZSET. Same shape as the
+    /// ACL gap above, applied to the crack queue.
+    ///
+    /// Priority stays out of the hash: a higher-priority duplicate isn't
+    /// useful — the existing copy will run and produce the same outcome.
+    pub fn signature(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let technique = self
+            .payload
+            .get("technique")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let target_ip = self
+            .payload
+            .get("target_ip")
+            .or_else(|| self.payload.get("dc_ip"))
+            .or_else(|| self.payload.get("target"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let credential_key = self
+            .payload
+            .get("credential")
+            .and_then(|c| {
+                let user = c.get("username").and_then(|v| v.as_str()).unwrap_or("");
+                let dom = c.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+                if user.is_empty() && dom.is_empty() {
+                    None
+                } else {
+                    Some(format!("{}@{}", user.to_lowercase(), dom.to_lowercase()))
+                }
+            })
+            .unwrap_or_default();
+        let finding_key = self.finding_key();
+        let mut h = DefaultHasher::new();
+        self.task_type.hash(&mut h);
+        self.target_role.hash(&mut h);
+        technique.to_lowercase().hash(&mut h);
+        target_ip.hash(&mut h);
+        credential_key.hash(&mut h);
+        finding_key.hash(&mut h);
+        format!("{:x}", h.finish())
+    }
+
+    /// `(vuln_id, acl_type, source_user, target_user)` joined into one
+    /// lowercase key, empty when the payload carries none of them.
+    ///
+    /// Looks at the payload root first, then at a nested `step` object —
+    /// `auto_acl_chain_follow` wraps the whole edge under `step`, so a
+    /// root-only lookup would leave every chain step signature-identical.
+    /// What finding this task is about, used as the discriminating component of
+    /// [`Self::signature`].
+    ///
+    /// For a `crack` task the finding *is* the hash, so this reuses the same
+    /// dedup key the in-flight guard reserves on. Deriving both from
+    /// `crack_dedup_key_from_payload` keeps queue-identity and run-identity
+    /// from drifting apart: two tasks that collapse here are exactly the two
+    /// that would have contended for one reservation.
+    fn finding_key(&self) -> String {
+        if self.task_type == "crack" {
+            if let Some(key) =
+                crate::orchestrator::automation::crack_dedup_key_from_payload(&self.payload)
+            {
+                return format!("crack|{key}");
+            }
+        }
+        let step = self.payload.get("step");
+        let field = |name: &str| -> String {
+            self.payload
+                .get(name)
+                .or_else(|| step.and_then(|s| s.get(name)))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase()
+        };
+        let first_of = |a: &str, b: &str| -> String {
+            let v = field(a);
+            if v.is_empty() {
+                field(b)
+            } else {
+                v
+            }
+        };
+        let parts = [
+            field("vuln_id"),
+            field("acl_type"),
+            first_of("source_user", "source"),
+            first_of("target_user", "target"),
+        ];
+        if parts.iter().all(String::is_empty) {
+            return String::new();
+        }
+        parts.join("|")
+    }
 }
 
 /// Manages the Redis ZSET-backed deferred queue.
@@ -103,6 +307,28 @@ impl DeferredQueue {
         )
     }
 
+    /// Redis key for the per-task-type signature SET — paired with the
+    /// ZSET and maintained via Lua where they need to be atomic. Used by
+    /// the producer-side dedup gate (Bug J): two automation rules racing
+    /// to enqueue the same `(task_type, role, technique, target_ip, cred)`
+    /// tuple both compute the same signature, and only the first one
+    /// reaches the ZSET.
+    ///
+    /// Lifecycle:
+    /// * `enqueue` — SADD sig atomically with the ZADD.
+    /// * `pop_best` — leaves the sig in place while the caller decides.
+    /// * `release_signature` — caller SREMs sig once the popped task is
+    ///   headed for dispatch or being re-enqueued via `enqueue`.
+    /// * Contained task — sig is never released, acting as a permanent
+    ///   tombstone that blocks re-emission by producers.
+    /// * `evict_stale` — SREMs sig alongside the ZREM (task fully gone).
+    fn sig_key(&self, task_type: &str) -> String {
+        format!(
+            "{}:{}:{}:sigs",
+            DEFERRED_QUEUE_PREFIX, self.config.operation_id, task_type
+        )
+    }
+
     /// Redis key for the global cardinality counter. Mutations to the ZSETs
     /// are paired with INCR/DECR via Lua so this stays consistent.
     fn total_key(&self) -> String {
@@ -114,11 +340,26 @@ impl DeferredQueue {
 
     /// Enqueue a task for later dispatch.
     ///
-    /// Returns `true` if the task was accepted, `false` if either the per-type
-    /// or operation-wide cap is full.
+    /// Returns `true` if the task was accepted (or already deferred under
+    /// the same signature — idempotent), `false` if either cap is full.
+    ///
+    /// Producer-side dedup (Bug J): equivalent tasks racing across
+    /// automation rules collapse to a single ZSET entry via the
+    /// signature SET — see [`DeferredTask::signature`] for what's
+    /// considered equivalent.
     pub async fn enqueue(&self, task: &DeferredTask) -> Result<bool> {
+        self.enqueue_inner(task, true).await
+    }
+
+    pub async fn requeue(&self, task: &DeferredTask) -> Result<bool> {
+        self.enqueue_inner(task, false).await
+    }
+
+    async fn enqueue_inner(&self, task: &DeferredTask, log_accept: bool) -> Result<bool> {
         let key = self.zset_key(&task.task_type);
         let total_key = self.total_key();
+        let sig_key = self.sig_key(&task.task_type);
+        let signature = task.signature();
         let json = serde_json::to_string(task).context("Failed to serialize DeferredTask")?;
         let score = task.score();
         let mut conn = self.queue_conn();
@@ -126,23 +367,28 @@ impl DeferredQueue {
         let result: i64 = ENQUEUE_SCRIPT
             .key(&key)
             .key(&total_key)
+            .key(&sig_key)
             .arg(score)
             .arg(&json)
             .arg(self.config.max_deferred_per_type)
             .arg(self.config.max_deferred_total)
+            .arg(&signature)
             .invoke_async(&mut conn)
             .await
             .with_context(|| format!("Deferred enqueue script on {key}"))?;
 
         match result {
             1 => {
-                info!(
-                    task_type = %task.task_type,
-                    role = %task.target_role,
-                    priority = task.priority,
-                    score,
-                    "Task deferred"
-                );
+                if log_accept {
+                    info!(
+                        task_type = %task.task_type,
+                        role = %task.target_role,
+                        priority = task.priority,
+                        score,
+                        signature = %signature,
+                        "Task deferred"
+                    );
+                }
                 Ok(true)
             }
             0 => {
@@ -164,6 +410,18 @@ impl DeferredQueue {
             -2 => {
                 // ZADD returned 0 — member already present. Treat as accepted
                 // (idempotent re-enqueue from the drain loop's retry paths).
+                Ok(true)
+            }
+            -3 => {
+                // Signature already present — a logically equivalent task is
+                // already deferred (or recently dequeued without SREM lag).
+                // Treat as accepted from the caller's perspective: the work
+                // is already in the pipeline. Bug J.
+                debug!(
+                    task_type = %task.task_type,
+                    signature = %signature,
+                    "Deferred enqueue collapsed by signature dedup (Bug J)"
+                );
                 Ok(true)
             }
             other => {
@@ -197,6 +455,12 @@ impl DeferredQueue {
         let mut candidates: Vec<(String, String, DeferredTask)> = Vec::new(); // (key, member, task)
         for key in &keys {
             if key == &total_key {
+                continue;
+            }
+            // Skip the signature SETs — they share the queue prefix but
+            // are not ZSETs (Bug J). ZRANGEBYSCORE on a SET returns
+            // WRONGTYPE; better to skip cleanly than catch the error.
+            if key.ends_with(":sigs") {
                 continue;
             }
             let members: Vec<(String, f64)> = redis::cmd("ZRANGEBYSCORE")
@@ -248,7 +512,11 @@ impl DeferredQueue {
             .into_iter()
             .nth(idx)
             .expect("selection index within bounds");
-        let removed: i64 = REMOVE_SCRIPT
+        // Hold the signature in the SET across pop → decision. If the caller
+        // drops the task as contained, the sig stays as the tombstone that
+        // blocks re-emission. If it dispatches or re-enqueues, it must call
+        // `release_signature` first.
+        let removed: i64 = POP_HOLD_SCRIPT
             .key(&key)
             .key(&total_key)
             .arg(&member)
@@ -277,6 +545,12 @@ impl DeferredQueue {
             if key == &total_key {
                 continue;
             }
+            // Skip signature SETs — they share the queue prefix but are
+            // not ZSETs (Bug J). ZRANGEBYSCORE on a SET returns WRONGTYPE.
+            if key.ends_with(":sigs") {
+                continue;
+            }
+            let sig_key = format!("{key}:sigs");
             let members: Vec<(String, f64)> = redis::cmd("ZRANGEBYSCORE")
                 .arg(key)
                 .arg("-inf")
@@ -289,10 +563,13 @@ impl DeferredQueue {
             for (member, _score) in members {
                 if let Ok(task) = serde_json::from_str::<DeferredTask>(&member) {
                     if task.enqueue_time < cutoff {
+                        let signature = task.signature();
                         let removed: i64 = REMOVE_SCRIPT
                             .key(key)
                             .key(&total_key)
+                            .key(&sig_key)
                             .arg(&member)
+                            .arg(&signature)
                             .invoke_async(&mut conn)
                             .await
                             .unwrap_or(0);
@@ -336,6 +613,11 @@ impl DeferredQueue {
             if key == &total_key {
                 continue;
             }
+            // Skip signature SETs — they're paired with the ZSETs but
+            // don't contribute to the deferred-task count (Bug J).
+            if key.ends_with(":sigs") {
+                continue;
+            }
             total = total.saturating_add(conn.zcard::<_, usize>(key).await.unwrap_or(0));
         }
         let _: () = conn
@@ -343,6 +625,68 @@ impl DeferredQueue {
             .await
             .with_context(|| format!("SET {total_key}"))?;
         Ok(total)
+    }
+
+    /// Count one deferred task that blue containment removed from the queue.
+    ///
+    /// Best-effort: a Redis failure here must never stop the drain loop, since
+    /// the task is being discarded either way. The counter is the only durable
+    /// record that the work existed — the drop otherwise survives solely as a
+    /// log line, which is what makes a contained red verification run
+    /// indistinguishable from a driver that built nothing.
+    pub async fn record_blue_invalidation(
+        &self,
+        task_type: &str,
+        target_role: &str,
+        kind: ContainmentKind,
+        attribution: ContainmentAttribution,
+    ) {
+        let mut conn = self.queue_conn();
+        if let Err(e) = ares_core::blue_invalidation::record_blue_invalidated_task(
+            &mut conn,
+            &self.config.operation_id,
+            task_type,
+            target_role,
+            kind,
+            attribution,
+        )
+        .await
+        {
+            warn!(err = %e, "Failed to record blue-invalidated deferred task");
+        }
+    }
+
+    /// Count one deferred task that a containment observation left in place.
+    ///
+    /// Best-effort for the same reason as [`Self::record_blue_invalidation`].
+    /// A retained task is the visible half of refusing to delete work on weak
+    /// evidence; without the counter the operator only sees drops disappear.
+    pub async fn record_containment_retention(&self, target_role: &str, kind: ContainmentKind) {
+        let mut conn = self.queue_conn();
+        if let Err(e) = ares_core::blue_invalidation::record_retained_task(
+            &mut conn,
+            &self.config.operation_id,
+            target_role,
+            kind,
+        )
+        .await
+        {
+            warn!(err = %e, "Failed to record containment-retained deferred task");
+        }
+    }
+
+    /// Release the signature that `pop_best` held across the pop → decision
+    /// window, so a future equivalent enqueue is no longer treated as a
+    /// duplicate. Call this once the popped task is on its way to dispatch
+    /// or being re-enqueued through the size-capped `enqueue` path. Do NOT
+    /// call it on the containment-drop path — leaving the sig in place is
+    /// exactly what makes it act as a tombstone.
+    pub async fn release_signature(&self, task: &DeferredTask) {
+        let sig_key = self.sig_key(&task.task_type);
+        let mut conn = self.queue_conn();
+        if let Err(e) = conn.srem::<_, _, ()>(&sig_key, task.signature()).await {
+            warn!(err = %e, "Failed to release deferred task signature");
+        }
     }
 
     fn queue_conn(&self) -> redis::aio::ConnectionManager {
@@ -379,6 +723,117 @@ async fn scan_keys_async(conn: &mut redis::aio::ConnectionManager, pattern: &str
     all_keys
 }
 
+/// A deferred task's containment verdict: the closed-set kind that the per-op
+/// counter aggregates, how far that cause may be attributed, whether the
+/// evidence is strong enough to delete the task, plus the human-readable
+/// detail that names the revoked principal, isolated host or rotated realm
+/// for the log line.
+pub(in crate::orchestrator) struct ContainmentDrop {
+    pub(in crate::orchestrator) kind: ContainmentKind,
+    pub(in crate::orchestrator) attribution: ContainmentAttribution,
+    pub(in crate::orchestrator) deletes: bool,
+    pub(in crate::orchestrator) detail: String,
+}
+
+/// Return why a deferred task should be dropped from the queue because a
+/// blue-team containment observation has invalidated its preconditions, or
+/// `None` when the task remains viable.
+///
+/// Kept intentionally narrow: mirrors the checks in the exploitation
+/// pre-dispatch filter (`orchestrator/exploitation.rs`) but limited to the
+/// fields commonly present in deferred payloads — target IP, credential
+/// tuple, and (for Kerberos-typed tasks) the target realm. Certificate
+/// serial is not usually present at defer-time and is handled downstream
+/// in exploitation.
+async fn task_dropped_by_containment(
+    task: &DeferredTask,
+    state: &crate::orchestrator::state::SharedState,
+) -> Option<ContainmentDrop> {
+    payload_dropped_by_containment(&task.task_type, &task.payload, state).await
+}
+
+pub(in crate::orchestrator) async fn payload_dropped_by_containment(
+    task_type: &str,
+    payload: &serde_json::Value,
+    state: &crate::orchestrator::state::SharedState,
+) -> Option<ContainmentDrop> {
+    struct Task<'a> {
+        task_type: &'a str,
+        payload: &'a serde_json::Value,
+    }
+    let task = Task { task_type, payload };
+    let state = state.read().await;
+    let attribution = state.containment_attribution();
+
+    // Host isolated → drop any task pointing at that IP.
+    let target_ip = task
+        .payload
+        .get("target_ip")
+        .or_else(|| task.payload.get("dc_ip"))
+        .or_else(|| task.payload.get("target"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !target_ip.is_empty() && state.is_host_isolated(target_ip) {
+        let kind = ContainmentKind::HostIsolated;
+        return Some(ContainmentDrop {
+            kind,
+            attribution,
+            deletes: true,
+            detail: format!("{} ({target_ip})", kind.detail_label(attribution)),
+        });
+    }
+
+    // Credential revoked → drop any task bound to that principal.
+    if let Some(cred) = task.payload.get("credential") {
+        let user = cred.get("username").and_then(|v| v.as_str()).unwrap_or("");
+        let domain = cred.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+        if !user.is_empty() && !domain.is_empty() && state.is_credential_revoked(user, domain) {
+            let kind = ContainmentKind::CredentialRevoked;
+            let attribution = state.credential_containment_attribution(user, domain);
+            return Some(ContainmentDrop {
+                kind,
+                attribution,
+                deletes: state.credential_revocation_deletes_queued_work(user, domain),
+                detail: format!("{} ({user}@{domain})", kind.detail_label(attribution)),
+            });
+        }
+    }
+
+    // krbtgt rotated → drop Kerberos-shaped tasks in that realm. Task-type
+    // strings vary (`authentication`, `kerberos`, `lateral`) so gate on a
+    // technique keyword or explicit realm field rather than a hardcoded
+    // task_type list.
+    let realm = task
+        .payload
+        .get("domain")
+        .or_else(|| task.payload.get("realm"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let technique = task
+        .payload
+        .get("technique")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let kerberos_shaped = matches!(
+        task.task_type,
+        "authentication" | "kerberos" | "kerberoast" | "asrep_roast"
+    ) || technique.to_lowercase().contains("kerberos")
+        || technique.to_lowercase().contains("kerberoast")
+        || technique.to_lowercase().contains("golden");
+    if !realm.is_empty() && kerberos_shaped && state.is_krbtgt_rotated(realm) {
+        let kind = ContainmentKind::KrbtgtRotated;
+        let attribution = state.krbtgt_containment_attribution(realm);
+        return Some(ContainmentDrop {
+            kind,
+            attribution,
+            deletes: state.krbtgt_rotation_deletes_queued_work(realm),
+            detail: format!("{} ({realm})", kind.detail_label(attribution)),
+        });
+    }
+
+    None
+}
+
 /// Spawn a tokio task that periodically drains the deferred queue whenever
 /// the throttler allows new submissions.
 ///
@@ -393,6 +848,7 @@ pub fn spawn_deferred_processor(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(config.deferred_poll_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -403,14 +859,19 @@ pub fn spawn_deferred_processor(
                 }
             }
 
-            // Evict stale tasks first
             if let Err(e) = deferred.evict_stale().await {
                 warn!(err = %e, "Deferred eviction error");
             }
 
             // Try to drain as many as possible while slots are open
+            let cycle_deadline = tokio::time::Instant::now() + config.deferred_poll_interval;
             let mut dispatched = 0_u32;
+            let mut blocked = 0_u32;
+            let mut requeue: Vec<DeferredTask> = Vec::new();
             loop {
+                if tokio::time::Instant::now() >= cycle_deadline {
+                    break;
+                }
                 let Some(task) = (match deferred.pop_best().await {
                     Ok(t) => t,
                     Err(e) => {
@@ -421,71 +882,185 @@ pub fn spawn_deferred_processor(
                     break; // queue empty
                 };
 
-                // Re-check throttle before submitting
-                let decision = throttler
-                    .check(&task.task_type, &task.target_role, Some(&task.payload))
-                    .await;
-
-                match decision {
-                    ThrottleDecision::Allow => {
-                        // Pre-check credential concurrency to avoid a hot
-                        // re-enqueue loop: submit_to_llm would re-defer the
-                        // task if the credential is at capacity, but this
-                        // drain loop would immediately pop it again.
-                        if let Some(cred_key) =
-                            crate::orchestrator::dispatcher::credential_key_from_payload(
-                                &task.payload,
-                            )
-                        {
-                            if !dispatcher.credential_inflight.can_acquire(&cred_key).await {
-                                let _ = deferred.enqueue(&task).await;
-                                break;
-                            }
+                let step = tokio::time::timeout(
+                    step_budget(tokio::time::Instant::now(), cycle_deadline),
+                    async {
+                        // Drop deferred tasks whose target/credential blue has
+                        // observably contained. Mirrors the pre-dispatch filter in
+                        // `exploitation.rs`: without this, tasks deferred before
+                        // blue took action get re-dispatched anyway, chew a
+                        // credential-inflight slot, and surface as noisy
+                        // STATUS_LOGON_FAILURE / STATUS_HOST_UNREACHABLE tool
+                        // errors — exactly the visual mess the containment loop is
+                        // supposed to prevent for the demo.
+                        let verdict = task_dropped_by_containment(&task, &dispatcher.state).await;
+                        if let Some(kept) = verdict.as_ref().filter(|v| !v.deletes) {
+                            info!(
+                                task_type = %task.task_type,
+                                target_role = %task.target_role,
+                                reason = %kept.detail,
+                                "Keeping deferred task — containment observation is too weak to delete queued work (no blue action on the affected identity, no unambiguous KDC declaration)"
+                            );
+                            deferred
+                                .record_containment_retention(&task.target_role, kept.kind)
+                                .await;
                         }
-
-                        // Route directly to the LLM agent loop via Dispatcher.
-                        // do_submit handles tracker.add() and throttler.record_dispatch().
-                        match dispatcher
-                            .do_submit(
-                                &task.task_type,
-                                &task.target_role,
-                                task.payload.clone(),
-                                task.priority,
-                            )
-                            .await
-                        {
-                            Ok(Some(tid)) => {
-                                dispatched += 1;
-                                info!(
-                                    task_id = %tid,
+                        if let Some(drop) = verdict.filter(|v| v.deletes) {
+                            match drop.attribution {
+                                ContainmentAttribution::BlueActive => info!(
                                     task_type = %task.task_type,
-                                    "Deferred task dispatched"
-                                );
+                                    target_role = %task.target_role,
+                                    reason = %drop.detail,
+                                    "Dropping deferred task — invalidated by blue containment"
+                                ),
+                                ContainmentAttribution::RedInferred => info!(
+                                    task_type = %task.task_type,
+                                    target_role = %task.target_role,
+                                    reason = %drop.detail,
+                                    "Dropping deferred task — invalidated by inferred credential/host failure with no blue action behind it (NOT containment)"
+                                ),
                             }
-                            Ok(None) => {
-                                // Credential concurrency block or no role mapping.
-                                // Task may have been re-enqueued by submit_to_llm;
-                                // break to avoid hot loop.
-                                break;
+                            // Signature is left in the SET by pop_best (POP_HOLD_SCRIPT
+                            // doesn't SREM it), so it now serves as the tombstone that
+                            // blocks producers from re-emitting equivalent work. No
+                            // explicit tombstone_signature call is needed.
+                            deferred
+                                .record_blue_invalidation(
+                                    &task.task_type,
+                                    &task.target_role,
+                                    drop.kind,
+                                    drop.attribution,
+                                )
+                                .await;
+                            return StepOutcome::Dropped;
+                        }
+
+                        // Re-check throttle before submitting
+                        let mut decision = throttler
+                            .check(&task.task_type, &task.target_role, Some(&task.payload))
+                            .await;
+
+                        if let DrainAction::Recheck(d) =
+                            drain_action(&decision, tokio::time::Instant::now(), cycle_deadline)
+                        {
+                            tokio::time::sleep(d).await;
+                            if *shutdown.borrow() {
+                                return StepOutcome::ShutdownRequeue;
                             }
-                            Err(e) => {
-                                warn!(err = %e, "Failed to dispatch deferred task");
-                                // Re-enqueue so it is not lost
-                                let _ = deferred.enqueue(&task).await;
-                                break;
+                            decision = throttler
+                                .check(&task.task_type, &task.target_role, Some(&task.payload))
+                                .await;
+                        }
+
+                        match drain_action(&decision, tokio::time::Instant::now(), cycle_deadline) {
+                            DrainAction::Dispatch => {
+                                // Pre-check credential concurrency to avoid a hot
+                                // re-enqueue loop: submit_to_llm would re-defer the
+                                // task if the credential is at capacity, but this
+                                // drain loop would immediately pop it again.
+                                if let Some(cred_key) =
+                                    crate::orchestrator::dispatcher::credential_key_from_payload(
+                                        &task.payload,
+                                    )
+                                {
+                                    if !dispatcher.credential_inflight.can_acquire(&cred_key).await
+                                    {
+                                        return StepOutcome::BlockedRequeue;
+                                    }
+                                }
+
+                                // Not contained — the sig no longer needs to be held.
+                                // Release it before any dispatch or re-enqueue path so a
+                                // future equivalent enqueue (either by submit_to_llm
+                                // internally, or by a re-enqueue below) doesn't collapse
+                                // on the held sig and silently lose the task.
+                                deferred.release_signature(&task).await;
+
+                                // Route directly to the LLM agent loop via Dispatcher.
+                                // do_submit handles tracker.add() and throttler.record_dispatch().
+                                match dispatcher
+                                    .do_submit(
+                                        &task.task_type,
+                                        &task.target_role,
+                                        task.payload.clone(),
+                                        task.priority,
+                                    )
+                                    .await
+                                {
+                                    Ok(Some(tid)) => {
+                                        info!(
+                                            task_id = %tid,
+                                            task_type = %task.task_type,
+                                            "Deferred task dispatched"
+                                        );
+                                        StepOutcome::Dispatched
+                                    }
+                                    Ok(None) => {
+                                        // Credential concurrency block or no role mapping.
+                                        // Task may have been re-enqueued by submit_to_llm.
+                                        StepOutcome::Blocked
+                                    }
+                                    Err(e) => {
+                                        warn!(err = %e, "Failed to dispatch deferred task");
+                                        StepOutcome::BlockedRequeue
+                                    }
+                                }
+                            }
+                            DrainAction::Recheck(_) | DrainAction::SetAside => {
+                                StepOutcome::BlockedRequeue
                             }
                         }
+                    },
+                )
+                .await;
+
+                let Ok(step) = step else {
+                    warn!(
+                        task_type = %task.task_type,
+                        target_role = %task.target_role,
+                        "Deferred drain step exceeded the cycle budget — requeueing and ending cycle"
+                    );
+                    requeue.push(task);
+                    break;
+                };
+
+                match step {
+                    StepOutcome::Dropped => {}
+                    StepOutcome::Dispatched => dispatched += 1,
+                    StepOutcome::Blocked => blocked += 1,
+                    StepOutcome::BlockedRequeue => {
+                        blocked += 1;
+                        requeue.push(task);
                     }
-                    ThrottleDecision::Defer | ThrottleDecision::Wait(_) => {
-                        // Put it back; stop draining since capacity is full.
-                        let _ = deferred.enqueue(&task).await;
+                    StepOutcome::ShutdownRequeue => {
+                        requeue.push(task);
                         break;
                     }
                 }
             }
 
-            if dispatched > 0 {
-                info!(dispatched, "Deferred queue drain cycle");
+            let requeued = requeue.len();
+            let mut requeue_rejected = 0_u32;
+            for task in requeue {
+                deferred.release_signature(&task).await;
+                match deferred.requeue(&task).await {
+                    Ok(true) => {}
+                    Ok(false) => requeue_rejected += 1,
+                    Err(e) => {
+                        warn!(err = %e, task_type = %task.task_type, "Deferred requeue failed");
+                        requeue_rejected += 1;
+                    }
+                }
+            }
+            if requeue_rejected > 0 {
+                warn!(
+                    requeue_rejected,
+                    requeued, "Deferred requeue rejected by cap — queued work dropped"
+                );
+            }
+
+            if dispatched > 0 || requeued > 0 {
+                info!(dispatched, requeued, blocked, "Deferred queue drain cycle");
             }
         }
     })
@@ -494,6 +1069,8 @@ pub fn spawn_deferred_processor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestrator::state::SharedState;
+    use std::time::Duration;
 
     fn make_task(priority: i32, enqueue_time: f64) -> DeferredTask {
         DeferredTask {
@@ -504,6 +1081,454 @@ mod tests {
             payload: serde_json::json!({}),
             source_agent: "orchestrator".into(),
         }
+    }
+
+    fn task_with_payload(task_type: &str, payload: serde_json::Value) -> DeferredTask {
+        DeferredTask {
+            priority: 5,
+            enqueue_time: 1000.0,
+            task_type: task_type.into(),
+            target_role: "recon".into(),
+            payload,
+            source_agent: "orchestrator".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn drops_task_when_target_host_isolated() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_host_isolated(
+                "192.168.58.20",
+                "web01.contoso.local",
+                "blue_simulated:inv-1",
+            )
+            .await;
+        let task = task_with_payload(
+            "credential_access",
+            serde_json::json!({ "target_ip": "192.168.58.20" }),
+        );
+        let drop = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("isolated host should drop the task");
+        assert_eq!(drop.kind, ContainmentKind::HostIsolated);
+        assert_eq!(drop.attribution, ContainmentAttribution::BlueActive);
+        assert!(drop.detail.contains("host isolated"));
+    }
+
+    #[tokio::test]
+    async fn keeps_task_when_host_not_isolated() {
+        let state = SharedState::new("op-x".into());
+        let task = task_with_payload(
+            "credential_access",
+            serde_json::json!({ "target_ip": "192.168.58.20" }),
+        );
+        assert!(task_dropped_by_containment(&task, &state).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn drops_task_when_credential_revoked() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_credential_revoked("svc_mssql", "contoso.local", "blue_simulated:inv-1")
+            .await;
+        let task = task_with_payload(
+            "lateral",
+            serde_json::json!({
+                "target_ip": "192.168.58.21",
+                "credential": { "username": "svc_mssql", "domain": "contoso.local" },
+            }),
+        );
+        let drop = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("revoked credential should drop the task");
+        assert_eq!(drop.kind, ContainmentKind::CredentialRevoked);
+        assert_eq!(drop.attribution, ContainmentAttribution::BlueActive);
+        assert!(drop.deletes);
+        assert!(drop.detail.contains("credential revoked"));
+    }
+
+    fn credential_task() -> DeferredTask {
+        task_with_payload(
+            "lateral",
+            serde_json::json!({
+                "target_ip": "192.168.58.21",
+                "credential": { "username": "svc_mssql", "domain": "contoso.local" },
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn weak_credential_reject_with_blue_off_is_annotated_but_not_deleted() {
+        let state = SharedState::new("op-x".into());
+        state
+            .publish_credential_revoked(
+                "svc_mssql",
+                "contoso.local",
+                "STATUS_LOGON_FAILURE via nxc_smb",
+            )
+            .await;
+        let drop = task_dropped_by_containment(&credential_task(), &state)
+            .await
+            .expect("the rejection is still surfaced");
+        assert_eq!(drop.kind, ContainmentKind::CredentialRevoked);
+        assert_eq!(drop.attribution, ContainmentAttribution::RedInferred);
+        assert!(
+            !drop.deletes,
+            "a weak reject with blue off must not delete queued work"
+        );
+        assert!(
+            !drop.detail.contains("revoked"),
+            "blue-off detail still claims revocation: {}",
+            drop.detail
+        );
+        assert!(
+            drop.detail.contains("credential rejected"),
+            "{}",
+            drop.detail
+        );
+        assert_eq!(
+            drop.kind.reason_field(drop.attribution),
+            "credential_rejected_inferred"
+        );
+        assert!(
+            state
+                .read()
+                .await
+                .is_credential_revoked("svc_mssql", "contoso.local"),
+            "the credential must still be hidden from the LLM"
+        );
+    }
+
+    #[tokio::test]
+    async fn kdc_declared_revocation_deletes_queued_work_even_with_blue_off() {
+        let state = SharedState::new("op-x".into());
+        state
+            .publish_credential_revoked(
+                "svc_mssql",
+                "contoso.local",
+                "KDC_ERR_CLIENT_REVOKED via nxc_smb",
+            )
+            .await;
+        let drop = task_dropped_by_containment(&credential_task(), &state)
+            .await
+            .expect("a KDC-declared revocation still drops the task");
+        assert!(drop.deletes);
+        assert_eq!(drop.attribution, ContainmentAttribution::RedInferred);
+    }
+
+    #[tokio::test]
+    async fn weak_credential_reject_is_not_blue_containment_merely_because_blue_runs() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_credential_revoked("svc_mssql", "contoso.local", "STATUS_LOGON_FAILURE")
+            .await;
+        let drop = task_dropped_by_containment(&credential_task(), &state)
+            .await
+            .expect("the rejection is still surfaced");
+        assert!(
+            !drop.deletes,
+            "blue being switched on is not evidence that blue contained anything"
+        );
+        assert_eq!(drop.attribution, ContainmentAttribution::RedInferred);
+        assert!(
+            !drop.detail.contains("revoked"),
+            "detail claims revocation on red's own auth failure: {}",
+            drop.detail
+        );
+        assert!(
+            state
+                .read()
+                .await
+                .is_credential_revoked("svc_mssql", "contoso.local"),
+            "the credential must still be hidden from the LLM"
+        );
+    }
+
+    #[tokio::test]
+    async fn blue_actuated_revocation_deletes_queued_work() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_credential_revoked("svc_mssql", "contoso.local", "blue_simulated:inv-7")
+            .await;
+        let drop = task_dropped_by_containment(&credential_task(), &state)
+            .await
+            .expect("a blue-actuated revocation drops the task");
+        assert!(drop.deletes);
+        assert_eq!(drop.attribution, ContainmentAttribution::BlueActive);
+        assert!(
+            drop.detail.contains("credential revoked"),
+            "{}",
+            drop.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn blue_actuation_is_tracked_per_principal() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_credential_revoked("svc_mssql", "contoso.local", "blue_simulated:inv-7")
+            .await;
+        state
+            .publish_credential_revoked("alice", "contoso.local", "STATUS_LOGON_FAILURE")
+            .await;
+        let s = state.read().await;
+        assert!(s.credential_revocation_deletes_queued_work("svc_mssql", "contoso.local"));
+        assert!(!s.credential_revocation_deletes_queued_work("alice", "contoso.local"));
+    }
+
+    #[tokio::test]
+    async fn host_drop_with_blue_off_is_not_attributed_to_blue() {
+        let state = SharedState::new("op-x".into());
+        state
+            .publish_host_isolated("192.168.58.20", "web01.contoso.local", "STATUS_IO_TIMEOUT")
+            .await;
+        let task = task_with_payload(
+            "credential_access",
+            serde_json::json!({ "target_ip": "192.168.58.20" }),
+        );
+        let drop = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("an unreachable host still invalidates the task");
+        assert_eq!(drop.attribution, ContainmentAttribution::RedInferred);
+        assert!(drop.deletes, "an unreachable host still deletes its tasks");
+        assert!(drop.detail.contains("host unreachable"), "{}", drop.detail);
+    }
+
+    #[tokio::test]
+    async fn drops_kerberos_task_when_krbtgt_rotated() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_krbtgt_rotated("contoso.local", "blue_simulated:inv-1")
+            .await;
+        let task = task_with_payload(
+            "kerberos",
+            serde_json::json!({
+                "target_ip": "192.168.58.240",
+                "domain": "contoso.local",
+            }),
+        );
+        let drop = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("rotated krbtgt should drop the kerberos task");
+        assert_eq!(drop.kind, ContainmentKind::KrbtgtRotated);
+        assert_eq!(drop.attribution, ContainmentAttribution::BlueActive);
+        assert!(drop.detail.contains("krbtgt rotated"));
+    }
+
+    #[tokio::test]
+    async fn keeps_non_kerberos_task_when_only_krbtgt_rotated() {
+        let state = SharedState::new("op-x".into());
+        state
+            .publish_krbtgt_rotated("contoso.local", "blue_simulated:inv-1")
+            .await;
+        // Plain SMB recon in the same realm should still be dispatched —
+        // krbtgt rotation only kills Kerberos-shaped attacks.
+        let task = task_with_payload(
+            "recon",
+            serde_json::json!({
+                "target_ip": "192.168.58.240",
+                "domain": "contoso.local",
+                "technique": "smb_enumeration",
+            }),
+        );
+        assert!(task_dropped_by_containment(&task, &state).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn drops_kerberoast_technique_when_krbtgt_rotated() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_krbtgt_rotated("contoso.local", "blue_simulated:inv-1")
+            .await;
+        // task_type is `credential_access` but technique gives it away.
+        let task = task_with_payload(
+            "credential_access",
+            serde_json::json!({
+                "dc_ip": "192.168.58.240",
+                "domain": "contoso.local",
+                "technique": "Kerberoasting",
+            }),
+        );
+        let drop = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("expected kerberoast to be dropped");
+        assert_eq!(drop.kind, ContainmentKind::KrbtgtRotated);
+        assert_eq!(drop.attribution, ContainmentAttribution::BlueActive);
+        assert!(drop.deletes);
+        assert!(drop.detail.contains("krbtgt rotated"));
+    }
+
+    #[tokio::test]
+    async fn inferred_krbtgt_rotation_keeps_the_task() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_krbtgt_rotated("contoso.local", "KRB_AP_ERR_MODIFIED via secretsdump")
+            .await;
+        let task = task_with_payload(
+            "credential_access",
+            serde_json::json!({
+                "dc_ip": "192.168.58.240",
+                "domain": "contoso.local",
+                "technique": "Kerberoasting",
+            }),
+        );
+        let verdict = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("an inferred rotation is still an observation");
+        assert_eq!(verdict.kind, ContainmentKind::KrbtgtRotated);
+        assert_eq!(verdict.attribution, ContainmentAttribution::RedInferred);
+        assert!(
+            !verdict.deletes,
+            "a wrong-SPN KRB_AP_ERR_MODIFIED must not delete queued work"
+        );
+    }
+
+    #[tokio::test]
+    async fn blue_enabled_alone_does_not_attribute_a_rotation_to_blue() {
+        let state = SharedState::new("op-x".into());
+        state.set_blue_enabled(true).await;
+        state
+            .publish_krbtgt_rotated("contoso.local", "KRB_AP_ERR_MODIFIED via getST")
+            .await;
+        let task = task_with_payload(
+            "kerberos",
+            serde_json::json!({
+                "dc_ip": "192.168.58.240",
+                "domain": "contoso.local",
+            }),
+        );
+        let verdict = task_dropped_by_containment(&task, &state)
+            .await
+            .expect("observation recorded");
+        assert_eq!(verdict.attribution, ContainmentAttribution::RedInferred);
+    }
+
+    fn budget(secs: u64) -> (tokio::time::Instant, tokio::time::Instant) {
+        let now = tokio::time::Instant::now();
+        (now, now + Duration::from_secs(secs))
+    }
+
+    #[test]
+    fn allow_dispatches() {
+        let (now, deadline) = budget(10);
+        assert_eq!(
+            drain_action(&ThrottleDecision::Allow, now, deadline),
+            DrainAction::Dispatch
+        );
+    }
+
+    #[test]
+    fn defer_sets_aside() {
+        let (now, deadline) = budget(10);
+        assert_eq!(
+            drain_action(&ThrottleDecision::Defer, now, deadline),
+            DrainAction::SetAside
+        );
+    }
+
+    #[test]
+    fn dispatch_delay_wait_is_rechecked_not_stopped() {
+        let (now, deadline) = budget(10);
+        let delay = Duration::from_millis(200);
+        assert_eq!(
+            drain_action(&ThrottleDecision::Wait(delay), now, deadline),
+            DrainAction::Recheck(delay)
+        );
+    }
+
+    #[test]
+    fn wait_longer_than_budget_sets_aside() {
+        let (now, deadline) = budget(10);
+        assert_eq!(
+            drain_action(
+                &ThrottleDecision::Wait(Duration::from_secs(60)),
+                now,
+                deadline
+            ),
+            DrainAction::SetAside
+        );
+    }
+
+    #[test]
+    fn wait_exactly_at_deadline_sets_aside() {
+        let (now, deadline) = budget(10);
+        assert_eq!(
+            drain_action(
+                &ThrottleDecision::Wait(Duration::from_secs(10)),
+                now,
+                deadline
+            ),
+            DrainAction::SetAside
+        );
+    }
+
+    #[test]
+    fn step_budget_is_the_cycle_remainder() {
+        let (now, deadline) = budget(10);
+        assert_eq!(step_budget(now, deadline), Duration::from_secs(10));
+        assert_eq!(
+            step_budget(now + Duration::from_secs(4), deadline),
+            Duration::from_secs(6)
+        );
+    }
+
+    #[test]
+    fn step_budget_past_the_deadline_is_zero_not_a_fresh_window() {
+        let (now, deadline) = budget(10);
+        assert!(step_budget(deadline, deadline).is_zero());
+        assert!(
+            step_budget(now + Duration::from_secs(30), deadline).is_zero(),
+            "a step that starts past the cycle deadline must get no budget — handing it a \
+             fresh per-step window is what let one stuck await hang the drain loop forever"
+        );
+    }
+
+    #[test]
+    fn wait_just_inside_budget_is_rechecked() {
+        let (now, deadline) = budget(10);
+        let d = Duration::from_millis(9_999);
+        assert_eq!(
+            drain_action(&ThrottleDecision::Wait(d), now, deadline),
+            DrainAction::Recheck(d)
+        );
+    }
+
+    #[test]
+    fn wait_near_an_exhausted_budget_sets_aside() {
+        let now = tokio::time::Instant::now();
+        let deadline = now + Duration::from_millis(50);
+        assert_eq!(
+            drain_action(
+                &ThrottleDecision::Wait(Duration::from_millis(200)),
+                now,
+                deadline
+            ),
+            DrainAction::SetAside
+        );
+    }
+
+    #[test]
+    fn a_full_delay_cycle_drains_many_tasks() {
+        let (now, deadline) = budget(10);
+        let delay = Duration::from_millis(200);
+        let mut at = now;
+        let mut admitted = 0;
+        while drain_action(&ThrottleDecision::Wait(delay), at, deadline)
+            == DrainAction::Recheck(delay)
+        {
+            at += delay;
+            admitted += 1;
+        }
+        assert_eq!(admitted, 49);
     }
 
     #[test]
@@ -664,6 +1689,406 @@ mod tests {
         assert_eq!(t.task_type, "recon");
         assert_eq!(t.target_role, "recon");
         assert_eq!(t.source_agent, "orchestrator");
+    }
+
+    // Bug J: signature dedup
+
+    fn make_signed_task(
+        task_type: &str,
+        role: &str,
+        technique: &str,
+        target_ip: &str,
+        cred_user: &str,
+        cred_domain: &str,
+        enqueue_time: f64,
+    ) -> DeferredTask {
+        DeferredTask {
+            priority: 5,
+            enqueue_time,
+            task_type: task_type.into(),
+            target_role: role.into(),
+            payload: serde_json::json!({
+                "technique": technique,
+                "target_ip": target_ip,
+                "credential": {
+                    "username": cred_user,
+                    "domain": cred_domain,
+                },
+            }),
+            source_agent: "orchestrator".into(),
+        }
+    }
+
+    #[test]
+    fn signature_excludes_timestamp() {
+        // The same logical task at two different ticks must produce
+        // identical signatures — that's how producer-side dedup
+        // collapses repeated dispatches across the tick interval.
+        let a = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            1000.0,
+        );
+        let b = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            2000.0,
+        );
+        assert_eq!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_on_target_ip() {
+        // Two different DCs should not dedup against each other even
+        // when everything else matches.
+        let a = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            1000.0,
+        );
+        let b = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.30",
+            "carol",
+            "fabrikam.local",
+            1000.0,
+        );
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_on_technique() {
+        let a = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            1000.0,
+        );
+        let b = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "kerberoast",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            1000.0,
+        );
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_on_credential() {
+        let a = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            1000.0,
+        );
+        let b = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "bob",
+            "fabrikam.local",
+            1000.0,
+        );
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    fn make_acl_task(
+        vuln_id: &str,
+        acl_type: &str,
+        source_user: &str,
+        target_user: &str,
+    ) -> DeferredTask {
+        DeferredTask {
+            priority: 3,
+            enqueue_time: 1000.0,
+            task_type: "acl_chain_step".into(),
+            target_role: "acl".into(),
+            payload: serde_json::json!({
+                "technique": "dacl_abuse",
+                "acl_type": acl_type,
+                "vuln_id": vuln_id,
+                "source_user": source_user,
+                "target_user": target_user,
+                "target_ip": "192.168.58.10",
+                "domain": "contoso.local",
+                "credential": {
+                    "username": "alice",
+                    "domain": "contoso.local",
+                },
+            }),
+            source_agent: "orchestrator".into(),
+        }
+    }
+
+    fn make_crack_task(username: &str, domain: &str, hash_value: &str) -> DeferredTask {
+        DeferredTask {
+            priority: 5,
+            enqueue_time: 1000.0,
+            task_type: "crack".into(),
+            target_role: "cracker".into(),
+            payload: serde_json::json!({
+                "hash_type": "Kerberoast",
+                "hash_value": hash_value,
+                "username": username,
+                "domain": domain,
+                "known_usernames": ["alice", "bob"],
+                "known_passwords": ["P@ssw0rd!"],
+            }),
+            source_agent: "orchestrator".into(),
+        }
+    }
+
+    #[test]
+    fn signature_differs_across_crack_tasks_for_different_hashes() {
+        let tasks = [
+            make_crack_task("svc_sql", "contoso.local", "$krb5tgs$23$*svc_sql*$aaaa1111"),
+            make_crack_task("svc_web", "contoso.local", "$krb5tgs$23$*svc_web*$bbbb2222"),
+            make_crack_task("alice", "fabrikam.local", "$krb5asrep$23$alice*$cccc3333"),
+        ];
+        let sigs: std::collections::HashSet<String> =
+            tasks.iter().map(DeferredTask::signature).collect();
+        assert_eq!(
+            sigs.len(),
+            tasks.len(),
+            "crack payloads carry no technique/target_ip/credential/finding, so without hash \
+             identity every crack task collapses onto the first and enqueue reports the \
+             dropped ones as successfully queued"
+        );
+    }
+
+    #[test]
+    fn signature_still_collapses_a_genuinely_duplicate_crack_task() {
+        let a = make_crack_task("svc_sql", "contoso.local", "$krb5tgs$23$*svc_sql*$aaaa1111");
+        let b = make_crack_task("SVC_SQL", "CONTOSO.LOCAL", "$krb5tgs$23$*svc_sql*$aaaa1111");
+        assert_eq!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn crack_signature_tracks_the_inflight_reservation_key() {
+        let task = make_crack_task("svc_sql", "contoso.local", "$krb5tgs$23$*svc_sql*$aaaa1111");
+        let reservation_key =
+            crate::orchestrator::automation::crack_dedup_key_from_payload(&task.payload)
+                .expect("crack payload yields a dedup key");
+        assert_eq!(task.finding_key(), format!("crack|{reservation_key}"));
+    }
+
+    #[test]
+    fn hash_identity_applies_only_to_crack_tasks() {
+        let mut a = make_crack_task("svc_sql", "contoso.local", "aaaa1111");
+        let mut b = make_crack_task("svc_sql", "contoso.local", "bbbb2222");
+        a.task_type = "recon".into();
+        b.task_type = "recon".into();
+        assert_eq!(
+            a.signature(),
+            b.signature(),
+            "only crack tasks route hash identity into the signature; other task types keep \
+             their existing hashed tuple so their signatures do not churn"
+        );
+    }
+
+    #[test]
+    fn signature_differs_on_vuln_id() {
+        let a = make_acl_task("acl_genericall_alice_bob", "genericall", "alice", "bob");
+        let b = make_acl_task("acl_genericall_alice_carol", "genericall", "alice", "bob");
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_on_acl_type() {
+        let a = make_acl_task("v1", "genericall", "alice", "bob");
+        let b = make_acl_task("v1", "writedacl", "alice", "bob");
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_on_acl_source_user() {
+        let a = make_acl_task("v1", "genericall", "alice", "bob");
+        let b = make_acl_task("v1", "genericall", "carol", "bob");
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_on_acl_target_user() {
+        let a = make_acl_task("v1", "genericall", "alice", "bob");
+        let b = make_acl_task("v1", "genericall", "alice", "carol");
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_differs_across_acl_edges_sharing_dc_and_credential() {
+        let edges = [
+            make_acl_task("acl_genericall_alice_bob", "genericall", "alice", "bob"),
+            make_acl_task("acl_writedacl_alice_carol", "writedacl", "alice", "carol"),
+            make_acl_task("acl_writeowner_alice_admin", "writeowner", "alice", "admin"),
+        ];
+        let sigs: std::collections::HashSet<String> =
+            edges.iter().map(DeferredTask::signature).collect();
+        assert_eq!(sigs.len(), edges.len());
+    }
+
+    #[test]
+    fn signature_reads_acl_identity_from_nested_step() {
+        let mut a = make_acl_task("", "", "", "");
+        a.payload = serde_json::json!({
+            "technique": "acl_chain_step",
+            "step": {"source": "alice", "target": "bob", "acl_type": "genericall", "vuln_id": "v1"},
+            "credential": {"username": "alice", "domain": "contoso.local"},
+        });
+        let mut b = a.clone();
+        b.payload = serde_json::json!({
+            "technique": "acl_chain_step",
+            "step": {"source": "alice", "target": "carol", "acl_type": "genericall", "vuln_id": "v2"},
+            "credential": {"username": "alice", "domain": "contoso.local"},
+        });
+        assert_ne!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_unchanged_for_payloads_without_acl_identity() {
+        let a = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            1000.0,
+        );
+        let b = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            9000.0,
+        );
+        assert_eq!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_is_case_insensitive_on_credential_realm() {
+        // Realm spelling should not split the signature — the worker
+        // pool treats them as equivalent.
+        let a = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "FABRIKAM.LOCAL",
+            1000.0,
+        );
+        let b = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            1000.0,
+        );
+        assert_eq!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn signature_is_stable_across_calls() {
+        let t = make_signed_task(
+            "credential_access",
+            "credential_access",
+            "secretsdump",
+            "192.168.58.20",
+            "carol",
+            "fabrikam.local",
+            1000.0,
+        );
+        let s1 = t.signature();
+        let s2 = t.signature();
+        let s3 = t.signature();
+        assert_eq!(s1, s2);
+        assert_eq!(s2, s3);
+    }
+
+    #[test]
+    fn signature_handles_missing_payload_fields() {
+        // Payload with no technique / target / credential — still
+        // produces a stable signature derived from task_type/role only.
+        let bare = DeferredTask {
+            priority: 5,
+            enqueue_time: 1000.0,
+            task_type: "ad_recon".into(),
+            target_role: "recon".into(),
+            payload: serde_json::json!({}),
+            source_agent: "orchestrator".into(),
+        };
+        let bare2 = DeferredTask {
+            priority: 5,
+            enqueue_time: 9999.0,
+            task_type: "ad_recon".into(),
+            target_role: "recon".into(),
+            payload: serde_json::json!({}),
+            source_agent: "orchestrator".into(),
+        };
+        assert_eq!(bare.signature(), bare2.signature());
+        // ...and distinct from a task with the same skeleton but a
+        // populated technique.
+        let with_tech = DeferredTask {
+            payload: serde_json::json!({ "technique": "ldap_enum" }),
+            ..bare.clone()
+        };
+        assert_ne!(bare.signature(), with_tech.signature());
+    }
+
+    #[test]
+    fn signature_falls_back_to_dc_ip_when_target_ip_absent() {
+        // Some automation payloads use `dc_ip` instead of `target_ip`.
+        // The signature must still cover those so they dedup correctly.
+        let a = DeferredTask {
+            priority: 5,
+            enqueue_time: 1000.0,
+            task_type: "credential_access".into(),
+            target_role: "credential_access".into(),
+            payload: serde_json::json!({
+                "technique": "kerberoast",
+                "dc_ip": "192.168.58.20",
+                "credential": {"username": "alice", "domain": "fabrikam.local"},
+            }),
+            source_agent: "orchestrator".into(),
+        };
+        let b = DeferredTask {
+            payload: serde_json::json!({
+                "technique": "kerberoast",
+                "dc_ip": "192.168.58.20",
+                "credential": {"username": "alice", "domain": "fabrikam.local"},
+            }),
+            enqueue_time: 5000.0,
+            ..a.clone()
+        };
+        assert_eq!(a.signature(), b.signature());
     }
 
     #[test]

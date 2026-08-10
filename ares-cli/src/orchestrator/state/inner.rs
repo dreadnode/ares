@@ -2,9 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 
+use ares_core::config::defaults::{default_acl_publish_cap, default_novelty_scope};
 use ares_core::models::*;
 
 use super::ALL_DEDUP_SETS;
@@ -13,7 +15,26 @@ use super::ALL_DEDUP_SETS;
 /// AD lockout observation windows. Longer values block the critical path.
 const QUARANTINE_DURATION_SECS: i64 = 300;
 
+/// Fallback observation window for the spray-attempt accumulator when the
+/// caller has not supplied the domain's real `lockoutObservationWindow`.
+///
+/// Deliberately longer than the 5-minute AD/GOAD default: the two failure
+/// modes are not symmetric. Remembering attempts for too long only costs
+/// spray throughput, while forgetting them too early locks the account and
+/// costs the whole domain. Override per-op with `ARES_SPRAY_WINDOW_SECS`,
+/// or pass `lockout_observation_window_mins` from `password_policy`.
+const SPRAY_WINDOW_DEFAULT_SECS: i64 = 1800;
+
 const CAPTURE_IN_FLIGHT_TTL_SECS: i64 = 180;
+
+/// Maximum number of entries kept in `state.hashes`. ESC8 relay + coerce
+/// floods can dump thousands of machine-account NTLMv2 rows into state
+/// (WAYSFUCKED op-20260612 saw 11,977) which crowds out signal at every
+/// read site. When ingestion hits this cap, `push_hash_capped` evicts the
+/// oldest low-value entry to make room. High-value entries (krbtgt,
+/// cracked, trust keys, AES256-bearing) are never evicted, so the cap is
+/// soft — an all-high-value overflow logs a warn and still pushes.
+const MAX_HASHES: usize = 500;
 
 /// How long an LLM-marked "assist-abandoned" task pattern stays
 /// dispatch-blocked before the orchestrator allows a single re-try.
@@ -53,12 +74,19 @@ pub struct StateInner {
     pub discovered_vulnerabilities: HashMap<String, VulnerabilityInfo>,
     pub exploited_vulnerabilities: HashSet<String>,
 
+    /// Subset of `exploited_vulnerabilities` credited only because another path
+    /// reached the same goal (see `compute_superseded`). The technique itself
+    /// was never proven to work, so reports must not present these as wins.
+    pub superseded_vulnerabilities: HashSet<String>,
+
     // Per-vuln consecutive exploit-failure counts. Drives `is_exploit_abandoned`
     // — once a vuln crosses MAX_EXPLOIT_FAILURES, the exploitation workflow
     // skips it permanently for this op. Prevents 2-hour LLM stuck-loops on
     // exploits whose preconditions (creds, reachable target, working tool)
     // can never be satisfied. Operation-scoped, in-memory only.
     pub exploit_failure_counts: HashMap<String, u32>,
+
+    pub adcs_unauth_retry_counts: HashMap<String, u32>,
 
     // Maps
     pub domain_controllers: HashMap<String, String>,
@@ -124,6 +152,20 @@ pub struct StateInner {
     // excluded_users.
     pub quarantined_principals: HashMap<String, DateTime<Utc>>,
 
+    // Per-domain spray budget accumulator: `domain` → (attempts already
+    // spent against each account, window expiry).
+    //
+    // Keyed by domain rather than principal because a spray tries the same
+    // password list against every account in the userlist, so the attempts
+    // burned *per account* are uniform across the domain.
+    //
+    // This exists because `attempts_used_per_account` is a tool argument:
+    // left to the LLM it is re-reported as 0 on every call, so N sprays in
+    // one observation window each stay under the per-call cap and still
+    // sum past the lockout threshold. Quarantine is the reactive half
+    // (stop hitting an account already locked); this is the proactive half.
+    pub spray_attempts: HashMap<String, (i64, DateTime<Utc>)>,
+
     // Per-trust counter: how many times the cross-forest forge dispatch
     // has been deferred waiting for the AES256 trust key to upsert.
     // secretsdump runs twice (NTLM-only first, then AES-equipped) and
@@ -131,11 +173,61 @@ pub struct StateInner {
     // so we don't defer indefinitely if AES never arrives.
     pub forge_aes_defers: HashMap<String, u32>,
 
+    // Per-trust counter: how many times the cross-forest forge has fired
+    // NTLM-only (the AES256 trust key never upserted within the defer window)
+    // and come back with zero hashes. AES-only target forests reject an RC4
+    // inter-realm ticket with KDC_ERR_ETYPE_NOSUPP, so a zero-hash result there
+    // is the etype rejection — not SID filtering. We clear dedup and re-wait
+    // for AES up to this bound so a late trust-key extraction can drive a
+    // successful AES forge; past the bound we lock so a genuinely-unreachable
+    // target can't hot-loop.
+    pub forge_ntlm_fallback_attempts: HashMap<String, u32>,
+
+    // Per-(trust_follow dedup key) timestamp recording when the
+    // cross-forest forge dispatch was marked-processed. `auto_trust_follow`
+    // marks dedup *before* spawning the dispatch so the next 30s tick
+    // doesn't double-fire, but if the spawn never actually runs the tool
+    // (tracing event drop, runtime cancellation, panic between mark and
+    // spawn body) the dedup persists and the cross-forest pivot is
+    // permanently lost for this op. This map lets the planner detect
+    // stale marks and unmark them after `FORGE_STALENESS_LIMIT`, so a
+    // later tick re-dispatches. In-memory only — restart resilience
+    // isn't required because the persistence layer reclears
+    // `trust_follow` on op load anyway.
+    pub forge_in_flight: HashMap<String, Instant>,
+
     // Per-(linked_server vuln) failed-attempt counter for
     // `auto_mssql_link_pivot`. Bounded retries before we mark the
     // pivot dedup'd — keeps a flaky link from looping forever while
     // still tolerating transient auth races.
     pub mssql_link_pivot_attempts: HashMap<String, u32>,
+
+    // Per-`user@domain` count of weak credential-reject observations seen by
+    // the containment classifier. A generic `STATUS_LOGON_FAILURE` /
+    // `invalidCredentials` only revokes the principal once it recurs
+    // `CREDENTIAL_REVOKE_MIN_OBSERVATIONS` times, so one benign auth miss can't
+    // starve the LLM's view of a still-valid credential. In-memory only — a
+    // restart resets the budget, which re-tries rather than over-revokes.
+    pub containment_reject_counts: HashMap<String, u32>,
+
+    // Per-realm count of `KRB_AP_ERR_MODIFIED` observations seen by the
+    // containment classifier. The realm is only marked krbtgt-rotated once the
+    // mismatch recurs `KRBTGT_ROTATION_MIN_OBSERVATIONS` times, because a single
+    // sighting skips every Kerberos-shaped credential_access task in the realm
+    // for the rest of the op. In-memory only, same as
+    // `containment_reject_counts`.
+    pub containment_krbtgt_mismatch_counts: HashMap<String, u32>,
+
+    // Per-(dc, domain, principal) consecutive-`Transient` counter for
+    // `auto_krbtgt_extraction`, keyed by `krbtgt_principal_attempt_key`. A
+    // `Transient` outcome intentionally leaves state clean so genuine network
+    // blips retry, but a principal that keeps returning non-logon-failure
+    // output that never advances (e.g. a full-dump retry that still can't
+    // parse krbtgt) would otherwise be re-picked every tick forever. After
+    // `KRBTGT_MAX_TRANSIENT` consecutive Transients we mark the principal dedup
+    // so the loop rotates to the next candidate. In-memory only — restart just
+    // resets the budget, which is the safe direction (re-try, don't over-skip).
+    pub krbtgt_transient_counts: HashMap<String, u32>,
 
     // Per-hash crack attempt counter, keyed by `crack_dedup_key`. Lets a
     // failed crack (wrong wordlist, password not in list, hashcat transient)
@@ -148,6 +240,8 @@ pub struct StateInner {
     // fresh budget (acceptable mild leak).
     pub crack_attempts: HashMap<String, u32>,
 
+    pub golden_ticket_forge_attempts: HashMap<String, u32>,
+
     // Forged inter-realm Kerberos tickets (source→target forest, cached path)
     pub kerberos_tickets: Vec<ares_core::models::KerberosTicket>,
 
@@ -158,6 +252,91 @@ pub struct StateInner {
     /// Used by the completion monitor to enforce a post-exploitation grace period.
     pub all_forests_dominated_at: Option<tokio::time::Instant>,
 
+    /// Per-DC coercion phase state — Bug F. Tracks which coercion techniques
+    /// have already been attempted, the attempt count, the last observed error
+    /// signal, and any active cooldown. The previous boolean dedup
+    /// (`DEDUP_COERCED_DCS`) accepted one attempt per DC and never cycled
+    /// techniques, so one `RPC_S_ACCESS_DENIED` on PetitPotam locked the DC
+    /// out of every other coercion forever. The cycling logic in
+    /// `auto_coercion` reads this map to pick the next un-tried technique
+    /// (unauth ladder → authenticated retry when a same-forest cred lands).
+    pub coercion_phase_state:
+        HashMap<String, crate::orchestrator::automation::coercion::CoercionPhaseState>,
+
+    /// Trust forges parked because they aimed at the wrong host, keyed by the
+    /// `trust_follow` dedup key. Retrying the identical request is waste, so
+    /// the dedup mark is held — but only until recon resolves a different
+    /// target, which is the one thing that can make the retry succeed.
+    pub forge_wedged: HashMap<String, crate::orchestrator::automation::trust::WedgedForge>,
+
+    /// Trust forges parked because the dump came back with no target krbtgt,
+    /// keyed by the `trust_follow` dedup key. The forge itself succeeded, so
+    /// re-running it with the same trust material repeats the same empty dump
+    /// — but a *different* trust key (an AES256 upgrade, a re-extracted key, a
+    /// rotation) is exactly what can turn it into a real DCSync, and nothing
+    /// else in the tick can act on that.
+    pub forge_empty_dump: HashMap<String, crate::orchestrator::automation::trust::EmptyDumpForge>,
+
+    /// Whether a blue team is running alongside red in this operation,
+    /// resolved once at orchestrator startup from `ARES_BLUE_ENABLED`.
+    ///
+    /// The containment classifier reads red's own tool output and never sees
+    /// blue, so this flag is the only fact separating "blue may have contained
+    /// us" from "our credential simply failed". Defaults to `false` so any
+    /// state built outside the orchestrator attributes nothing to blue.
+    pub blue_enabled: bool,
+
+    /// Containment observations — a credential we hold started
+    /// consistently returning `STATUS_LOGON_FAILURE` or LDAP
+    /// `INVALID_CREDENTIALS`. Keyed by `user@domain` (lowercase). Read by
+    /// the exploitation queue to drop attempts that depend on the principal
+    /// and by the LLM prompt formatter to signal "this cred is dead".
+    /// Semantically distinct from [`Self::quarantined_principals`], which
+    /// carries the short 5-min lockout signal — a revocation persists for
+    /// the remainder of the op unless an operator rolls it back.
+    pub revoked_principals: HashMap<String, DateTime<Utc>>,
+
+    /// Subset of [`Self::revoked_principals`] whose revocation the KDC itself
+    /// declared, via `KDC_ERR_CLIENT_REVOKED`. Keyed the same way.
+    ///
+    /// Everything else in `revoked_principals` got there because a generic
+    /// auth-reject string recurred — a stale hash, a lockout, an expired
+    /// ticket or a wrong password guess all produce exactly that. Membership
+    /// here is what separates "the KDC says this account is disabled" from
+    /// "this credential was refused twice", and it decides whether a
+    /// revocation may delete queued work or only hide the credential.
+    pub kdc_declared_revocations: HashSet<String>,
+
+    pub blue_actuated_revocations: HashSet<String>,
+
+    /// Hosts blue firewalled off. Keyed by IP string. Populated when SMB,
+    /// WinRM and LDAP to a previously-reachable host all start returning
+    /// network-unreachable inside a short window. Consumers skip vulns
+    /// and lateral targets pointing at these IPs.
+    pub isolated_hosts: HashMap<String, DateTime<Utc>>,
+
+    /// Domains where blue rotated krbtgt. Keyed by lowercase realm.
+    /// Populated on forest-wide `KRB_AP_ERR_MODIFIED`. Consumers drop
+    /// cached TGTs and forged tickets for the realm.
+    pub krbtgt_rotated_at: HashMap<String, DateTime<Utc>>,
+
+    /// Subset of [`Self::krbtgt_rotated_at`] that a blue response actuator
+    /// actually performed, keyed the same way.
+    ///
+    /// `KRB_AP_ERR_MODIFIED` is not proof of a rotation. The KDC returns it
+    /// whenever a ticket cannot be decrypted by the service it was presented
+    /// to, which a wrong-SPN or wrong-realm target string produces just as
+    /// readily as a rotated key — and Impacket's cross-realm handling emits
+    /// exactly that. Membership here is what separates "blue rotated the
+    /// realm's key" from "red mis-targeted a ticket", and it decides whether
+    /// the observation may delete queued work or only skip it.
+    pub blue_actuated_krbtgt_rotations: HashSet<String>,
+
+    /// Certificates blue revoked. Keyed by serial (hex, lowercase).
+    /// Populated on PKINIT `KDC_ERR_CLIENT_REVOKED`. Consumers drop
+    /// ADCS-based exploit paths pinned to the revoked serial.
+    pub revoked_certificates: HashMap<String, DateTime<Utc>>,
+
     /// IPv4 addresses bound to the orchestrator's own network interfaces.
     /// Populated once at orchestrator startup via `SharedState::initialize_self_ips`
     /// from `local_ip_address::list_afinet_netifas`. `publish_host` skips any
@@ -166,6 +345,25 @@ pub struct StateInner {
     /// Empty by default — tests using `StateInner::new` get deterministic
     /// no-op filtering without needing to mock interface enumeration.
     pub self_ips: HashSet<IpAddr>,
+
+    /// Observed AD account-lockout thresholds, keyed by lowercase domain.
+    /// Populated by the `password_policy` parser from real `net accounts` /
+    /// netexec output.
+    ///
+    /// The spray tools take `lockout_threshold` as a tool argument, so before
+    /// this existed the value guarding against locking out a live domain was
+    /// whatever the agent typed — and `<= 0` there means "no lockout, spray
+    /// freely". The parsed policy was extracted and then dropped on the floor.
+    pub password_policies: HashMap<String, i64>,
+
+    pub acl_publish_cap: u32,
+    pub acl_published_count: u32,
+    pub acl_low_value_published_count: u32,
+    pub acl_cap_reached_logged: bool,
+
+    pub emit_path_records: bool,
+    pub novelty_enabled: bool,
+    pub novelty_scope: String,
 }
 
 impl StateInner {
@@ -188,7 +386,9 @@ impl StateInner {
             candidate_domains: HashMap::new(),
             discovered_vulnerabilities: HashMap::new(),
             exploited_vulnerabilities: HashSet::new(),
+            superseded_vulnerabilities: HashSet::new(),
             exploit_failure_counts: HashMap::new(),
+            adcs_unauth_retry_counts: HashMap::new(),
             domain_controllers: HashMap::new(),
             netbios_to_fqdn: HashMap::new(),
             domain_sids: HashMap::new(),
@@ -207,14 +407,154 @@ impl StateInner {
             pending_tasks: HashMap::new(),
             completed_tasks: HashMap::new(),
             quarantined_principals: HashMap::new(),
+            spray_attempts: HashMap::new(),
+            password_policies: HashMap::new(),
             forge_aes_defers: HashMap::new(),
+            forge_ntlm_fallback_attempts: HashMap::new(),
+            forge_in_flight: HashMap::new(),
+            forge_wedged: HashMap::new(),
+            forge_empty_dump: HashMap::new(),
             mssql_link_pivot_attempts: HashMap::new(),
+            containment_reject_counts: HashMap::new(),
+            containment_krbtgt_mismatch_counts: HashMap::new(),
+            krbtgt_transient_counts: HashMap::new(),
             crack_attempts: HashMap::new(),
+            golden_ticket_forge_attempts: HashMap::new(),
             kerberos_tickets: Vec::new(),
             completed: false,
             all_forests_dominated_at: None,
+            coercion_phase_state: HashMap::new(),
+            blue_enabled: false,
+            revoked_principals: HashMap::new(),
+            kdc_declared_revocations: HashSet::new(),
+            blue_actuated_revocations: HashSet::new(),
+            isolated_hosts: HashMap::new(),
+            krbtgt_rotated_at: HashMap::new(),
+            blue_actuated_krbtgt_rotations: HashSet::new(),
+            revoked_certificates: HashMap::new(),
             self_ips: HashSet::new(),
+            acl_publish_cap: default_acl_publish_cap(),
+            acl_published_count: 0,
+            acl_low_value_published_count: 0,
+            acl_cap_reached_logged: false,
+            emit_path_records: false,
+            novelty_enabled: false,
+            novelty_scope: default_novelty_scope(),
         }
+    }
+
+    /// How far a containment observation in this operation may be attributed.
+    ///
+    /// Operation-wide, so it answers only "could blue have done this at all".
+    /// Credential drops must use [`Self::credential_containment_attribution`],
+    /// which asks whether blue acted on the specific principal.
+    pub fn containment_attribution(&self) -> ares_core::blue_invalidation::ContainmentAttribution {
+        ares_core::blue_invalidation::ContainmentAttribution::from_blue_action(self.blue_enabled)
+    }
+
+    /// Whether a credential for the given principal has been observed revoked.
+    /// Comparison is case-insensitive on both fields.
+    pub fn is_credential_revoked(&self, username: &str, domain: &str) -> bool {
+        let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+        self.revoked_principals.contains_key(&key)
+    }
+
+    /// Whether the KDC itself declared this principal revoked, rather than the
+    /// revocation being inferred from repeated generic auth rejects.
+    pub fn is_kdc_declared_revocation(&self, username: &str, domain: &str) -> bool {
+        let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+        self.kdc_declared_revocations.contains(&key)
+    }
+
+    /// Whether a revocation on this principal is strong enough to delete
+    /// queued work that depends on it, as opposed to only hiding the
+    /// credential from the LLM.
+    ///
+    pub fn credential_revocation_deletes_queued_work(&self, username: &str, domain: &str) -> bool {
+        self.is_credential_revoked(username, domain)
+            && (self.is_blue_actuated_revocation(username, domain)
+                || self.is_kdc_declared_revocation(username, domain))
+    }
+
+    pub fn is_blue_actuated_revocation(&self, username: &str, domain: &str) -> bool {
+        let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+        self.blue_actuated_revocations.contains(&key)
+    }
+
+    /// Whether blue can be blamed for a drop on this specific credential.
+    ///
+    /// A live blue team that never touched this principal is no explanation
+    /// for it failing to authenticate, so this deliberately ignores
+    /// operation-wide blue enablement.
+    pub fn credential_containment_attribution(
+        &self,
+        username: &str,
+        domain: &str,
+    ) -> ares_core::blue_invalidation::ContainmentAttribution {
+        ares_core::blue_invalidation::ContainmentAttribution::from_blue_action(
+            self.is_blue_actuated_revocation(username, domain),
+        )
+    }
+
+    /// Whether the given IP has been observed cut off.
+    pub fn is_host_isolated(&self, ip: &str) -> bool {
+        self.isolated_hosts.contains_key(ip)
+    }
+
+    /// Whether krbtgt has been observed rotated in the given realm
+    /// (case-insensitive).
+    pub fn is_krbtgt_rotated(&self, domain: &str) -> bool {
+        self.krbtgt_rotated_at.contains_key(&domain.to_lowercase())
+    }
+
+    /// Whether a blue response actuator performed this realm's rotation,
+    /// rather than it being inferred from red's own `KRB_AP_ERR_MODIFIED`.
+    pub fn is_blue_actuated_krbtgt_rotation(&self, domain: &str) -> bool {
+        self.blue_actuated_krbtgt_rotations
+            .contains(&domain.to_lowercase())
+    }
+
+    /// Whether a rotation observation on this realm is strong enough to delete
+    /// queued work that depends on it, as opposed to only skipping it.
+    ///
+    /// Deletion is irreversible here: the deferred queue leaves the dropped
+    /// task's signature in place as a tombstone, so an inferred rotation that
+    /// deletes also blocks producers from ever re-emitting the same work.
+    pub fn krbtgt_rotation_deletes_queued_work(&self, domain: &str) -> bool {
+        self.is_krbtgt_rotated(domain) && self.is_blue_actuated_krbtgt_rotation(domain)
+    }
+
+    /// Whether blue can be blamed for a drop in this specific realm.
+    ///
+    /// A live blue team that never rotated this realm's krbtgt is no
+    /// explanation for a ticket failing to decrypt, so this deliberately
+    /// ignores operation-wide blue enablement.
+    pub fn krbtgt_containment_attribution(
+        &self,
+        domain: &str,
+    ) -> ares_core::blue_invalidation::ContainmentAttribution {
+        ares_core::blue_invalidation::ContainmentAttribution::from_blue_action(
+            self.is_blue_actuated_krbtgt_rotation(domain),
+        )
+    }
+
+    pub fn latest_krbtgt_source(&self) -> Option<&str> {
+        self.hashes
+            .iter()
+            .rev()
+            .find(|h| {
+                h.username.eq_ignore_ascii_case("krbtgt")
+                    && h.hash_type.to_lowercase().contains("ntlm")
+                    && !h.source.trim().is_empty()
+            })
+            .map(|h| h.source.trim())
+    }
+
+    /// Whether blue has revoked the certificate with the given serial.
+    /// Comparison is case-insensitive on the serial (hex).
+    pub fn is_certificate_revoked(&self, serial: &str) -> bool {
+        self.revoked_certificates
+            .contains_key(&serial.to_lowercase())
     }
 
     /// Check if a username is the delegating account for a constrained
@@ -222,19 +562,37 @@ impl StateInner {
     /// for S4U exploitation — spraying or secretsdump with their creds
     /// causes lockout before S4U can use them.
     pub fn is_delegation_account(&self, username: &str) -> bool {
-        let u = username.to_lowercase();
-        self.discovered_vulnerabilities.values().any(|vuln| {
-            let vtype = vuln.vuln_type.to_lowercase();
-            if vtype != "constrained_delegation" && vtype != "rbcd" {
-                return false;
-            }
-            vuln.details
-                .get("account_name")
-                .or_else(|| vuln.details.get("AccountName"))
-                .and_then(|v| v.as_str())
-                .map(|a| a.to_lowercase() == u)
-                .unwrap_or(false)
-        })
+        self.discovered_vulnerabilities
+            .values()
+            .filter(|vuln| is_delegation_vuln_type(&vuln.vuln_type))
+            .any(|vuln| {
+                vuln.details
+                    .get("account_name")
+                    .or_else(|| vuln.details.get("AccountName"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|a| a.eq_ignore_ascii_case(username))
+            })
+    }
+
+    /// Names of every account reserved for S4U, built once.
+    ///
+    /// Callers that test a whole credential list use this instead of calling
+    /// [`Self::is_delegation_account`] per credential, which rescans the entire
+    /// vulnerability map each time. ACL enumeration routinely puts tens of
+    /// thousands of entries in that map, so the per-credential form is
+    /// O(credentials × vulnerabilities) under the state read guard.
+    pub fn delegation_account_names(&self) -> std::collections::HashSet<String> {
+        self.discovered_vulnerabilities
+            .values()
+            .filter(|vuln| is_delegation_vuln_type(&vuln.vuln_type))
+            .filter_map(|vuln| {
+                vuln.details
+                    .get("account_name")
+                    .or_else(|| vuln.details.get("AccountName"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_lowercase)
+            })
+            .collect()
     }
 
     /// Check if a principal (`user@domain`) is quarantined due to lockout —
@@ -253,9 +611,86 @@ impl StateInner {
     /// Quarantine a principal for `QUARANTINE_DURATION_SECS` after a lockout
     /// signal. See [`is_principal_quarantined`] for which signals feed in.
     pub fn quarantine_principal(&mut self, username: &str, domain: &str) {
+        self.quarantine_principal_for(username, domain, QUARANTINE_DURATION_SECS);
+    }
+
+    /// Attempts already spent against each account in `domain` during the
+    /// current observation window. Returns 0 once the window has lapsed, at
+    /// which point AD has reset `badPwdCount` and the budget is whole again.
+    pub fn spray_attempts_used(&self, domain: &str) -> i64 {
+        self.spray_attempts
+            .get(&domain.to_lowercase())
+            .filter(|(_, expiry)| Utc::now() < *expiry)
+            .map(|(used, _)| *used)
+            .unwrap_or(0)
+    }
+
+    /// Record an observed account-lockout threshold for `domain`.
+    ///
+    /// Keeps the strictest value seen. A DC that answers 5 and a DC that
+    /// answers 0 ("no lockout") for the same domain means one of the reads is
+    /// wrong or the policy is per-OU; spraying against the looser answer is the
+    /// one mistake that locks out a live domain, so the tighter one wins.
+    pub fn record_password_policy(&mut self, domain: &str, lockout_threshold: i64) {
+        if lockout_threshold <= 0 {
+            return;
+        }
+        self.password_policies
+            .entry(domain.to_lowercase())
+            .and_modify(|t| *t = (*t).min(lockout_threshold))
+            .or_insert(lockout_threshold);
+    }
+
+    /// Observed lockout threshold for `domain`, if a policy read landed.
+    pub fn password_policy_threshold(&self, domain: &str) -> Option<i64> {
+        self.password_policies.get(&domain.to_lowercase()).copied()
+    }
+
+    /// Debit `attempts` from `domain`'s lockout budget for `window_secs`.
+    ///
+    /// Accumulates within a live window and restarts the count once the
+    /// previous window lapsed. The expiry is refreshed on every debit
+    /// because AD's observation window runs from the most recent bad
+    /// password, not from the first one in the burst.
+    pub fn record_spray_attempts(&mut self, domain: &str, attempts: i64, window_secs: i64) {
+        if attempts <= 0 {
+            return;
+        }
+        let key = domain.to_lowercase();
+        let now = Utc::now();
+        let carried = self
+            .spray_attempts
+            .get(&key)
+            .filter(|(_, expiry)| now < *expiry)
+            .map(|(used, _)| *used)
+            .unwrap_or(0);
+        let window = if window_secs > 0 {
+            window_secs
+        } else {
+            SPRAY_WINDOW_DEFAULT_SECS
+        };
+        self.spray_attempts.insert(
+            key,
+            (carried + attempts, now + chrono::Duration::seconds(window)),
+        );
+    }
+
+    /// Quarantine a principal for `duration_secs`. Caller chooses the window:
+    /// the default 5-min `QUARANTINE_DURATION_SECS` is appropriate for ordinary
+    /// auth-attempt lockouts where the next 5-min window probably clears the
+    /// AD lockout policy; a SPN-bearing service account observed locked from
+    /// password_spray should use the AD default (~30 min) instead so the
+    /// spray loop doesn't keep re-hammering the same locked principal across
+    /// neighbouring domains. Picks the longer of the existing and new expiry
+    /// so a 30-min extension never accidentally shortens an in-flight cooldown.
+    pub fn quarantine_principal_for(&mut self, username: &str, domain: &str, duration_secs: i64) {
         let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
-        let expiry = Utc::now() + chrono::Duration::seconds(QUARANTINE_DURATION_SECS);
-        self.quarantined_principals.insert(key, expiry);
+        let new_expiry = Utc::now() + chrono::Duration::seconds(duration_secs);
+        let final_expiry = match self.quarantined_principals.get(&key) {
+            Some(existing) if *existing > new_expiry => *existing,
+            _ => new_expiry,
+        };
+        self.quarantined_principals.insert(key, final_expiry);
     }
 
     pub fn mark_credential_capture_in_flight(&mut self, domain: &str) {
@@ -272,6 +707,41 @@ impl StateInner {
             return false;
         };
         Utc::now().signed_duration_since(*ts).num_seconds() < CAPTURE_IN_FLIGHT_TTL_SECS
+    }
+
+    /// Push a hash onto `state.hashes`, evicting the oldest low-value entry
+    /// when the vector is at or above `MAX_HASHES`. "Low-value" here means:
+    /// not `krbtgt`, not cracked, no trust-key flag, no AES256 key. If every
+    /// entry is high-value the push still lands (warn logged); the cap is
+    /// deliberately soft so we never drop a hash the attack chain actually
+    /// needs.
+    pub fn push_hash_capped(&mut self, hash: Hash) {
+        if self.hashes.len() >= MAX_HASHES {
+            let evict = self.hashes.iter().position(|h| {
+                h.username.to_lowercase() != "krbtgt"
+                    && h.cracked_password.is_none()
+                    && !h.is_trust_key
+                    && h.aes_key.is_none()
+            });
+            if let Some(idx) = evict {
+                let dropped = self.hashes.remove(idx);
+                tracing::debug!(
+                    username = %dropped.username,
+                    domain = %dropped.domain,
+                    hash_type = %dropped.hash_type,
+                    len_after = self.hashes.len(),
+                    cap = MAX_HASHES,
+                    "state.hashes evicted low-value entry at cap"
+                );
+            } else {
+                tracing::warn!(
+                    len = self.hashes.len(),
+                    cap = MAX_HASHES,
+                    "state.hashes at cap but every entry is high-value — allowing overflow"
+                );
+            }
+        }
+        self.hashes.push(hash);
     }
 
     /// Return a deduplicated list of currently-quarantined usernames in
@@ -307,7 +777,6 @@ impl StateInner {
     /// environments.
     pub fn resolve_dc_ip(&self, domain: &str) -> Option<String> {
         let domain_lower = domain.to_lowercase();
-        // Tier 1: explicit DC map (case-insensitive)
         if let Some(ip) = self.domain_controllers.get(&domain_lower).or_else(|| {
             self.domain_controllers
                 .iter()
@@ -316,20 +785,33 @@ impl StateInner {
         }) {
             return Some(ip.clone());
         }
-        // Tier 2: scan hosts for a DC matching this domain by FQDN suffix
         for host in &self.hosts {
-            if !(host.is_dc || host.detect_dc()) {
+            if !(host.is_dc || host.detect_dc()) || host.hostname.is_empty() {
                 continue;
             }
-            if host.hostname.is_empty() {
+            if host
+                .hostname
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case(&domain_lower)
+            {
+                return Some(host.ip.clone());
+            }
+        }
+        for host in &self.hosts {
+            if !(host.is_dc || host.detect_dc()) || host.hostname.is_empty() {
                 continue;
             }
-            let parts: Vec<&str> = host.hostname.split('.').collect();
-            if parts.len() >= 3 {
-                let host_domain = parts[1..].join(".").to_lowercase();
-                if host_domain == domain_lower {
-                    return Some(host.ip.clone());
-                }
+            let hostname_lower = host.hostname.trim_end_matches('.').to_lowercase();
+            if self
+                .domains
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(&hostname_lower))
+            {
+                continue;
+            }
+            let parts: Vec<&str> = hostname_lower.split('.').collect();
+            if parts.len() >= 3 && parts[1..].join(".") == domain_lower {
+                return Some(host.ip.clone());
             }
         }
         None
@@ -342,31 +824,14 @@ impl StateInner {
     /// `(domain, dc_ip)` pairs.
     pub fn all_domains_with_dcs(&self) -> Vec<(String, String)> {
         let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-
-        // Gather all known domain names (lowercased for dedup)
-        let mut all_domains: Vec<String> = Vec::new();
-        for d in self.domain_controllers.keys() {
-            all_domains.push(d.to_lowercase());
-        }
-        for d in &self.domains {
-            all_domains.push(d.to_lowercase());
-        }
-        for d in self.trusted_domains.keys() {
-            all_domains.push(d.to_lowercase());
-        }
-
-        for domain in all_domains {
-            if seen.contains(&domain) {
-                continue;
-            }
-            seen.insert(domain.clone());
-            if let Some(ip) = self.resolve_dc_ip(&domain) {
-                result.push((domain, ip));
-            }
-        }
-
-        result
+        self.domain_controllers
+            .keys()
+            .chain(&self.domains)
+            .chain(self.trusted_domains.keys())
+            .map(|d| d.to_lowercase())
+            .filter(|d| seen.insert(d.clone()))
+            .filter_map(|d| self.resolve_dc_ip(&d).map(|ip| (d, ip)))
+            .collect()
     }
 
     /// Find a cleartext credential from a trusted domain that can authenticate
@@ -708,6 +1173,26 @@ impl StateInner {
     }
 }
 
+/// Whether a vulnerability type reserves its account for S4U exploitation.
+///
+/// Compared without allocating: this runs once per vulnerability on a map that
+/// ACL enumeration fills with tens of thousands of entries, so lowercasing the
+/// type before the comparison allocated a String per entry per call and threw
+/// every one of them away.
+fn is_delegation_vuln_type(vuln_type: &str) -> bool {
+    vuln_type.eq_ignore_ascii_case("constrained_delegation")
+        || vuln_type.eq_ignore_ascii_case("rbcd")
+}
+
+pub fn krbtgt_da_path(source: &str) -> String {
+    let source = source.trim();
+    if source.is_empty() {
+        "krbtgt NTLM hash".to_string()
+    } else {
+        format!("{source} → krbtgt NTLM hash")
+    }
+}
+
 /// Parse a principal string of form `name` or `name@domain.fqdn`.
 /// Returns `(name, Some(domain_lower))` for the @-form, `(name, None)` for bare names.
 fn parse_principal(s: &str) -> (&str, Option<String>) {
@@ -731,7 +1216,6 @@ mod tests {
         assert!(!state.has_golden_ticket);
         assert!(!state.completed);
 
-        // All 19 dedup sets should be initialized
         for name in ALL_DEDUP_SETS {
             assert!(state.dedup.contains_key(*name), "Missing dedup set: {name}");
             assert!(state.dedup[*name].is_empty());
@@ -792,8 +1276,6 @@ mod tests {
         let removed = state.unmark_processed_by_prefix("does_not_exist", "x:");
         assert!(removed.is_empty());
     }
-
-    // --- assist-abandoned TTL ----------------------------------------
 
     #[test]
     fn assist_abandoned_starts_false() {
@@ -983,7 +1465,6 @@ mod tests {
             DEDUP_PETITPOTAM_UNAUTH,
             DEDUP_WINRM_LATERAL,
             DEDUP_GROUP_ENUMERATION,
-            DEDUP_KRBRELAYUP,
             DEDUP_SEARCHCONNECTOR,
             DEDUP_LSASSY_DUMP,
             DEDUP_RDP_LATERAL,
@@ -993,6 +1474,7 @@ mod tests {
             DEDUP_DNS_ENUM,
             DEDUP_DOMAIN_USER_ENUM,
             DEDUP_PTH_SPRAY,
+            DEDUP_LOCAL_AUTH_SWEEP,
             DEDUP_CERTIFRIED,
             DEDUP_DACL_ABUSE,
             DEDUP_SMBCLIENT_ENUM,
@@ -1003,8 +1485,10 @@ mod tests {
             DEDUP_MSSQL_RETRY,
             DEDUP_MSSQL_LINK_PIVOT,
             DEDUP_MSSQL_IMPERSONATION,
+            DEDUP_MSSQL_FAR_HOST_DUMP,
             DEDUP_SID_HISTORY,
             DEDUP_STALL_COLD_START,
+            DEDUP_ADMIN_HASH_UPGRADE,
         ];
         assert_eq!(expected.len(), ALL_DEDUP_SETS.len());
         for name in expected {
@@ -1040,6 +1524,105 @@ mod tests {
         assert!(state.is_delegation_account("john.smith"));
         assert!(state.is_delegation_account("John.Smith")); // case insensitive
         assert!(!state.is_delegation_account("sam.wilson"));
+    }
+
+    fn delegation_vuln(
+        id: &str,
+        vuln_type: &str,
+        key: &str,
+        account: &str,
+    ) -> (String, ares_core::models::VulnerabilityInfo) {
+        let mut details = std::collections::HashMap::new();
+        details.insert(key.to_string(), serde_json::json!(account));
+        (
+            id.to_string(),
+            ares_core::models::VulnerabilityInfo {
+                vuln_id: id.into(),
+                vuln_type: vuln_type.into(),
+                target: "192.168.58.240".into(),
+                discovered_by: "privesc".into(),
+                discovered_at: chrono::Utc::now(),
+                details,
+                recommended_agent: "privesc".into(),
+                priority: 8,
+            },
+        )
+    }
+
+    /// ACL enumeration fills this map with tens of thousands of entries whose
+    /// details also carry an `account_name`. Only the delegation types may
+    /// reserve an account for S4U — an ACL grant naming a principal must not.
+    #[test]
+    fn acl_vulnerabilities_never_reserve_an_account_for_s4u() {
+        let mut state = StateInner::new("op-1".into());
+        for i in 0..100 {
+            let (id, v) = delegation_vuln(
+                &format!("acl_genericall_alice_target{i}"),
+                "genericall",
+                "account_name",
+                "alice",
+            );
+            state.discovered_vulnerabilities.insert(id, v);
+        }
+        assert!(!state.is_delegation_account("alice"));
+        assert!(state.delegation_account_names().is_empty());
+    }
+
+    /// The hoisted set must agree with the per-credential predicate exactly,
+    /// including the mixed-case vuln type and the `AccountName` fallback key.
+    #[test]
+    fn delegation_name_set_matches_the_per_credential_predicate() {
+        let mut state = StateInner::new("op-1".into());
+        for (id, v) in [
+            delegation_vuln("rbcd_svc_sql", "RBCD", "AccountName", "SVC_SQL"),
+            delegation_vuln(
+                "cd_svc_web",
+                "constrained_delegation",
+                "account_name",
+                "svc_web",
+            ),
+            delegation_vuln("acl_alice", "writedacl", "account_name", "alice"),
+        ] {
+            state.discovered_vulnerabilities.insert(id, v);
+        }
+
+        let names = state.delegation_account_names();
+        for candidate in ["svc_sql", "SVC_SQL", "svc_web", "alice", "bob"] {
+            assert_eq!(
+                names.contains(&candidate.to_lowercase()),
+                state.is_delegation_account(candidate),
+                "set and predicate disagree on {candidate}"
+            );
+        }
+        assert!(state.is_delegation_account("svc_sql"));
+        assert!(!state.is_delegation_account("alice"));
+    }
+
+    /// A looser reading must never widen a threshold already observed: it is
+    /// the one mistake that locks out a live domain.
+    #[test]
+    fn password_policy_keeps_the_strictest_observed_threshold() {
+        let mut state = StateInner::new("op-1".into());
+        assert_eq!(state.password_policy_threshold("contoso.local"), None);
+
+        state.record_password_policy("CONTOSO.LOCAL", 5);
+        assert_eq!(state.password_policy_threshold("contoso.local"), Some(5));
+
+        state.record_password_policy("contoso.local", 10);
+        assert_eq!(state.password_policy_threshold("contoso.local"), Some(5));
+
+        state.record_password_policy("contoso.local", 3);
+        assert_eq!(state.password_policy_threshold("contoso.local"), Some(3));
+    }
+
+    /// `check_spray_budget` reads a non-positive threshold as "no lockout,
+    /// spray freely", so a 0 must never be stored as an observation.
+    #[test]
+    fn password_policy_ignores_non_positive_thresholds() {
+        let mut state = StateInner::new("op-1".into());
+        state.record_password_policy("contoso.local", 0);
+        state.record_password_policy("contoso.local", -1);
+        assert_eq!(state.password_policy_threshold("contoso.local"), None);
     }
 
     #[test]
@@ -1134,6 +1717,137 @@ mod tests {
     }
 
     #[test]
+    fn spray_attempts_accumulate_within_the_window() {
+        let mut state = StateInner::new("op-1".into());
+        assert_eq!(state.spray_attempts_used("contoso.local"), 0);
+
+        state.record_spray_attempts("contoso.local", 3, 300);
+        assert_eq!(state.spray_attempts_used("contoso.local"), 3);
+
+        state.record_spray_attempts("contoso.local", 2, 300);
+        assert_eq!(
+            state.spray_attempts_used("contoso.local"),
+            5,
+            "a second spray in the same window must add to the tally, not replace it"
+        );
+    }
+
+    #[test]
+    fn spray_attempts_are_scoped_per_domain_and_case_insensitive() {
+        let mut state = StateInner::new("op-1".into());
+        state.record_spray_attempts("CONTOSO.local", 4, 300);
+        assert_eq!(state.spray_attempts_used("contoso.LOCAL"), 4);
+        assert_eq!(state.spray_attempts_used("child.contoso.local"), 0);
+    }
+
+    #[test]
+    fn spray_attempts_lapse_with_the_observation_window() {
+        let mut state = StateInner::new("op-1".into());
+        // A window that has already closed — AD has reset badPwdCount, so the
+        // budget is whole again.
+        state.spray_attempts.insert(
+            "contoso.local".into(),
+            (4, Utc::now() - chrono::Duration::seconds(1)),
+        );
+        assert_eq!(state.spray_attempts_used("contoso.local"), 0);
+
+        // ...and a fresh debit starts the count over rather than carrying the
+        // lapsed 4 forward.
+        state.record_spray_attempts("contoso.local", 2, 300);
+        assert_eq!(state.spray_attempts_used("contoso.local"), 2);
+    }
+
+    #[test]
+    fn spray_attempts_ignores_a_zero_cost_call() {
+        let mut state = StateInner::new("op-1".into());
+        state.record_spray_attempts("contoso.local", 0, 300);
+        assert!(state.spray_attempts.is_empty());
+    }
+
+    #[test]
+    fn repeated_sprays_never_exceed_the_lockout_threshold() {
+        // The lockout regression, end to end. Policy is threshold 5 / 5-min
+        // observation window. Before the tally existed, every call re-reported
+        // attempts_used_per_account=0, so each one spent its full per-call cap
+        // and the second spray locked every account in the domain.
+        let mut state = StateInner::new("op-1".into());
+        let args = serde_json::json!({
+            "domain": "contoso.local",
+            "lockout_threshold": 5,
+            "use_common_passwords": true,
+        });
+
+        let mut spent = 0i64;
+        for _ in 0..5 {
+            let used = state.spray_attempts_used("contoso.local");
+            let cost = ares_tools::credential_access::spray_attempt_cost(&args, used) as i64;
+            state.record_spray_attempts("contoso.local", cost, 300);
+            spent += cost;
+        }
+
+        assert_eq!(
+            spent, 4,
+            "five sprays in one window must spend the budget once (threshold 5 \
+             minus the 1-attempt safety buffer), then refuse"
+        );
+        assert!(spent < 5, "must stay under the lockout threshold");
+    }
+
+    #[test]
+    fn repeated_blind_start_sprays_never_exceed_the_lockout_threshold() {
+        // op-20260727-230409, reproduced. A blind start has no credential, so
+        // `password_policy` never runs and the agent falls back to
+        // `acknowledge_no_policy=true` — the DEFAULT path under testes.sh, and
+        // the one the first fix left unguarded. Eight sprays each took a fresh
+        // 2-password allowance and locked svc_sql and Administrator twice in
+        // twelve minutes against a threshold of 5.
+        let mut state = StateInner::new("op-1".into());
+        let args = serde_json::json!({
+            "domain": "contoso.local",
+            "use_common_passwords": true,
+            "acknowledge_no_policy": true,
+        });
+
+        let mut spent = 0i64;
+        for _ in 0..8 {
+            let used = state.spray_attempts_used("contoso.local");
+            let cost = ares_tools::credential_access::spray_attempt_cost(&args, used) as i64;
+            state.record_spray_attempts("contoso.local", cost, 300);
+            spent += cost;
+        }
+
+        assert_eq!(
+            spent, 1,
+            "the no-policy allowance is a per-window total, and password_spray \
+             may take only its unreserved share of it (pre-fix this was 16)"
+        );
+
+        let uap = serde_json::json!({
+            "domain": "contoso.local",
+            "acknowledge_no_policy": true,
+        });
+        for _ in 0..8 {
+            let used = state.spray_attempts_used("contoso.local");
+            let cost = i64::from(ares_tools::credential_access::spray_budget_allows(
+                &uap, used,
+            ));
+            state.record_spray_attempts("contoso.local", cost, 300);
+            spent += cost;
+        }
+
+        assert_eq!(
+            spent, 2,
+            "op-20260801-134438: password_spray took the whole window and every \
+             username_as_password behind it was refused; reserving must hand \
+             that attempt back without widening the per-account total"
+        );
+        assert!(
+            spent < 5,
+            "must stay under a default 5-attempt AD lockout threshold"
+        );
+    }
+
+    #[test]
     fn quarantined_principals_in_domain_filters() {
         let mut state = StateInner::new("op-1".into());
         state.quarantine_principal("testuser1", "contoso.local");
@@ -1179,5 +1893,165 @@ mod tests {
 
         // Should not be quarantined (expired)
         assert!(!state.is_principal_quarantined("jdoe", "child.contoso.local"));
+    }
+
+    fn make_test_hash(username: &str, hash_value: &str) -> Hash {
+        Hash {
+            id: format!("h-{username}-{hash_value}"),
+            username: username.to_string(),
+            hash_value: hash_value.to_string(),
+            hash_type: "NTLM".to_string(),
+            domain: "contoso.local".to_string(),
+            cracked_password: None,
+            source: "test".to_string(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    #[test]
+    fn push_hash_capped_under_cap_just_appends() {
+        let mut state = StateInner::new("op-1".into());
+        for i in 0..10 {
+            state.push_hash_capped(make_test_hash(&format!("user{i}"), &format!("{i:032x}")));
+        }
+        assert_eq!(state.hashes.len(), 10);
+    }
+
+    #[test]
+    fn push_hash_capped_evicts_oldest_low_value_at_cap() {
+        let mut state = StateInner::new("op-1".into());
+        // Fill to cap with uncracked, non-krbtgt, non-trust-key, no-AES entries.
+        for i in 0..MAX_HASHES {
+            state.push_hash_capped(make_test_hash(&format!("user{i}"), &format!("{i:032x}")));
+        }
+        assert_eq!(state.hashes.len(), MAX_HASHES);
+        let first_before = state.hashes[0].username.clone();
+        // Push one more — oldest low-value entry (index 0) should be evicted.
+        state.push_hash_capped(make_test_hash("newcomer", "deadbeef"));
+        assert_eq!(state.hashes.len(), MAX_HASHES);
+        assert_ne!(state.hashes[0].username, first_before);
+        assert_eq!(state.hashes.last().unwrap().username, "newcomer");
+    }
+
+    #[test]
+    fn push_hash_capped_never_evicts_krbtgt() {
+        let mut state = StateInner::new("op-1".into());
+        // krbtgt at index 0, then fill with low-value entries.
+        let mut krb = make_test_hash("krbtgt", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        krb.hash_type = "NTLM".into();
+        state.push_hash_capped(krb);
+        for i in 0..MAX_HASHES {
+            state.push_hash_capped(make_test_hash(&format!("user{i}"), &format!("{i:032x}")));
+        }
+        // krbtgt must still be present.
+        assert!(state
+            .hashes
+            .iter()
+            .any(|h| h.username.eq_ignore_ascii_case("krbtgt")));
+        assert_eq!(state.hashes.len(), MAX_HASHES);
+    }
+
+    #[test]
+    fn push_hash_capped_never_evicts_cracked() {
+        let mut state = StateInner::new("op-1".into());
+        let mut cracked = make_test_hash("victim", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        cracked.cracked_password = Some("P@ssw0rd!".into());
+        state.push_hash_capped(cracked);
+        for i in 0..MAX_HASHES {
+            state.push_hash_capped(make_test_hash(&format!("user{i}"), &format!("{i:032x}")));
+        }
+        assert!(state
+            .hashes
+            .iter()
+            .any(|h| h.username == "victim" && h.cracked_password.is_some()));
+    }
+
+    #[test]
+    fn push_hash_capped_never_evicts_trust_key_or_aes() {
+        let mut state = StateInner::new("op-1".into());
+        let mut trust = make_test_hash("CONTOSO$", "cccccccccccccccccccccccccccccccc");
+        trust.is_trust_key = true;
+        state.push_hash_capped(trust);
+        let mut aes = make_test_hash("svc_aes", "dddddddddddddddddddddddddddddddd");
+        aes.aes_key = Some("a".repeat(64));
+        state.push_hash_capped(aes);
+        for i in 0..MAX_HASHES {
+            state.push_hash_capped(make_test_hash(&format!("user{i}"), &format!("{i:032x}")));
+        }
+        assert!(state.hashes.iter().any(|h| h.is_trust_key));
+        assert!(state.hashes.iter().any(|h| h.aes_key.is_some()));
+    }
+
+    #[test]
+    fn push_hash_capped_all_high_value_overflows() {
+        let mut state = StateInner::new("op-1".into());
+        // Fill entirely with cracked entries (all high-value).
+        for i in 0..MAX_HASHES {
+            let mut h = make_test_hash(&format!("user{i}"), &format!("{i:032x}"));
+            h.cracked_password = Some("pw".into());
+            state.push_hash_capped(h);
+        }
+        // Add one more — cap is soft, all entries are protected, so we overflow.
+        let mut extra = make_test_hash("extra", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        extra.cracked_password = Some("pw".into());
+        state.push_hash_capped(extra);
+        assert_eq!(state.hashes.len(), MAX_HASHES + 1);
+    }
+
+    fn make_dc_host(ip: &str, hostname: &str) -> Host {
+        Host {
+            ip: ip.to_string(),
+            hostname: hostname.to_string(),
+            os: String::new(),
+            roles: vec!["domain_controller".to_string()],
+            services: vec![],
+            is_dc: true,
+            owned: false,
+        }
+    }
+
+    #[test]
+    fn resolve_dc_ip_zone_apex_does_not_transpose_parent_and_child() {
+        let mut state = StateInner::new("op-1".into());
+        state.domains.push("contoso.local".into());
+        state.domains.push("north.contoso.local".into());
+        state
+            .hosts
+            .push(make_dc_host("192.168.58.240", "north.contoso.local"));
+        state
+            .hosts
+            .push(make_dc_host("192.168.58.243", "contoso.local"));
+
+        assert_eq!(
+            state.resolve_dc_ip("contoso.local"),
+            Some("192.168.58.243".to_string()),
+            "parent domain must resolve to the parent DC, not the child"
+        );
+        assert_eq!(
+            state.resolve_dc_ip("north.contoso.local"),
+            Some("192.168.58.240".to_string()),
+            "child domain must resolve to the child DC"
+        );
+    }
+
+    #[test]
+    fn resolve_dc_ip_normal_fqdn_still_strips_machine_label() {
+        let mut state = StateInner::new("op-1".into());
+        state.domains.push("contoso.local".into());
+        state
+            .hosts
+            .push(make_dc_host("192.168.58.10", "dc01.contoso.local"));
+
+        assert_eq!(
+            state.resolve_dc_ip("contoso.local"),
+            Some("192.168.58.10".to_string())
+        );
     }
 }

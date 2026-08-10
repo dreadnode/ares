@@ -1,0 +1,19 @@
+---
+# Install /etc/logrotate.d/ares on a live Ares attack box without an AMI
+# rebake. Targets a running EC2 instance via the community.aws.aws_ssm
+# connection plugin — no SSH, no bastion. Reuses the same
+# cowdogmoo.workstation.logging role and vars/logrotate.yml that
+# goad_attack_box.yml applies at AMI bake time, so bake-time and
+# runtime installs cannot drift.
+#
+# Driven by: task ec2:logrotate EC2_NAME=kali-ares
+- name: Install logrotate config on Ares attack box (runtime)
+  hosts: ares_attack_box
+  gather_facts: true
+  become: true
+
+  vars_files:
+    - vars/logrotate.yml
+
+  roles:
+    - role: cowdogmoo.workstation.logging

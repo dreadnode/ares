@@ -55,6 +55,41 @@
     - "{{ redis_ares_config_dir }}"
   become: true
 
+# Transitional: the worker template was renamed ares-worker@ -> ares@ (PR #226).
+# Disable + remove any lingering old-named instances so they don't double-bind
+# the NATS role subjects. Safe to keep; becomes a no-op once no host has it.
+- name: Stat legacy ares-worker@ template unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/ares-worker@.service
+  register: redis_legacy_worker_unit
+
+- name: Disable + stop legacy ares-worker@ instances
+  ansible.builtin.systemd:
+    name: "ares-worker@{{ item }}.service"
+    enabled: false
+    state: stopped
+  loop: "{{ redis_ares_worker_roles }}"
+  become: true
+  failed_when: false
+  when: redis_legacy_worker_unit.stat.exists
+
+- name: Remove legacy ares-worker@ template unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/ares-worker@.service
+    state: absent
+  become: true
+  when: redis_legacy_worker_unit.stat.exists
+  notify: Reload systemd
+
+- name: Install Ares system slice (global fleet cgroup cap)
+  ansible.builtin.template:
+    src: system-ares.slice.j2
+    dest: /etc/systemd/system/system-ares.slice
+    mode: '0644'
+  become: true
+  when: redis_install_ares_worker_unit
+  notify: Reload systemd
+
 - name: Install Ares worker systemd template unit
   ansible.builtin.template:
     src: ares@.service.j2
@@ -62,7 +97,19 @@
     mode: '0644'
   become: true
   when: redis_install_ares_worker_unit
-  notify: Reload systemd
+  notify:
+    - Reload systemd
+    - Restart ares workers
+
+- name: Enable and start Ares worker instances
+  ansible.builtin.systemd:
+    name: "ares@{{ item }}.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ redis_ares_worker_roles }}"
+  when: redis_install_ares_worker_unit
+  become: true
 
 - name: Verify Redis is responding
   ansible.builtin.command:

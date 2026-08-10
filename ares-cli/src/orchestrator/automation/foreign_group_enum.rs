@@ -41,7 +41,6 @@ fn collect_foreign_group_work(state: &StateInner) -> Vec<ForeignGroupWork> {
             continue;
         };
 
-        // Find a credential for this domain
         let cred = state
             .credentials
             .iter()

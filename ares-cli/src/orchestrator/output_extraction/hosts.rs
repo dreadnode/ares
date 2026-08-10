@@ -95,11 +95,9 @@ pub fn extract_hosts(output: &str) -> Vec<Host> {
             continue;
         }
 
-        // Fallback simple line
         if let Some(caps) = RE_SMB_SIMPLE.captures(stripped) {
             let ip = caps.get(1).unwrap().as_str().to_string();
             let host_col = caps.get(2).unwrap().as_str();
-            // Skip table header words
             let skip = ["share", "name", "permissions", "remark"];
             if skip.contains(&host_col.to_lowercase().as_str()) {
                 continue;

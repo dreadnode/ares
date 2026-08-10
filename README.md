@@ -19,9 +19,11 @@ LLM-coordinated autonomous security operations platform with two modes:
 
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
+- [EC2 workflow (kali-ares)](#ec2-workflow-kali-ares)
 - [CLI Reference](#cli-reference)
 - [Red Team Operations](#red-team-operations)
 - [Blue Team Investigations](#blue-team-investigations)
+- [Benchmark Replay](#benchmark-replay)
 - [Infrastructure](#infrastructure)
 - [Development](#development)
 - [Configuration](#configuration)
@@ -61,7 +63,7 @@ results back. The orchestrator never executes exploitation tools directly.
 - **RECON**: Network scanning, BloodHound, user/share enumeration
 - **CREDENTIAL_ACCESS**: secretsdump, kerberoasting, AS-REP roasting, password spray
 - **CRACKER**: Offline hash cracking with hashcat/john
-- **ACL**: BloodHound path analysis, ACL abuse (shadow credentials, WriteDACL)
+- **ACL**: BloodHound collection, ACL edge enumeration and ranked candidate paths, per-edge ACL primitives (shadow credentials, WriteDACL)
 - **PRIVESC**: ADCS (ESC1-8), delegation attacks, MSSQL exploitation
 - **LATERAL**: PSExec/WMI/WinRM, credential harvesting from compromised hosts
 - **COERCION**: Responder, ntlmrelayx, PetitPotam
@@ -125,6 +127,91 @@ cp .env.example .env
 
 # Verify configuration
 task ares:config:check
+```
+
+## EC2 workflow (kali-ares)
+
+The default deployment for ops is EC2 (`kali-ares` in the `lab` account,
+`us-west-1`). Observability lives in a separate EKS cluster; the box reaches
+it directly, the laptop reaches it via kubectl port-forward.
+
+**One-time setup:**
+
+```bash
+# 1. AWS SSO — lab (kali-ares + secret) + the observability account
+aws sso login --profile lab
+aws sso login --profile infrastructure
+
+# 2. Register the observability EKS context (for obs:forward). The alias must
+#    match OBS_CONTEXT (default `obs`; override it in .env).
+aws eks update-kubeconfig --profile infrastructure --region <obs-region> \
+  --name <obs-cluster> --alias obs
+
+# 3. Apple Silicon: enable Docker Desktop → Settings → General →
+#    "Use Rosetta for x86_64/amd64 emulation" (task ec2:deploy cross-compiles
+#    amd64 under Rosetta; QEMU segfaults rustc)
+
+# 4. Populate .env from AWS Secrets Manager
+./scripts/env-from-secrets.sh
+```
+
+**Common gotchas:**
+
+- Tailscale MagicDNS (100.100.100.100) will eat EKS API endpoint lookups if
+  the node isn't approved by the tailnet admin. Sign in to Tailscale or add
+  a `/etc/hosts` override for the EKS API endpoint.
+- `task ec2:deploy` must use an S3 bucket in the **same account** as
+  `kali-ares` (currently the lab account). Pass `S3_BUCKET=<your-bucket>`
+  when deploying, or set it in `.env`.
+
+**Run an op:**
+
+```bash
+task run                              # fire-and-forget (blue enabled by default)
+task run WAIT=true                    # wait for op completion, auto-fetch red report
+task run WAIT=true CAPTURE=true       # wait + capture Loki snapshot to S3 (waits
+                                      #   for Loki flush, ~5 min after op end);
+                                      #   prints the exact benchmark:replay command
+```
+
+**Run an op with the code you just wrote:**
+
+`task run` launches against whatever binary is already on the box. When you are
+testing a change, use `ec2:e2e` instead — it builds and deploys, proves the
+deployed binary came from this build (and, with `GATE_STRING`, that it contains
+your edit), restarts the workers, clears stale ops, launches, waits for both
+teams to finish, and fetches the red and blue reports.
+
+```bash
+task ec2:e2e                                    # blind start against dreadgoad
+task ec2:e2e GATE_STRING='a log line you added' # also assert your edit shipped
+task ec2:e2e CRED_USER=alice CRED_PASS='...'    # assumed-breach start
+task ec2:e2e SKIP_DEPLOY=true                   # reuse the on-box binary
+```
+
+It refuses to build from a checkout behind its upstream (`ALLOW_STALE=true` to
+override) and refuses to target a host whose Name tag contains `prod`
+(`ALLOW_PROD=true`). Full knob list: `.taskfiles/ec2/scripts/e2e-op.sh`.
+
+**Evaluate blue via replay:**
+
+```bash
+# Provisions a fresh replay stack, imports the captured Loki timeline,
+# runs a blue investigation against it, scores, tears down. Deterministic —
+# rerun anytime without re-running red.
+task benchmark:replay OP_ID=op-YYYYMMDD-HHMMSS
+```
+
+Reports land in `./reports/blue/investigations/inv-*.md` with IOC-detection
+score, MITRE technique coverage, and grade.
+
+**Blue tooling on the laptop (optional):**
+
+```bash
+# Port-forward Loki+Grafana to localhost so ares blue commands
+# work from the laptop.
+task obs:forward     # keep running in a separate terminal
+task obs:status      # health check the tunnels
 ```
 
 ## CLI Reference
@@ -273,7 +360,7 @@ ares --k8s ares-red ops export-detection --latest
 
 1. **Initial Access** - RECON scans, COERCION starts Responder, CREDENTIAL_ACCESS sprays
 2. **Enumeration** - BloodHound, Kerberoasting, AS-REP roasting, hash cracking
-3. **Privilege Escalation** - ADCS exploitation, delegation attacks, ACL abuse
+3. **Privilege Escalation** - ADCS exploitation, delegation attacks, ACL edge abuse (individual rights; end-to-end ACL escalation is not yet demonstrated)
 4. **Lateral Movement** - PSExec/WMI/WinRM, credential harvesting on compromised hosts
 5. **Domain Dominance** - DCSync, golden ticket generation, operation report
 
@@ -313,6 +400,9 @@ task blue:once LATEST=true
 # Or via K8s multi-agent orchestrator
 task blue:multi:remote LATEST=true
 
+# Or submit one alert by hand (BLUE_TRANSPORT picks the backend)
+task blue:submit ALERT=alert.json
+
 # Monitor progress
 task blue:multi:status LATEST=true
 task blue:multi:operation-status LATEST=true WATCH=10
@@ -325,22 +415,89 @@ task blue:reports:consolidate LATEST=true
 
 ### Key Tasks
 
-| Task                       | Description                              |
-| -------------------------- | ---------------------------------------- |
-| `blue:once`                | Single investigation from red op (local) |
-| `blue:once:remote`         | Single investigation (K8s)               |
-| `blue:multi:remote`        | Multi-agent investigation (K8s)          |
-| `blue:investigate`         | Submit a specific alert JSON file        |
-| `blue:poll`                | Continuous poll mode                     |
-| `blue:multi:status`        | Investigation status                     |
-| `blue:multi:evidence`      | Collected evidence                       |
-| `blue:multi:techniques`    | MITRE techniques identified              |
-| `blue:multi:logs`          | Follow blue team logs                    |
-| `blue:reports:consolidate` | Generate report from Redis state         |
-| `blue:playbook`            | Export detection playbook                |
-| `blue:multi:cleanup`       | Clean up old investigations              |
+| Task                       | Description                                  |
+| -------------------------- | -------------------------------------------- |
+| `blue:once`                | Single investigation from red op (local)     |
+| `blue:multi:remote`        | Multi-agent investigation (K8s)              |
+| `blue:submit`              | Submit a specific alert JSON file            |
+| `blue:poll`                | Continuous poll mode                         |
+| `blue:multi:status`        | Investigation status                         |
+| `blue:multi:evidence`      | Collected evidence                           |
+| `blue:multi:techniques`    | MITRE techniques identified                  |
+| `blue:multi:logs`          | Follow blue team logs                        |
+| `blue:reports:consolidate` | Generate report from Redis state             |
+| `blue:playbook`            | Export the detection playbook as JSON        |
+| `blue:multi:cleanup`       | Clean up old investigations                  |
+
+Every `blue:*` task picks its backend from `BLUE_TRANSPORT` — `ec2` (default,
+proxied over SSM), `k8s` (`kubectl exec`), or `local` (this host, which needs
+Redis and NATS port-forwarded here).
 
 See [Blue Team Documentation](docs/blue.md) for full command reference.
+
+## Benchmark Replay
+
+Snapshot a completed red op's observability state and re-run the blue team
+against it, so iterative blue-side changes are comparable across runs. The
+workflow splits by concern:
+
+- `ares benchmark capture` — dumps Loki, Prometheus (as TSDB blocks), Grafana
+  dashboards, and fired alerts to S3. `--wait-for-flush` blocks until Loki's
+  ingester lands the attack window (otherwise the snapshot silently misses it).
+- `task benchmark:replay:provision` / `:teardown` — EC2 lifecycle for the
+  replay-stack box (all AWS-CLI orchestration in Taskfile, not Rust).
+- `ares benchmark run --stack-ip <ip>` — submits the investigation, polls
+  Redis, computes the score. `--seed` / `--temperature` / `--replicates` cut
+  LLM sampling noise so a real score change is distinguishable from variance.
+- `task benchmark:replay:run STACK_IP=<ip> OP_ID=<op>` — runs one investigation
+  against an already-provisioned stack, no teardown. Reuses the stack across
+  many runs.
+- `task benchmark:replay OP_ID=<op>` — end-to-end wrapper: provision → run →
+  teardown (deferred via shell `trap`, fires on failure too).
+- `task benchmark:replay:loop OP_ID=<op> ITERATIONS=<n>` — provision once,
+  iterate N times, teardown. Optional `HOOK=<cmd>` runs between iterations
+  with `STACK_IP` / `OP_ID` / `ITERATION` exported — for a tuning driver
+  (e.g. Vibe Gepa) to rewrite prompts in place without reprovisioning.
+- `task benchmark:generalize` — sweeps the held-out attack set from
+  `benchmarks/holdout.yaml` and reports per-op + aggregate score. The
+  held-out corpus is off-limits to any tuning process; it's the only
+  measure of generalization.
+
+```bash
+# Capture from a completed op
+ares benchmark capture op-20260706-123045 --wait-for-flush
+
+# List captured snapshots
+ares benchmark list
+
+# End-to-end replay
+task benchmark:replay OP_ID=op-20260706-123045
+
+# Or split provision/run/teardown when iterating against one stack
+eval "$(task benchmark:replay:provision OP_ID=op-20260706-123045 | grep -E '^(STACK_IP|INSTANCE_ID)=')"
+task benchmark:replay:run STACK_IP="$STACK_IP" OP_ID=op-20260706-123045
+task benchmark:replay:teardown INSTANCE_ID="$INSTANCE_ID"
+
+# Tuning loop: 8 iterations against a warm stack, prompt update between each
+task benchmark:replay:loop OP_ID=op-20260706-123045 ITERATIONS=8 \
+  HOOK='python -m vibe_gepa.update --op-id "$OP_ID" --iter "$ITERATION"'
+
+# K-of-N averaging: 5 replicates against a warm stack, seeded for determinism
+# Mean/stddev/min/max land in <output-dir>/<session>-summary.json
+task benchmark:replay:run STACK_IP="$STACK_IP" OP_ID=op-20260706-123045 \
+  REPLICATES=5 SEED=42 OUTPUT_DIR=./reports
+
+# Generalization sweep against the held-out set
+task benchmark:generalize FAIL_UNDER=0.6
+```
+
+Provisioning prefers a pre-baked `ares-replay-stack` AMI
+(`warpgate build ares-replay-stack --only 'ami.*'`); it falls back to stock
+AL2023 if none is published (set `BENCHMARK_REQUIRE_BAKED_AMI=1` to fail
+instead).
+
+See [Benchmark Replay Operator Guide](docs/benchmark-replay.md) for env-var
+setup, replay modes (`timeline` vs `static`), AMI baking, and troubleshooting.
 
 ## Infrastructure
 
@@ -357,14 +514,14 @@ config/                           # Configuration files
 
 ansible/                          # Ansible collection: dreadnode.nimbus_range v1.5.0
   playbooks/ares/                 # Agent provisioning playbooks
-  roles/                          # 14 roles (8 agent tool roles + base + infra)
+  roles/                          # base + infra roles (tool roles live in l50.arsenal)
 
-warpgate-templates/               # Container image build templates
-  ares-python-base/               # Base: Kali + security tool dependencies
-  ares-python-orchestrator/       # Orchestrator: Rust binary + Redis
-  ares-python-worker/             # Generic worker
-  ares-python-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
-  ares-python-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
+warpgate-templates/templates/     # Container image build templates
+  ares-base/                      # Base: Kali + security tool dependencies
+  ares-orchestrator/              # Orchestrator: Rust binary + Redis
+  ares-worker/                    # Generic worker
+  ares-{recon,credential-access,cracker,acl,privesc,lateral-movement,coercion}-agent/
+  ares-blue-{agent,triage-agent,threat-hunter-agent,lateral-analyst-agent}/
 
 infra/                            # Terragrunt deployment configs
 modules/                          # Terraform modules
@@ -380,14 +537,22 @@ task rust:test               # tests
 task rust:check              # compile check
 
 # Deploy to K8s
-task remote:rust:deploy              # cross-compile + kubectl cp
+task remote:rust:build               # cross-compile for the cluster's arch
+task remote:rust:deploy              # kubectl cp the binary onto the pods
+task remote:rust:deploy:quick        # build + deploy in one step
 task remote:rust:deploy:config       # push config YAML as ConfigMap
 task remote:check                    # verify binary sync
 
 # Deploy to EC2
-task ec2:deploy                      # cross-compile + S3 + SSM install
+task ec2:deploy                      # build + S3 + SSM install
 task ec2:deploy:config               # push config.yaml
 ```
+
+`remote:rust:build` prefers `cargo-zigbuild` on every host and falls back to
+`cross`. Install it (`cargo install cargo-zigbuild`) before deploying to K8s
+from an Apple Silicon Mac — `cross` runs the toolchain under qemu-user
+emulation there, where rustc frequently crashes, and unlike `ec2:deploy` there
+is no on-cluster build box to fall back to.
 
 ### Container Images
 
@@ -395,8 +560,8 @@ Built with [Warpgate](https://github.com/cowdogmoo/warpgate). Each template
 uses Ansible playbooks for tool provisioning:
 
 ```bash
-PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-python-base
-PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/ares-python-recon-agent
+PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/templates/ares-base
+PROVISION_REPO_PATH=./ansible warpgate build warpgate-templates/templates/ares-recon-agent
 ```
 
 See [Infrastructure Reference](docs/infrastructure.md) for full deployment
@@ -438,7 +603,7 @@ task remote:status
 
 Full reset on an EC2 instance: stop workers and any running op, deploy
 fresh binaries, wipe Redis, restart workers, then launch a new operation.
-EC2 equivalent of the K8s `task -y red:multi:sync:align && task -y red:multi`
+EC2 equivalent of the K8s `task -y k8s:reset && task -y k8s:deploy && task -y red:multi`
 shortcut.
 
 `ec2:deploy` requires `S3_BUCKET` (binary staging bucket) — export it or
@@ -467,10 +632,11 @@ Clamp before running `ec2:deploy`: `ulimit -n 65536`.
 
 ### Config File
 
-The master config lives at `config/ares.yaml`. It defines:
+The master config lives at `config/ares.yaml` and is the **single source of truth** for the model. It defines:
 
 - **[Attack strategy](docs/strategy.md)** - technique weights, path diversity, completion modes
 - Per-role LLM model assignments
+- Optional LLM endpoint overrides (`llm.ollama_base_url` / `llm.openai_base_url`)
 - Agent capabilities and tool inventories
 - Operation timeouts and limits
 - Vulnerability exploitation priorities
@@ -483,6 +649,33 @@ ares config set-model --all gpt-5.2
 ares config validate
 ```
 
+#### Changing the model
+
+Edit `config/ares.yaml` once — everything else derives from it, so you never
+hand-edit Taskfiles or the attacker env file:
+
+```bash
+task config:set-model-all -- anthropic/claude-opus-4-8   # writes agents.*.model
+```
+
+- **Taskfile defaults** (`MODEL`, proxmox `DEFAULT_MODEL`) are read from
+  `agents.orchestrator.model` at runtime — no hardcoded value. A per-invocation
+  `MODEL=<spec>` still overrides.
+- **Attacker VM env** (`/etc/default/ares`, which wins at runtime) is regenerated
+  from config by `task proxmox:deploy:env` — run via `task proxmox:deploy`
+  (build → push → env → restart) or standalone followed by `deploy:restart`.
+
+For local / OpenAI-compatible models, also set the endpoint in the `llm:` block
+(commented out by default). `deploy:env` writes the matching `*_BASE_URL` for the
+active provider and **strips the stale one** so a hosted API never inherits a dead
+LAN endpoint:
+
+```yaml
+llm:
+  # ollama_base_url: "http://192.168.58.25:11434"   # for ollama/<model>
+  # openai_base_url: "http://192.168.58.25:8080/v1" # for openai/<model> (llama-server, vLLM, Gemini-compat)
+```
+
 ### Environment Variables
 
 **LLM Providers** (at least one required):
@@ -491,21 +684,32 @@ ares config validate
 | ------------------- | ------------------------ | --------------------------------- |
 | `ANTHROPIC_API_KEY` |                          | Anthropic API key (Claude models) |
 | `OPENAI_API_KEY`    |                          | OpenAI API key (GPT models)       |
-| `OLLAMA_BASE_URL`   | `http://localhost:11434` | Local Ollama server URL           |
+| `OLLAMA_BASE_URL`   | `http://localhost:11434` | Ollama server URL (`ollama/<model>`)              |
+| `OPENAI_BASE_URL`   |                          | Override for OpenAI-compatible endpoints (llama-server, vLLM, Gemini's `/v1beta/openai`) |
+
+> On the proxmox attacker VM these base URLs are populated in `/etc/default/ares`
+> by `task proxmox:deploy:env` from the `llm:` block in `config/ares.yaml` — see
+> [Changing the model](#changing-the-model).
 
 **Model Selection:**
 
-| Variable                  | Default | Description                                                             |
-| ------------------------- | ------- | ----------------------------------------------------------------------- |
-| `ARES_LLM_MODEL`          |         | Primary model (`anthropic/<model>`, `openai/<model>`, `ollama/<model>`) |
-| `ARES_ORCHESTRATOR_MODEL` |         | Override model for orchestrator                                         |
-| `ARES_WORKER_MODEL`       |         | Override model for workers                                              |
-| `ARES_BLUE_LLM_MODEL`     |         | Override model for blue team                                            |
-| `ARES_MODEL`              |         | Generic fallback for both sides                                         |
-| `ARES_AGENT_<ROLE>_MODEL` |         | Per-role override (e.g. `ARES_AGENT_RECON_MODEL`)                       |
+The base model comes from `config/ares.yaml` (see [Changing the model](#changing-the-model)).
+These env vars override it; they apply in different contexts rather than as one
+linear chain:
 
-Precedence (highest first):
-`ARES_AGENT_<ROLE>_MODEL` > `ARES_ORCHESTRATOR_MODEL`/`ARES_WORKER_MODEL` > `ARES_MODEL` > `ARES_LLM_MODEL` > config file.
+| Variable                     | Applies to                  | Description                                                                 |
+| ---------------------------- | --------------------------- | -------------------------------------------------------------------------- |
+| `ARES_LLM_MODEL`             | orchestrator process        | Wins over the config YAML at runtime. Auto-synced from config by `proxmox:deploy:env`. |
+| `ARES_BLUE_LLM_MODEL`        | blue team orchestrator      | Blue-side model (falls back to the red model if unset).                     |
+| `ARES_MODEL_FOR_<ROLE>`      | orchestrator (per role)     | Routes one role to a cheaper/different model, e.g. `ARES_MODEL_FOR_RECON=openai/gpt-5-mini`. Logged at INFO when it fires. |
+| `ARES_MODEL_FOR_DEFAULT`     | orchestrator (per role)     | Applies to roles not individually overridden by `ARES_MODEL_FOR_<ROLE>`.    |
+| `ARES_ORCHESTRATOR_MODEL` / `ARES_MODEL` | `ops submit` (no `--model`) | Fallback the submit CLI uses when `--model` is omitted: `--model` > `ARES_ORCHESTRATOR_MODEL` > `ARES_MODEL`. |
+
+Precedence is per-context, not a single chain:
+
+- **`ops submit`** picks the op's model: `--model` flag > `ARES_ORCHESTRATOR_MODEL` > `ARES_MODEL`.
+- **orchestrator process** (standalone / proxmox): `ARES_LLM_MODEL` > `config/ares.yaml`.
+- **per-role** (within the orchestrator): `ARES_MODEL_FOR_<ROLE>` > `ARES_MODEL_FOR_DEFAULT` > the resolved base model.
 
 **Infrastructure:**
 
@@ -555,7 +759,7 @@ Precedence (highest first):
 
 Ares supports OpenTelemetry for traces and metrics, with console and OTLP
 export. Grafana integration provides dashboards for operation monitoring
-via the [Grafana MCP](docs/grafana_mcp_usage.md) server.
+via the [Grafana MCP](docs/grafana-mcp.md) server.
 
 ## Contributing
 

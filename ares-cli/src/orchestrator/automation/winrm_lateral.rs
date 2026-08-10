@@ -30,7 +30,6 @@ fn collect_winrm_lateral_work(state: &StateInner) -> Vec<WinRmWork> {
     let mut items = Vec::new();
 
     for host in &state.hosts {
-        // Check if host has WinRM indicators in services
         let has_winrm = host.services.iter().any(|s| {
             let sl = s.to_lowercase();
             sl.contains("5985") || sl.contains("5986") || sl.contains("winrm")
@@ -67,12 +66,19 @@ fn collect_winrm_lateral_work(state: &StateInner) -> Vec<WinRmWork> {
             continue;
         };
 
+        let vuln_id = state
+            .discovered_vulnerabilities
+            .values()
+            .find(|v| v.vuln_type.eq_ignore_ascii_case("winrm_access") && v.target == host.ip)
+            .map(|v| v.vuln_id.clone());
+
         items.push(WinRmWork {
             dedup_key,
             target_ip: host.ip.clone(),
             hostname: host.hostname.clone(),
             domain,
             credential: cred,
+            vuln_id,
         });
     }
 
@@ -104,7 +110,7 @@ pub async fn auto_winrm_lateral(dispatcher: Arc<Dispatcher>, mut shutdown: watch
         };
 
         for item in work {
-            let payload = json!({
+            let mut payload = json!({
                 "technique": "winrm_exec",
                 "target_ip": item.target_ip,
                 "hostname": item.hostname,
@@ -115,6 +121,9 @@ pub async fn auto_winrm_lateral(dispatcher: Arc<Dispatcher>, mut shutdown: watch
                     "domain": item.credential.domain,
                 },
             });
+            if let Some(ref vid) = item.vuln_id {
+                payload["vuln_id"] = json!(vid);
+            }
 
             let priority = dispatcher.effective_priority("winrm_lateral");
             match dispatcher
@@ -156,6 +165,7 @@ struct WinRmWork {
     hostname: String,
     domain: String,
     credential: ares_core::models::Credential,
+    vuln_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -312,6 +322,7 @@ mod tests {
             hostname: "srv01.contoso.local".into(),
             domain: "contoso.local".into(),
             credential: cred,
+            vuln_id: None,
         };
 
         assert_eq!(work.dedup_key, "winrm:192.168.58.30");
@@ -365,8 +376,6 @@ mod tests {
         assert!(!has_winrm, "Empty services should not detect WinRM");
     }
 
-    // --- collect_winrm_lateral_work tests ---
-
     #[test]
     fn collect_empty_state_returns_no_work() {
         let state = StateInner::new("test-op".into());
@@ -419,6 +428,91 @@ mod tests {
         assert_eq!(work[0].domain, "contoso.local");
         assert_eq!(work[0].dedup_key, "winrm:192.168.58.30");
         assert_eq!(work[0].credential.username, "admin");
+    }
+
+    fn winrm_access_vuln(vuln_id: &str, target: &str) -> ares_core::models::VulnerabilityInfo {
+        ares_core::models::VulnerabilityInfo {
+            vuln_id: vuln_id.into(),
+            vuln_type: "winrm_access".into(),
+            target: target.into(),
+            discovered_by: "test".into(),
+            discovered_at: chrono::Utc::now(),
+            details: Default::default(),
+            recommended_agent: String::new(),
+            priority: 1,
+        }
+    }
+
+    #[test]
+    fn collect_carries_vuln_id_when_winrm_access_published() {
+        let mut state = StateInner::new("test-op".into());
+        state
+            .credentials
+            .push(make_credential("admin", "P@ssw0rd!", "contoso.local")); // pragma: allowlist secret
+        state.hosts.push(make_host(
+            "192.168.58.30",
+            "srv01.contoso.local",
+            vec!["5985/tcp http".into()],
+        ));
+        state.discovered_vulnerabilities.insert(
+            "winrm_access_192_168_58_30".into(),
+            winrm_access_vuln("winrm_access_192_168_58_30", "192.168.58.30"),
+        );
+
+        let work = collect_winrm_lateral_work(&state);
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].vuln_id.as_deref(),
+            Some("winrm_access_192_168_58_30"),
+            "a published winrm_access vuln must be threaded into the payload so \
+             process_completed_task can evaluate the evidence gate at all"
+        );
+    }
+
+    #[test]
+    fn collect_leaves_vuln_id_unset_when_no_vuln_published() {
+        let mut state = StateInner::new("test-op".into());
+        state
+            .credentials
+            .push(make_credential("admin", "P@ssw0rd!", "contoso.local")); // pragma: allowlist secret
+        state.hosts.push(make_host(
+            "192.168.58.30",
+            "srv01.contoso.local",
+            vec!["5985/tcp http".into()],
+        ));
+
+        let work = collect_winrm_lateral_work(&state);
+        assert_eq!(work.len(), 1);
+        assert!(
+            work[0].vuln_id.is_none(),
+            "no synthetic vuln_id may be invented — mark_exploited sadd's blindly, \
+             so a fabricated id would credit a vulnerability that was never discovered"
+        );
+    }
+
+    #[test]
+    fn collect_does_not_borrow_vuln_id_from_another_host() {
+        let mut state = StateInner::new("test-op".into());
+        state
+            .credentials
+            .push(make_credential("admin", "P@ssw0rd!", "contoso.local")); // pragma: allowlist secret
+        state.hosts.push(make_host(
+            "192.168.58.30",
+            "srv01.contoso.local",
+            vec!["5985/tcp http".into()],
+        ));
+        state.discovered_vulnerabilities.insert(
+            "winrm_access_192_168_58_99".into(),
+            winrm_access_vuln("winrm_access_192_168_58_99", "192.168.58.99"),
+        );
+
+        let work = collect_winrm_lateral_work(&state);
+        assert_eq!(work.len(), 1);
+        assert!(
+            work[0].vuln_id.is_none(),
+            "vuln lookup must be per-target; borrowing another host's vuln_id would \
+             credit the wrong host"
+        );
     }
 
     #[test]

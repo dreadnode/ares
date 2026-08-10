@@ -32,7 +32,6 @@ fn collect_webdav_work(state: &StateInner) -> Vec<WebDavWork> {
             continue;
         }
 
-        // Check if host has WebDAV indicators in services
         let has_webdav = host.services.iter().any(|s| {
             let sl = s.to_lowercase();
             sl.contains("webdav")
@@ -50,7 +49,6 @@ fn collect_webdav_work(state: &StateInner) -> Vec<WebDavWork> {
             continue;
         }
 
-        // Check if vuln already registered
         let vuln_id = format!("webdav_enabled_{}", host.ip.replace('.', "_"));
         if state.discovered_vulnerabilities.contains_key(&vuln_id) {
             continue;
@@ -430,8 +428,6 @@ mod tests {
         });
         assert!(!has_webdav);
     }
-
-    // --- collect_webdav_work tests ---
 
     use crate::orchestrator::state::StateInner;
 

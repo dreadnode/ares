@@ -89,7 +89,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "username_as_password".into(),
-            description: "Test if any domain users have their username as their password. High success rate in many environments, zero lockout risk (one attempt per user). Uses a built-in username wordlist if no users_file is provided.".into(),
+            description: "Test if any domain users have their username as their password. High success rate in many environments. Costs ONE bad-password attempt per user per call — repeated calls accumulate against the same AD lockout threshold, so this is NOT lockout-free across an operation. REQUIRES lockout policy: call password_policy FIRST and pass `lockout_threshold` (and `attempts_used_per_account` if any sprays already ran this observation window). The tool will refuse to run otherwise — set `acknowledge_no_policy=true` only when policy retrieval is impossible, knowing accounts may lock out. Uses a built-in username wordlist if no users_file is provided.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -108,6 +108,18 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "excluded_users": {
                         "type": "string",
                         "description": "Comma-separated usernames to drop from the wordlist before spraying. Use this with the quarantine list provided in the task payload to avoid re-locking already-locked accounts."
+                    },
+                    "lockout_threshold": {
+                        "type": "integer",
+                        "description": "AD lockoutThreshold from password_policy. 0 means no lockout policy (spray freely). Required unless acknowledge_no_policy=true."
+                    },
+                    "attempts_used_per_account": {
+                        "type": "integer",
+                        "description": "Bad-password attempts already spent against each account this observation window. The orchestrator overrides this with its own server-side tally."
+                    },
+                    "acknowledge_no_policy": {
+                        "type": "boolean",
+                        "description": "Set true to proceed without a known lockout policy. Restricted to a small per-window allowance; expect lockouts."
                     }
                 },
                 "required": ["target", "domain"]
@@ -327,7 +339,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "gmsa_dump_passwords".into(),
-            description: "Dump Group Managed Service Account (gMSA) passwords from Active Directory. Retrieves plaintext gMSA passwords via the msDS-ManagedPassword attribute if the authenticated user has read access.".into(),
+            description: "Dump Group Managed Service Account (gMSA) passwords from Active Directory. Retrieves plaintext gMSA passwords via the msDS-ManagedPassword attribute if the authenticated principal is in PrincipalsAllowedToRetrieveManagedPassword. That reader is often a machine account (HOST$) known only by NT hash — pass it via `hash` for -H auth.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -342,6 +354,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "password": {
                         "type": "string",
                         "description": "Password for authentication"
+                    },
+                    "hash": {
+                        "type": "string",
+                        "description": "NT hash (LM:NT or bare NT) for pass-the-hash auth; use for a machine-account reader (HOST$) with no password"
                     },
                     "domain": {
                         "type": "string",

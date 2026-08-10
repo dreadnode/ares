@@ -31,7 +31,7 @@ base:
 sources:
   - name: ares
     git:
-      repository: https://github.com/dreadnode/ares.git
+      repository: https://github.com/l50/ares.git
       ref: main
       depth: 1
       auth:
@@ -42,7 +42,7 @@ provisioners:
       - docker.amd64
     inline:
       - apt-get update
-      - apt-get install -y --no-install-recommends ca-certificates curl
+      - apt-get install -y --no-install-recommends ca-certificates curl procps
       - curl -fsSL https://github.com/grafana/mcp-grafana/releases/download/v0.11.6/mcp-grafana_Linux_x86_64.tar.gz -o /tmp/mcp-grafana.tar.gz
       - tar -xzf /tmp/mcp-grafana.tar.gz -C /usr/local/bin mcp-grafana
       - chmod +x /usr/local/bin/mcp-grafana
@@ -54,7 +54,7 @@ provisioners:
       - docker.arm64
     inline:
       - apt-get update
-      - apt-get install -y --no-install-recommends ca-certificates curl
+      - apt-get install -y --no-install-recommends ca-certificates curl procps
       - curl -fsSL https://github.com/grafana/mcp-grafana/releases/download/v0.11.6/mcp-grafana_Linux_arm64.tar.gz -o /tmp/mcp-grafana.tar.gz
       - tar -xzf /tmp/mcp-grafana.tar.gz -C /usr/local/bin mcp-grafana
       - chmod +x /usr/local/bin/mcp-grafana

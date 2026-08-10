@@ -86,6 +86,20 @@ impl OpStateProjector {
                 // stream draining.
                 debug!(op_id = %event.op_id, "skipping timeline event projection (schema pending)");
             }
+            OpStateEventPayload::CredentialRevoked { .. }
+            | OpStateEventPayload::HostIsolated { .. }
+            | OpStateEventPayload::KrbtgtRotated { .. }
+            | OpStateEventPayload::CertificateRevoked { .. } => {
+                // Containment observations drive in-op queue invalidation and
+                // Prometheus counters; Postgres projection lands with the
+                // scoring schema. Draining without a Postgres write is safe —
+                // the JetStream log is still the source of truth.
+                debug!(
+                    op_id = %event.op_id,
+                    kind = event.subject_suffix(),
+                    "skipping containment event projection (scoring schema pending)",
+                );
+            }
         }
         Ok(())
     }
@@ -197,9 +211,7 @@ impl OpStateProjector {
     }
 }
 
-// =========================================================================
 // Single-row upserts (no transaction; PG enforces per-row UNIQUE constraints)
-// =========================================================================
 
 async fn upsert_credential(
     pool: &PgPool,
@@ -450,7 +462,7 @@ mod tests {
     #[test]
     fn is_ip_accepts_dotted_quad() {
         assert!(is_ip("192.168.58.10"));
-        assert!(is_ip("10.0.0.1"));
+        assert!(is_ip("192.168.58.240"));
     }
 
     #[test]

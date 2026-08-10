@@ -14,6 +14,10 @@
 //! - `ares.ops.{op_id}.user.discovered`
 //! - `ares.ops.{op_id}.vuln.discovered`
 //! - `ares.ops.{op_id}.vuln.exploited`
+//! - `ares.ops.{op_id}.cred.revoked`
+//! - `ares.ops.{op_id}.host.isolated`
+//! - `ares.ops.{op_id}.krbtgt.rotated`
+//! - `ares.ops.{op_id}.cert.revoked`
 //! - `ares.ops.{op_id}.timeline`
 //!
 //! `event_id` is sent as the `Nats-Msg-Id` header so JetStream dedups
@@ -101,6 +105,45 @@ pub enum OpStateEventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<serde_json::Value>,
     },
+    /// Blue disabled or otherwise invalidated a principal we hold. Emitted by
+    /// the red-side failure classifier when a previously-working credential
+    /// starts returning `STATUS_LOGON_FAILURE` / LDAP `INVALID_CREDENTIALS`.
+    CredentialRevoked {
+        username: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        domain: String,
+        /// Free-form provenance — the failure signal that surfaced the
+        /// revocation (e.g. `"STATUS_LOGON_FAILURE via smbclient dc01"`).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        source: String,
+    },
+    /// Blue firewalled a host we were pivoting through. Emitted when SMB,
+    /// WinRM and LDAP all start timing out to the same address inside a
+    /// short window.
+    HostIsolated {
+        ip: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        hostname: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        source: String,
+    },
+    /// Blue rotated krbtgt in a realm. Emitted when Kerberos auth breaks
+    /// forest-wide in a short window (`KRB_AP_ERR_MODIFIED` across every
+    /// held ticket).
+    KrbtgtRotated {
+        domain: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        source: String,
+    },
+    /// Blue revoked a certificate we were using. Emitted on
+    /// `KDC_ERR_CLIENT_REVOKED` during PKINIT with a cert we minted.
+    CertificateRevoked {
+        serial: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        ca: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        source: String,
+    },
     TimelineEvent {
         event: serde_json::Value,
     },
@@ -118,6 +161,10 @@ impl OpStateEventPayload {
             Self::UserDiscovered { .. } => "user.discovered",
             Self::VulnDiscovered { .. } => "vuln.discovered",
             Self::VulnExploited { .. } => "vuln.exploited",
+            Self::CredentialRevoked { .. } => "cred.revoked",
+            Self::HostIsolated { .. } => "host.isolated",
+            Self::KrbtgtRotated { .. } => "krbtgt.rotated",
+            Self::CertificateRevoked { .. } => "cert.revoked",
             Self::TimelineEvent { .. } => "timeline",
         }
     }
@@ -176,6 +223,7 @@ mod tests {
                 description: String::new(),
                 is_admin: false,
                 source: "ldap".into(),
+                member_of: Vec::new(),
             },
         };
         let a = OpStateEvent::new("op-1", p.clone());
@@ -236,6 +284,7 @@ mod tests {
                         description: String::new(),
                         is_admin: false,
                         source: "ldap".into(),
+                        member_of: Vec::new(),
                     },
                 },
                 "user.discovered",
@@ -264,6 +313,37 @@ mod tests {
                 "vuln.exploited",
             ),
             (
+                OpStateEventPayload::CredentialRevoked {
+                    username: "svc_mssql".into(),
+                    domain: "contoso.local".into(),
+                    source: "STATUS_LOGON_FAILURE".into(),
+                },
+                "cred.revoked",
+            ),
+            (
+                OpStateEventPayload::HostIsolated {
+                    ip: "192.168.58.20".into(),
+                    hostname: "web01.contoso.local".into(),
+                    source: "smb/winrm/ldap timeout".into(),
+                },
+                "host.isolated",
+            ),
+            (
+                OpStateEventPayload::KrbtgtRotated {
+                    domain: "contoso.local".into(),
+                    source: "KRB_AP_ERR_MODIFIED forest-wide".into(),
+                },
+                "krbtgt.rotated",
+            ),
+            (
+                OpStateEventPayload::CertificateRevoked {
+                    serial: "1a2b3c".into(),
+                    ca: "ca01.contoso.local".into(),
+                    source: "KDC_ERR_CLIENT_REVOKED (PKINIT)".into(),
+                },
+                "cert.revoked",
+            ),
+            (
                 OpStateEventPayload::TimelineEvent {
                     event: serde_json::json!({"description": "captured DA"}),
                 },
@@ -288,6 +368,26 @@ mod tests {
         let j = serde_json::to_string(&ev).unwrap();
         let back: OpStateEvent = serde_json::from_str(&j).unwrap();
         assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn json_roundtrip_credential_revoked() {
+        let ev = OpStateEvent::new(
+            "op-42",
+            OpStateEventPayload::CredentialRevoked {
+                username: "alice".into(),
+                domain: "contoso.local".into(),
+                source: "STATUS_LOGON_FAILURE".into(),
+            },
+        );
+        let j = serde_json::to_string(&ev).unwrap();
+        let back: OpStateEvent = serde_json::from_str(&j).unwrap();
+        assert_eq!(ev, back);
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(
+            v.get("kind").and_then(|s| s.as_str()),
+            Some("credential_revoked"),
+        );
     }
 
     #[test]

@@ -1,0 +1,113 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/cowdogmoo/warpgate/main/schema/warpgate-template.json
+metadata:
+  name: ares-replay-stack
+  version: 1.0.0
+  description: Benchmark replay stack AMI - AL2023 + Docker + all replay-stack images pre-pulled
+  author: Dreadnode <info@dreadnode.io>
+  license: MIT
+  tags:
+    - ares
+    - benchmark
+    - replay
+    - ami
+    - observability
+  requires:
+    warpgate: '>=4.7.0'
+
+name: ares-replay-stack
+version: latest
+
+# Amazon Linux 2023 (owner 137112412989 = Amazon). Matches the OS the runtime
+# replay setup script assumes when it falls back to a stock AMI — so
+# `dnf install docker jq python3 tar` is a no-op success on the pre-baked
+# instance if the fallback path ever runs.
+base:
+  ami_filters:
+    owners:
+      - "137112412989"
+    filters:
+      # `al2023-ami-2023.*-kernel-*-x86_64` — standard AL2023 (~8 GB root),
+      # not `al2023-ami-minimal-*` (2 GB root, too small for Docker + 6 images).
+      name: "al2023-ami-2023.*-kernel-*-x86_64"
+      architecture: "x86_64"
+    most_recent: true
+
+# The replay stack config (docker-compose.yml, service configs, setup.sh) is
+# the source of truth in `benchmarks/replay-stack/`. Bake it into the AMI at
+# `/opt/replay-stack/` so the runtime setup script just syncs snapshot data
+# and calls `setup.sh` — no per-op tar-and-upload dance.
+sources:
+  - name: replay-stack
+    local:
+      path: ../../../benchmarks/replay-stack
+
+provisioners:
+  # Expand /dev/xvda to whatever the builder EBS volume was launched with
+  # (warpgate sets that via aws.ami.volume_size). Without this, Docker + the
+  # six image pulls overflow the base AMI's small default root and the file
+  # provisioner never runs. `--use-max` is a no-op when already at max.
+  - type: shell
+    inline:
+      - growpart /dev/xvda 1 || true
+      - xfs_growfs / || resize2fs /dev/xvda1 || true
+      - df -h /
+
+  # Install Docker + the compose plugin. Keep the compose version in sync with
+  # the `docker/compose/releases/download/v...` line in
+  # .taskfiles/benchmark/Taskfile.yaml (stock-AL2023 fallback path).
+  - type: shell
+    inline:
+      - dnf install -y docker jq python3 tar
+      - systemctl enable docker
+      - systemctl start docker
+      - mkdir -p /usr/local/lib/docker/cli-plugins
+      - curl -sL https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-x86_64 -o /usr/local/lib/docker/cli-plugins/docker-compose
+      - chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+      - docker compose version
+
+  # Pre-pull the 6 replay-stack images so a provisioned replay box skips the
+  # multi-minute pull step. Keep this list in sync with
+  # benchmarks/replay-stack/docker-compose.yml — a version drift here means the
+  # bake caches the wrong tag and the replay box re-pulls at runtime.
+  - type: shell
+    inline:
+      - docker pull grafana/loki:3.6.7
+      - docker pull prom/prometheus:v3.11.3
+      - docker pull grafana/grafana:12.3.1
+      - docker pull grafana/tempo:2.9.0
+      - docker pull grafana/mimir:3.0.4
+      - docker pull prom/alertmanager:v0.28.1
+      - docker image ls
+
+  # Bake the stack config into the AMI. The runtime setup script expects
+  # `/opt/replay-stack/setup.sh`, `/opt/replay-stack/docker-compose.yml`, and
+  # the per-service config subdirs to be here.
+  - type: file
+    source: ${sources.replay-stack}
+    destination: /opt/replay-stack
+
+  # Stop Docker cleanly before snapshot so /var/lib/docker is consistent, and
+  # drop dnf caches to shrink the AMI.
+  - type: shell
+    inline:
+      - systemctl stop docker
+      - dnf clean all
+      - rm -rf /var/cache/dnf /tmp/* /var/tmp/*
+      - echo "ares-replay-stack build completed"
+
+targets:
+  # us-west-1 = labs account, matching BENCHMARK_AWS_REGION and where the
+  # replay boxes are launched. `ares:component=benchmark-replay-stack` is what
+  # .taskfiles/benchmark/Taskfile.yaml::replay:provision filters on when
+  # resolving the AMI.
+  - type: ami
+    region: us-west-1
+    instance_type: t3.medium
+    ami_name: "ares-replay-stack-{{timestamp}}"
+    ami_tags:
+      Name: ares-replay-stack
+      Project: ares
+      Role: BenchmarkReplayStack
+      ManagedBy: warpgate
+      "ares:component": benchmark-replay-stack

@@ -6,11 +6,19 @@ Wants=redis.service nats-server.service
 [Service]
 Type=simple
 ExecStart={{ redis_ares_worker_binary }} worker
+EnvironmentFile=-{{ redis_ares_config_dir }}/env
+# systemd sets no HOME for system services, but ares reads $HOME to locate
+# hashcat's potfile for the per-op wipe (cracker.rs default_hashcat_potfile);
+# without it the resolver returns None and the wipe silently no-ops, leaking a
+# prior op's cracked plaintexts into the next. hashcat uses getpwuid, so both
+# agree once HOME is set.
+Environment=HOME={{ redis_ares_worker_home }}
 Environment=ARES_REDIS_URL=redis://{{ redis_bind_address }}:{{ redis_port }}
 Environment=NATS_URL=nats://{{ redis_bind_address }}:4222
 Environment=ARES_WORKER_ROLE=%i
 Environment=ARES_WORKER_MODE=tool_exec
 Environment=RUST_LOG=info
+Environment=OTEL_RESOURCE_ATTRIBUTES={{ redis_ares_otel_resource_attributes }}
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:{{ redis_ares_log_dir }}/%i.log

@@ -9,7 +9,7 @@
     alloy_server_id: ""
     alloy_instance_id: ""
     alloy_loki_endpoint: "{{ alloy_loki_endpoint }}"
-    alloy_version: "1.10.1"
+    alloy_version: "1.17.1"
 
     # VNC configuration vars
     vnc_setup_client_options: "-geometry 1920x1080"
@@ -23,18 +23,24 @@
     vnc_setup_vncpwd_clone_path: /tmp/vncpwd
     vnc_setup_vncpwd_path: /usr/local/bin/vncpwd
 
+  pre_tasks:
+    - name: Gather EC2 instance metadata for Alloy stream labels
+      amazon.aws.ec2_metadata_facts:
+      failed_when: false
+      when: alloy_instance_id | length == 0
+
   roles:
-    # Nimbus Range roles for Ansible system configuration and monitoring
-    - role: dreadnode.nimbus_range.aws_ssm_agent
-    - role: dreadnode.nimbus_range.aws_cloudwatch_agent
+    # Bulwark roles for Ansible system configuration and monitoring
+    - role: l50.bulwark.aws_ssm_agent
+    - role: l50.bulwark.aws_cloudwatch_agent
 
     # Ares pentesting tools
-    - role: dreadnode.nimbus_range.recon_tools
-    - role: dreadnode.nimbus_range.credential_access_tools
-    - role: dreadnode.nimbus_range.coercion_tools
-    - role: dreadnode.nimbus_range.lateral_movement_tools
-    - role: dreadnode.nimbus_range.acl_tools
-    - role: dreadnode.nimbus_range.cracking_tools
+    - role: l50.arsenal.recon_tools
+    - role: l50.arsenal.credential_access_tools
+    - role: l50.arsenal.coercion_tools
+    - role: l50.arsenal.lateral_movement_tools
+    - role: l50.arsenal.acl_tools
+    - role: l50.arsenal.cracking_tools
 
     # Install and configure Grafana Alloy for log shipping
     - name: Install and configure Grafana Alloy

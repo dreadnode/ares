@@ -61,13 +61,11 @@ pub(super) fn truncate_tool_output(output: &str, max_chars: usize) -> String {
     let head_chars = keep * 2 / 3;
     let tail_chars = keep - head_chars;
 
-    // Find byte offset of the head_chars-th character
     let head_byte = output
         .char_indices()
         .nth(head_chars)
         .map(|(i, _)| i)
         .unwrap_or(output.len());
-    // Find byte offset of the (char_count - tail_chars)-th character
     let tail_byte = output
         .char_indices()
         .nth(char_count.saturating_sub(tail_chars))

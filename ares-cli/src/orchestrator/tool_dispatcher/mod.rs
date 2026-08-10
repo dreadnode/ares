@@ -53,12 +53,19 @@ pub struct ToolExecResponse {
     /// Structured discoveries parsed by the worker from tool output.
     #[serde(default)]
     pub discoveries: Option<serde_json::Value>,
+    /// Typed classification of a failure, when the worker resolved one.
+    /// `None` on success and for legacy workers that predate the field —
+    /// the runner's pruning check falls back to string matching in that
+    /// case (see `runner.rs` around the ENOENT prune site).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<ares_llm::ToolFailureKind>,
 }
 
-/// Default timeout waiting for a tool result (25 minutes).
-/// Must exceed queue wait time + longest tool runtime (hashcat can queue
-/// behind another hashcat, so 2x runtime + buffer).
-pub(super) const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 1500;
+/// Default timeout waiting for a tool result (95 minutes).
+/// Must exceed queue wait time + longest tool runtime. AES Kerberoast defaults
+/// to a 45-minute pass and can queue behind one AES-exclusive job, so this is
+/// 2x runtime plus buffer.
+pub(super) const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 95 * 60;
 
 /// Tools that require netexec/ldapsearch and must be routed to the recon
 /// worker queue regardless of the calling agent's role.
@@ -74,8 +81,10 @@ const RECON_ROUTED_TOOLS: &[&str] = &[
     "check_credman_entries",
     "check_autologon_registry",
     "smb_login_check",
+    "smb_local_auth_check",
     "domain_admin_checker",
     "gmsa_dump_passwords",
+    "netexec_auth_check",
 ];
 
 /// Tools that authenticate against AD targets. Tool calls with these names
@@ -93,6 +102,7 @@ const AUTH_BEARING_TOOLS: &[&str] = &[
     "check_credman_entries",
     "check_autologon_registry",
     "smb_login_check",
+    "smb_local_auth_check",
     "domain_admin_checker",
     "gmsa_dump_passwords",
     // impacket tools
@@ -109,6 +119,7 @@ const AUTH_BEARING_TOOLS: &[&str] = &[
     "dcomexec",
     "atexec",
     "smbclient_kerberos_shares",
+    "netexec_auth_check",
 ];
 
 /// Spray-style tools that accept `excluded_users` to skip already-locked
@@ -164,6 +175,130 @@ pub(super) async fn inject_excluded_users(
             domain = %domain,
             count = merged.len(),
             "Auto-injected excluded_users from quarantine"
+        );
+    }
+}
+
+/// Observation window to hold spray attempts against, in seconds.
+///
+/// Prefers the domain's real `lockoutObservationWindow` when `password_policy`
+/// supplied it, because that is the only value AD actually resets on.
+fn spray_window_secs(arguments: &serde_json::Value) -> i64 {
+    if let Some(mins) = arguments
+        .get("lockout_observation_window_mins")
+        .and_then(|v| v.as_i64())
+        .filter(|m| *m > 0)
+    {
+        return mins * 60;
+    }
+    super::config::parse_env("ARES_SPRAY_WINDOW_SECS", 1800)
+}
+
+/// Enforce the per-domain lockout budget across spray calls.
+///
+/// `password_spray` caps the passwords it tries per call, but the cap is
+/// computed from `attempts_used_per_account` — an argument the LLM supplies
+/// and, in practice, re-reports as 0 on every call. Several capped sprays in
+/// one observation window then sum past the lockout threshold, which is what
+/// locked the range out. This overrides that argument with the server-side
+/// tally and debits the tally by what the call is about to spend.
+///
+/// Mutates `arguments` in place; no-op for tools outside `SPRAY_TOOLS`, when
+/// `state` is unset, or when no domain arg is present.
+pub(super) async fn inject_spray_attempts(
+    state: &Option<SharedState>,
+    tool_name: &str,
+    arguments: &mut serde_json::Value,
+) {
+    if !SPRAY_TOOLS.contains(&tool_name) {
+        return;
+    }
+    let Some(state) = state else { return };
+    let Some(domain) = arguments
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+
+    // One exclusive guard spans the read and the debit. Taking a read lock,
+    // computing, then taking a write lock leaves a window where every
+    // concurrent agent observes the same stale tally, each believes it has the
+    // full budget, and their sprays sum past the threshold — the exact race
+    // the tally exists to close. `spray_attempt_cost` is pure and sync, so
+    // nothing awaits while the guard is held.
+    let mut guard = state.write().await;
+    let tallied = guard.spray_attempts_used(&domain);
+
+    // The observed policy outranks the agent's argument. `check_spray_budget`
+    // reads `lockout_threshold <= 0` as "this domain has no lockout, spray
+    // freely", so an agent that guesses 0 — or omits the field after a policy
+    // read already landed — removes the only guard against locking out a live
+    // domain. Overriding here is the same move `attempts_used_per_account`
+    // already makes: the server-side observation wins over the claim.
+    if let Some(observed) = guard.password_policy_threshold(&domain) {
+        let claimed_threshold = arguments.get("lockout_threshold").and_then(|v| v.as_i64());
+        if claimed_threshold != Some(observed) {
+            if let Some(obj) = arguments.as_object_mut() {
+                obj.insert(
+                    "lockout_threshold".to_string(),
+                    serde_json::Value::from(observed),
+                );
+            }
+            debug!(
+                tool = %tool_name,
+                domain = %domain,
+                claimed = ?claimed_threshold,
+                observed,
+                "Overrode lockout_threshold with the observed password policy"
+            );
+        }
+    }
+
+    // Every spray-style tool gets the tally injected, so each one can refuse
+    // itself once the budget is spent. Injecting for only some of them is what
+    // let `username_as_password` spend budget it could never be denied: the
+    // dispatcher debited it, nothing could decline it, and it quietly tightened
+    // `password_spray`'s allowance while staying free itself.
+    //
+    // Keep the LLM's figure when it is the larger one: it may know about
+    // attempts this tally never saw (a prior operation, a manual spray).
+    let claimed = arguments
+        .get("attempts_used_per_account")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let effective = tallied.max(claimed);
+    if let Some(obj) = arguments.as_object_mut() {
+        obj.insert(
+            "attempts_used_per_account".to_string(),
+            serde_json::Value::from(effective),
+        );
+    }
+
+    let cost = if tool_name == "password_spray" {
+        ares_tools::credential_access::spray_attempt_cost(arguments, effective) as i64
+    } else {
+        // `username_as_password` tries exactly one password per account (the
+        // account's own name). It costs 1 when it will actually run, and 0
+        // once the budget is spent — the tool refuses at that point, and a
+        // refused call authenticates against nothing.
+        i64::from(ares_tools::credential_access::spray_budget_allows(
+            arguments, effective,
+        ))
+    };
+
+    if cost > 0 {
+        let window = spray_window_secs(arguments);
+        guard.record_spray_attempts(&domain, cost, window);
+        drop(guard);
+        debug!(
+            tool = %tool_name,
+            domain = %domain,
+            tallied,
+            cost,
+            window_secs = window,
+            "Debited per-domain spray lockout budget"
         );
     }
 }

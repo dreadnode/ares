@@ -9,84 +9,26 @@ use tracing::{info, warn};
 use super::parsing::has_domain_admin_indicator;
 use super::timeline::{create_admin_upgrade_timeline_event, create_domain_admin_timeline_event};
 use crate::orchestrator::dispatcher::Dispatcher;
-use crate::orchestrator::state::StateInner;
+use crate::orchestrator::state::{
+    canonicalize_domain_label, is_valid_domain_fqdn, krbtgt_da_path, resolve_flat_to_fqdn,
+    StateInner, DEDUP_ADMIN_HASH_UPGRADE,
+};
 
-/// Resolve a NetBIOS/flat domain name (e.g. `FABRIKAM`) to a known FQDN.
-///
-/// Checks three sources, in order:
-/// 1. `state.trusted_domains`: each `TrustInfo` carries an explicit `flat_name`.
-/// 2. `state.netbios_to_fqdn`: published mappings from host short names; useful
-///    when the flat name happens to match a hostname mapping.
-/// 3. `state.domains`: derive each FQDN's first label and compare. Catches the
-///    primary domain (which is rarely in `trusted_domains`).
-///
-/// Returns `None` when the flat name does not correspond to any known domain.
-/// Callers must treat that as "skip caching" — guessing risks attributing the
-/// SID to the wrong domain.
-fn resolve_flat_to_fqdn(flat: &str, state: &StateInner) -> Option<String> {
-    let target = flat.to_uppercase();
-
-    if let Some(t) = state
-        .trusted_domains
-        .values()
-        .find(|t| !t.flat_name.is_empty() && t.flat_name.to_uppercase() == target)
-    {
-        return Some(t.domain.to_lowercase());
-    }
-
-    if let Some(fqdn) = state
-        .netbios_to_fqdn
-        .get(&target)
-        .or_else(|| state.netbios_to_fqdn.get(flat))
-    {
-        // Only accept the mapping if it looks like a domain FQDN, not a host
-        // FQDN (e.g. "DC02" → "dc02.contoso.local" should NOT yield "dc02…").
-        let lower = fqdn.to_lowercase();
-        if is_valid_domain_fqdn(&lower) && state.domains.iter().any(|d| d.to_lowercase() == lower) {
-            return Some(lower);
-        }
-    }
-
-    state
-        .domains
-        .iter()
-        .find(|d| {
-            d.split('.')
-                .next()
-                .map(|first| first.eq_ignore_ascii_case(flat))
-                .unwrap_or(false)
-        })
-        .map(|d| d.to_lowercase())
-}
-
-/// Validate that a string looks like a domain FQDN.
-///
-/// Rejects empty strings, IP-like patterns, strings with whitespace, and strings
-/// without at least one dot. Used to filter out malformed domain values that
-/// occasionally appear in tool payloads (e.g. `"192.168.58.30 - dc01"`).
-fn is_valid_domain_fqdn(s: &str) -> bool {
-    if s.is_empty() || s.contains(' ') || s.contains(':') || s.contains('/') {
-        return false;
-    }
-    if !s.contains('.') {
-        return false;
-    }
-    let first_label = s.split('.').next().unwrap_or("");
-    if first_label.is_empty() || first_label.chars().all(|c| c.is_ascii_digit()) {
-        return false;
-    }
-    s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
-}
-
-/// Determine the domain admin path from a payload.
-pub(crate) fn resolve_da_path(_payload: &Value) -> Option<String> {
-    Some("secretsdump -> krbtgt hash".to_string())
+pub(crate) fn resolve_da_path(state: &StateInner) -> Option<String> {
+    state.latest_krbtgt_source().map(krbtgt_da_path)
 }
 
 /// Check if text indicates a golden ticket was saved.
+///
+/// ticketer prints the same `Saving ticket in <principal>.ccache` line whether
+/// it forged a TGT or an SPN-scoped TGS, so a silver ticket would otherwise
+/// publish the domain-wide golden-ticket milestone off a single-service ticket.
+/// `generate_silver_ticket` stamps its SPN into stdout; its presence disqualifies
+/// the text.
 pub(crate) fn has_golden_ticket_indicator(text: &str) -> bool {
-    text.contains("Saving ticket in") && text.contains(".ccache")
+    text.contains("Saving ticket in")
+        && text.contains(".ccache")
+        && !text.contains(ares_tools::parsers::SILVER_TICKET_SPN_MARKER)
 }
 
 /// Parse a Pwn3d! line to extract (domain, username).
@@ -176,11 +118,10 @@ pub(crate) async fn check_domain_admin_indicators(payload: &Value, dispatcher: &
     if !has_domain_admin_indicator(payload) {
         return;
     }
-    let already_da = {
+    let (already_da, path) = {
         let state = dispatcher.state.read().await;
-        state.has_domain_admin
+        (state.has_domain_admin, resolve_da_path(&state))
     };
-    let path = resolve_da_path(payload);
     if let Err(e) = dispatcher
         .state
         .set_domain_admin(&dispatcher.queue, path.clone())
@@ -311,21 +252,139 @@ pub(crate) async fn check_golden_ticket_completion(
     {
         warn!(err = %e, "Failed to set golden ticket flag");
     }
+}
 
-    // Emit attack path timeline event for golden ticket
-    let techniques = vec!["T1558.001".to_string()];
-    let event_id = format!("evt-gt-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-    let event = serde_json::json!({
-        "id": event_id,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-        "source": "golden_ticket",
-        "description": format!("Golden ticket forged for domain {domain}"),
-        "mitre_techniques": techniques,
+/// Dedup key for the hash-backed admin credit — one per principal, matching
+/// the per-principal granularity of `mark_credentials_admin`'s flip.
+pub(crate) fn admin_hash_dedup_key(username: &str, domain: &str) -> String {
+    format!("{}\\{}", domain.to_lowercase(), username.to_lowercase())
+}
+
+/// Resolve the NTLM hash that backs a `Pwn3d!` line for a principal that holds
+/// no credential row, or `None` when the discovery is not creditable this way.
+///
+/// `mark_credentials_admin` only credits `state.credentials`, so a principal
+/// obtained by DCSync — held as a hash — produces a `Pwn3d!` line, no admin
+/// timeline event and no priority secretsdump. This is the `find_source_hash`
+/// fallback `dacl_abuse` already applies to the same asymmetry.
+///
+/// Declines in three cases. A credential row for the principal already exists,
+/// which means the credential path owns the decision and has already deduped
+/// it (`mark_credentials_admin` returns `false` both for "no row" and for
+/// "already admin", so the caller cannot tell them apart). The principal was
+/// already credited this operation. Or no hash for the principal is in state —
+/// requiring one keeps the admin event backed by real material rather than by
+/// the log line alone, which is the phantom shape `seimpersonate` credit had.
+///
+/// `find_source_hash`'s last-resort arm matches on username alone, so the
+/// hash's own domain is checked against the pwned domain — both canonicalized,
+/// since netexec reports flat names and hashes carry FQDNs. Without that,
+/// `administrator` in one forest would credit a `Pwn3d!` in another.
+pub(crate) fn resolve_hash_only_admin(
+    state: &StateInner,
+    username: &str,
+    domain: &str,
+) -> Option<ares_core::models::Hash> {
+    let holds_credential = state.credentials.iter().any(|c| {
+        c.username.eq_ignore_ascii_case(username) && c.domain.eq_ignore_ascii_case(domain)
     });
+    if holds_credential {
+        return None;
+    }
+    if state.is_processed(
+        DEDUP_ADMIN_HASH_UPGRADE,
+        &admin_hash_dedup_key(username, domain),
+    ) {
+        return None;
+    }
+    let hash = state.find_source_hash(username, domain)?;
+    let canonical =
+        |d: &str| canonicalize_domain_label(d, state).unwrap_or_else(|| d.to_lowercase());
+    (canonical(&hash.domain) == canonical(domain)).then_some(hash)
+}
+
+/// Credit a `Pwn3d!` line whose principal is held only as an NTLM hash.
+///
+/// Emits the same admin-upgrade timeline event and priority secretsdump the
+/// credential path emits, over `request_secretsdump_hash` rather than a
+/// password. The dedup key is written before any dispatch so a failed submit
+/// cannot re-credit on the next `Pwn3d!` line for the same principal.
+async fn credit_hash_only_admin(
+    dispatcher: &Arc<Dispatcher>,
+    username: &str,
+    domain: &str,
+    pwned_ip: Option<&str>,
+) {
+    let hash = {
+        let state = dispatcher.state.read().await;
+        resolve_hash_only_admin(&state, username, domain)
+    };
+    let Some(hash) = hash else {
+        return;
+    };
+    let dedup_key = admin_hash_dedup_key(username, domain);
+    {
+        let mut state = dispatcher.state.write().await;
+        state.mark_processed(DEDUP_ADMIN_HASH_UPGRADE, dedup_key.clone());
+    }
     let _ = dispatcher
         .state
-        .persist_timeline_event(&dispatcher.queue, &event, &techniques)
+        .persist_dedup(&dispatcher.queue, DEDUP_ADMIN_HASH_UPGRADE, &dedup_key)
         .await;
+    info!(
+        username = %username,
+        domain = %domain,
+        pwned_host = ?pwned_ip,
+        "Hash-only principal confirmed local admin -- crediting from NTLM hash"
+    );
+    if let Some(ip) = pwned_ip {
+        if let Err(e) = dispatcher
+            .state
+            .mark_host_owned(&dispatcher.queue, ip)
+            .await
+        {
+            warn!(err = %e, ip = %ip, "Failed to mark host as owned");
+        }
+    }
+    create_admin_upgrade_timeline_event(dispatcher, username, domain, pwned_ip).await;
+    if !dispatcher.is_technique_allowed("secretsdump") {
+        return;
+    }
+    let mut targets: Vec<String> = {
+        let state = dispatcher.state.read().await;
+        state.domain_controllers.values().cloned().collect()
+    };
+    if let Some(ip) = pwned_ip {
+        if !targets.iter().any(|t| t == ip) {
+            targets.push(ip.to_string());
+        }
+    }
+    for target_ip in targets {
+        match dispatcher
+            .request_secretsdump_hash(
+                &target_ip,
+                &hash.username,
+                &hash.domain,
+                &hash.hash_value,
+                1,
+                None,
+            )
+            .await
+        {
+            Ok(Some(task_id)) => {
+                info!(
+                    task_id = %task_id,
+                    target = %target_ip,
+                    username = %username,
+                    "Admin Pwn3d! pass-the-hash secretsdump dispatched (priority 1)"
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!(err = %e, "Failed to dispatch Pwn3d! pass-the-hash secretsdump")
+            }
+        }
+    }
 }
 
 pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher: &Arc<Dispatcher>) {
@@ -334,22 +393,19 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
             continue;
         };
         info!(username = %username, domain = %domain, "Pwn3d! detected -- upgrading credential to admin");
-        let upgraded = {
-            let mut state = dispatcher.state.write().await;
-            let mut found = false;
-            for cred in state.credentials.iter_mut() {
-                if cred.username.to_lowercase() == username.to_lowercase()
-                    && cred.domain.to_lowercase() == domain
-                    && !cred.is_admin
-                {
-                    cred.is_admin = true;
-                    found = true;
-                }
+        let upgraded = match dispatcher
+            .state
+            .mark_credentials_admin(&dispatcher.queue, &username, &domain)
+            .await
+        {
+            Ok(flipped) => flipped,
+            Err(e) => {
+                warn!(err = %e, username = %username, domain = %domain, "Failed to persist admin flag");
+                false
             }
-            found
         };
+        let pwned_ip = extract_ip_from_line(line);
         if upgraded {
-            let pwned_ip = extract_ip_from_line(line);
             info!(
                 username = %username,
                 domain = %domain,
@@ -366,7 +422,13 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
                     warn!(err = %e, ip = %ip, "Failed to mark host as owned");
                 }
             }
-            create_admin_upgrade_timeline_event(dispatcher, &username, &domain).await;
+            create_admin_upgrade_timeline_event(
+                dispatcher,
+                &username,
+                &domain,
+                pwned_ip.as_deref(),
+            )
+            .await;
             let work: Vec<(String, ares_core::models::Credential)> = {
                 let state = dispatcher.state.read().await;
                 let dc_ips: Vec<String> = state.domain_controllers.values().cloned().collect();
@@ -409,6 +471,8 @@ pub(crate) async fn detect_and_upgrade_admin_credentials(text: &str, dispatcher:
                     Err(e) => warn!(err = %e, "Failed to dispatch Pwn3d! secretsdump"),
                 }
             }
+        } else {
+            credit_hash_only_admin(dispatcher, &username, &domain, pwned_ip.as_deref()).await;
         }
     }
 }
@@ -533,131 +597,100 @@ pub(crate) async fn extract_and_cache_domain_sid(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ares_core::models::TrustInfo;
     use serde_json::json;
 
-    fn make_trust(domain: &str, flat: &str) -> TrustInfo {
-        TrustInfo {
-            domain: domain.to_string(),
-            flat_name: flat.to_string(),
-            direction: "bidirectional".to_string(),
-            trust_type: "forest".to_string(),
-            sid_filtering: true,
-            security_identifier: None,
+    fn krbtgt_hash_from(source: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: "h1".to_string(),
+            username: "krbtgt".to_string(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee:deadbeef".to_string(),
+            hash_type: "NTLM".to_string(),
+            domain: "contoso.local".to_string(),
+            source: source.to_string(),
+            cracked_password: None,
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
         }
     }
 
-    // -- resolve_flat_to_fqdn -----------------------------------------------
-
     #[test]
-    fn resolve_flat_uses_trusted_domain_metadata() {
-        let mut state = StateInner::new("op-test".into());
-        state.trusted_domains.insert(
-            "fabrikam.local".into(),
-            make_trust("fabrikam.local", "FABRIKAM"),
-        );
-        assert_eq!(
-            resolve_flat_to_fqdn("FABRIKAM", &state).as_deref(),
-            Some("fabrikam.local")
-        );
-    }
-
-    #[test]
-    fn resolve_flat_falls_back_to_primary_domain_label() {
-        let mut state = StateInner::new("op-test".into());
-        state.domains.push("contoso.local".into());
-        assert_eq!(
-            resolve_flat_to_fqdn("CONTOSO", &state).as_deref(),
-            Some("contoso.local")
-        );
-    }
-
-    #[test]
-    fn resolve_flat_unknown_returns_none() {
-        let state = StateInner::new("op-test".into());
-        assert_eq!(resolve_flat_to_fqdn("UNKNOWN", &state), None);
-    }
-
-    #[test]
-    fn resolve_flat_does_not_match_host_short_name() {
-        // netbios_to_fqdn maps DC02 → dc02.contoso.local (a host, not domain).
-        // resolve_flat_to_fqdn must reject this — dc02.contoso.local is not in
-        // state.domains, so it cannot be a domain FQDN.
-        let mut state = StateInner::new("op-test".into());
-        state.domains.push("contoso.local".into());
+    fn resolve_da_path_names_the_tool_that_produced_the_hash() {
+        let mut state = StateInner::new("op-test".to_string());
         state
-            .netbios_to_fqdn
-            .insert("DC02".into(), "dc02.contoso.local".into());
-        assert_eq!(resolve_flat_to_fqdn("DC02", &state), None);
-    }
-
-    #[test]
-    fn resolve_flat_prefers_trust_metadata_over_primary_label() {
-        // Both child.contoso.local and contoso.local are known.
-        // Flat "CONTOSO" should resolve to the parent FQDN even when
-        // both could plausibly match by first-label heuristic.
-        let mut state = StateInner::new("op-test".into());
-        state.domains.push("child.contoso.local".into());
-        state.domains.push("contoso.local".into());
-        state.trusted_domains.insert(
-            "contoso.local".into(),
-            make_trust("contoso.local", "CONTOSO"),
-        );
+            .hashes
+            .push(krbtgt_hash_from("certipy_esc1_full_chain"));
         assert_eq!(
-            resolve_flat_to_fqdn("CONTOSO", &state).as_deref(),
-            Some("contoso.local")
-        );
-    }
-
-    // -- resolve_da_path ----------------------------------------------------
-
-    #[test]
-    fn resolve_da_path_always_secretsdump() {
-        // Agent-provided path fields are ignored; path is always fixed.
-        let payload = json!({
-            "has_domain_admin": true,
-            "domain_admin_path": "spray → secretsdump → krbtgt"
-        });
-        assert_eq!(
-            resolve_da_path(&payload).as_deref(),
-            Some("secretsdump -> krbtgt hash")
+            resolve_da_path(&state).as_deref(),
+            Some("certipy_esc1_full_chain → krbtgt NTLM hash")
         );
     }
 
     #[test]
-    fn resolve_da_path_no_fields() {
-        let payload = json!({ "has_domain_admin": true });
+    fn resolve_da_path_tracks_secretsdump_when_that_is_the_source() {
+        let mut state = StateInner::new("op-test".to_string());
+        state.hashes.push(krbtgt_hash_from("secretsdump"));
         assert_eq!(
-            resolve_da_path(&payload).as_deref(),
-            Some("secretsdump -> krbtgt hash")
+            resolve_da_path(&state).as_deref(),
+            Some("secretsdump → krbtgt NTLM hash")
         );
     }
 
     #[test]
-    fn resolve_da_path_not_explicit_falls_back() {
-        let payload = json!({ "tool_output": "got krbtgt" });
+    fn resolve_da_path_is_none_without_a_krbtgt_hash() {
+        let state = StateInner::new("op-test".to_string());
+        assert_eq!(resolve_da_path(&state), None);
+    }
+
+    #[test]
+    fn resolve_da_path_ignores_a_non_krbtgt_hash() {
+        let mut state = StateInner::new("op-test".to_string());
+        let mut other = krbtgt_hash_from("secretsdump");
+        other.username = "alice".to_string();
+        state.hashes.push(other);
+        assert_eq!(resolve_da_path(&state), None);
+    }
+
+    #[test]
+    fn resolve_da_path_prefers_the_most_recent_capture() {
+        let mut state = StateInner::new("op-test".to_string());
+        state.hashes.push(krbtgt_hash_from("secretsdump"));
+        state
+            .hashes
+            .push(krbtgt_hash_from("certipy_esc1_full_chain"));
         assert_eq!(
-            resolve_da_path(&payload).as_deref(),
-            Some("secretsdump -> krbtgt hash")
+            resolve_da_path(&state).as_deref(),
+            Some("certipy_esc1_full_chain → krbtgt NTLM hash")
         );
     }
 
     #[test]
-    fn resolve_da_path_explicit_false_falls_back() {
-        let payload = json!({ "has_domain_admin": false });
-        assert_eq!(
-            resolve_da_path(&payload).as_deref(),
-            Some("secretsdump -> krbtgt hash")
-        );
+    fn krbtgt_da_path_omits_an_empty_source() {
+        assert_eq!(krbtgt_da_path("   "), "krbtgt NTLM hash");
     }
-
-    // -- has_golden_ticket_indicator ----------------------------------------
 
     #[test]
     fn golden_ticket_indicator_positive() {
         assert!(has_golden_ticket_indicator(
             "Saving ticket in administrator.ccache"
         ));
+    }
+
+    /// A silver ticket forge prints the identical `Saving ticket in
+    /// <principal>.ccache` line. Crediting it as a golden ticket would publish
+    /// the domain-wide TGT milestone off a ticket good for one service.
+    #[test]
+    fn golden_ticket_indicator_rejects_a_silver_ticket_forge() {
+        let silver = format!(
+            "[*] Saving ticket in Administrator.ccache\n{}MSSQLSvc/sql01.contoso.local:1433\n",
+            ares_tools::parsers::SILVER_TICKET_SPN_MARKER
+        );
+        assert!(!has_golden_ticket_indicator(&silver));
     }
 
     #[test]
@@ -674,8 +707,6 @@ mod tests {
     fn golden_ticket_indicator_empty() {
         assert!(!has_golden_ticket_indicator(""));
     }
-
-    // -- parse_pwned_line ---------------------------------------------------
 
     #[test]
     fn parse_pwned_full_format() {
@@ -731,8 +762,6 @@ mod tests {
         assert!(parse_pwned_line(line).is_none());
     }
 
-    // -- extract_ip_from_line -----------------------------------------------
-
     #[test]
     fn extract_ip_basic() {
         let line = "SMB 192.168.58.10 445 DC01 [+] admin (Pwn3d!)";
@@ -759,60 +788,6 @@ mod tests {
     fn extract_ip_not_fooled_by_version() {
         assert!(extract_ip_from_line("version 1.2.3 released").is_none());
     }
-
-    // ── is_valid_domain_fqdn ──────────────────────────────────────────
-
-    #[test]
-    fn valid_fqdn_accepts_standard_domain() {
-        assert!(is_valid_domain_fqdn("contoso.local"));
-        assert!(is_valid_domain_fqdn("fabrikam.local"));
-        assert!(is_valid_domain_fqdn("child.contoso.local"));
-    }
-
-    #[test]
-    fn valid_fqdn_rejects_empty_string() {
-        assert!(!is_valid_domain_fqdn(""));
-    }
-
-    #[test]
-    fn valid_fqdn_rejects_no_dot() {
-        // A flat name (e.g. "CONTOSO") has no dot — not a valid FQDN.
-        assert!(!is_valid_domain_fqdn("CONTOSO"));
-        assert!(!is_valid_domain_fqdn("localonly"));
-    }
-
-    #[test]
-    fn valid_fqdn_rejects_strings_with_spaces() {
-        assert!(!is_valid_domain_fqdn("contoso .local"));
-        assert!(!is_valid_domain_fqdn("192.168.58.30 - dc01"));
-    }
-
-    #[test]
-    fn valid_fqdn_rejects_strings_with_colons_or_slashes() {
-        assert!(!is_valid_domain_fqdn("http://contoso.local"));
-        assert!(!is_valid_domain_fqdn("contoso:local"));
-    }
-
-    #[test]
-    fn valid_fqdn_rejects_ip_like_strings() {
-        // First label is all digits → looks like an IP, not a domain.
-        assert!(!is_valid_domain_fqdn("192.168.58.10"));
-        assert!(!is_valid_domain_fqdn("10.0.0.1"));
-    }
-
-    #[test]
-    fn valid_fqdn_rejects_leading_dot() {
-        // First label is empty → ".contoso.local" is malformed.
-        assert!(!is_valid_domain_fqdn(".contoso.local"));
-    }
-
-    #[test]
-    fn valid_fqdn_accepts_domain_with_hyphens_and_underscores() {
-        assert!(is_valid_domain_fqdn("my-domain.local"));
-        assert!(is_valid_domain_fqdn("_kerberos.contoso.local"));
-    }
-
-    // ── collect_payload_text_parts ─────────────────────────────────────
 
     #[test]
     fn collect_text_parts_ignores_top_level_scalar_fields() {
@@ -887,8 +862,6 @@ mod tests {
         assert!(collect_payload_text_parts(&json!({})).is_empty());
     }
 
-    // ── payload_contains_golden_ticket_marker ──────────────────────────
-
     #[test]
     fn gt_marker_in_tool_outputs_string_form() {
         let p = json!({
@@ -955,8 +928,6 @@ mod tests {
         assert!(!payload_contains_golden_ticket_marker(&p));
     }
 
-    // ── parse_sid_from_combined_text ───────────────────────────────────
-
     #[test]
     fn parse_sid_recognises_lookupsid_header() {
         let text = "Brute forcing SIDs at 192.168.58.10
@@ -981,6 +952,156 @@ Domain Sid: S-1-5-21-9999-8888-7777";
     #[test]
     fn parse_sid_returns_none_for_unrelated_text() {
         assert!(parse_sid_from_combined_text("nothing here").is_none());
+    }
+
+    fn admin_state() -> StateInner {
+        let mut state = StateInner::new("op-admin".into());
+        state.domains = vec!["contoso.local".into(), "fabrikam.local".into()];
+        state
+    }
+
+    fn ntlm_hash(username: &str, domain: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("hash-{username}-{domain}"),
+            username: username.into(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0".into(),
+            hash_type: "NTLM".into(),
+            domain: domain.into(),
+            cracked_password: None,
+            source: "secretsdump".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    fn plain_credential(username: &str, domain: &str) -> ares_core::models::Credential {
+        ares_core::models::Credential {
+            id: format!("cred-{username}"),
+            username: username.into(),
+            password: "P@ssw0rd!".into(),
+            domain: domain.into(),
+            source: "test".into(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    /// The §2.3 case: a DCSync-obtained principal pwns a host, `Pwn3d!` fires,
+    /// and `mark_credentials_admin` finds nothing because the principal is
+    /// held as a hash. Before this fallback the discovery was uncreditable.
+    #[test]
+    fn hash_only_admin_credits_a_principal_with_no_credential_row() {
+        let mut state = admin_state();
+        state
+            .hashes
+            .push(ntlm_hash("administrator", "fabrikam.local"));
+        let hash = resolve_hash_only_admin(&state, "administrator", "fabrikam.local").unwrap();
+        assert_eq!(hash.domain, "fabrikam.local");
+        assert!(hash
+            .hash_value
+            .ends_with("31d6cfe0d16ae931b73c59d7e0c089c0"));
+    }
+
+    #[test]
+    fn hash_only_admin_declines_when_a_credential_row_exists() {
+        let mut state = admin_state();
+        state.hashes.push(ntlm_hash("alice", "contoso.local"));
+        state
+            .credentials
+            .push(plain_credential("alice", "contoso.local"));
+        assert!(resolve_hash_only_admin(&state, "alice", "contoso.local").is_none());
+    }
+
+    #[test]
+    fn hash_only_admin_declines_a_second_pwn3d_line_for_the_same_principal() {
+        let mut state = admin_state();
+        state.hashes.push(ntlm_hash("alice", "contoso.local"));
+        assert!(resolve_hash_only_admin(&state, "alice", "contoso.local").is_some());
+        state.mark_processed(
+            DEDUP_ADMIN_HASH_UPGRADE,
+            admin_hash_dedup_key("alice", "contoso.local"),
+        );
+        assert!(resolve_hash_only_admin(&state, "alice", "contoso.local").is_none());
+    }
+
+    /// `find_source_hash`'s last-resort arm matches on username alone, so
+    /// without the domain check `administrator` in one forest would credit a
+    /// `Pwn3d!` in another.
+    #[test]
+    fn hash_only_admin_declines_a_same_name_hash_from_another_domain() {
+        let mut state = admin_state();
+        state
+            .hashes
+            .push(ntlm_hash("administrator", "contoso.local"));
+        assert!(
+            state
+                .find_source_hash("administrator", "fabrikam.local")
+                .is_some(),
+            "guard must be what declines, not an empty find_source_hash"
+        );
+        assert!(resolve_hash_only_admin(&state, "administrator", "fabrikam.local").is_none());
+    }
+
+    #[test]
+    fn hash_only_admin_accepts_a_flat_pwned_domain_naming_the_hash_domain() {
+        let mut state = admin_state();
+        state
+            .hashes
+            .push(ntlm_hash("administrator", "fabrikam.local"));
+        assert!(resolve_hash_only_admin(&state, "administrator", "fabrikam").is_some());
+    }
+
+    #[test]
+    fn hash_only_admin_declines_when_no_hash_is_held() {
+        let state = admin_state();
+        assert!(resolve_hash_only_admin(&state, "bob", "contoso.local").is_none());
+    }
+
+    #[test]
+    fn hash_only_admin_declines_a_hash_with_no_domain() {
+        let mut state = admin_state();
+        state.hashes.push(ntlm_hash("alice", ""));
+        assert!(resolve_hash_only_admin(&state, "alice", "contoso.local").is_none());
+    }
+
+    /// Only NTLM is usable for pass-the-hash; a roast ciphertext for the same
+    /// principal must not be credited as admin material.
+    #[test]
+    fn hash_only_admin_declines_a_non_ntlm_hash() {
+        let mut state = admin_state();
+        let mut roast = ntlm_hash("svc_sql", "contoso.local");
+        roast.hash_type = "krb5tgs".into();
+        state.hashes.push(roast);
+        assert!(resolve_hash_only_admin(&state, "svc_sql", "contoso.local").is_none());
+    }
+
+    #[test]
+    fn hash_only_admin_matches_the_principal_case_insensitively() {
+        let mut state = admin_state();
+        state
+            .hashes
+            .push(ntlm_hash("Administrator", "Contoso.Local"));
+        assert!(resolve_hash_only_admin(&state, "administrator", "contoso.local").is_some());
+    }
+
+    #[test]
+    fn admin_hash_dedup_key_is_case_folded() {
+        assert_eq!(
+            admin_hash_dedup_key("Administrator", "CONTOSO.LOCAL"),
+            admin_hash_dedup_key("administrator", "contoso.local")
+        );
+        assert_eq!(
+            admin_hash_dedup_key("alice", "contoso.local"),
+            "contoso.local\\alice"
+        );
     }
 
     #[test]

@@ -1,11 +1,16 @@
 ## Crack Task: {{ task_id }}
 
 **Hash Type:** {{ hash_type }}
-**Hash:** {{ hash_value }}
+**Hash:**
+```text
+{{ hash_value }}
+```
 {% if username %}**Username:** {{ username }}
 {% endif -%}
 {% if domain %}**Domain:** {{ domain }}
 {% endif -%}
 
-Crack this hash using hashcat or john. Try rockyou.txt first, then rules.
+Crack this hash using hashcat or john. If the fenced hash block contains multiple
+lines, pass the entire multi-line value to the cracking tool verbatim, preserving
+every newline and hash line. Try rockyou.txt first, then rules.
 Call `task_complete` with the cracked password or report failure.

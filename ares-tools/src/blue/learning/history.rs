@@ -98,7 +98,6 @@ pub fn find_similar_investigations(args: &Value) -> Result<ToolOutput> {
         }
     }
 
-    // Generate guidance from best completed investigation
     if let Some(best) = similar
         .iter()
         .find(|s| {
@@ -224,7 +223,6 @@ pub fn check_false_positive_pattern(args: &Value) -> Result<ToolOutput> {
         0.0
     };
 
-    // Check known FP patterns
     let fp_patterns = store.get_false_positive_patterns(2);
     let matching_pattern = fp_patterns
         .iter()

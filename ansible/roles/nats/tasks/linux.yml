@@ -6,7 +6,7 @@
         'x86_64': 'amd64',
         'aarch64': 'arm64',
         'armv7l': 'arm7',
-      }[ansible_architecture] }}
+      }[ansible_facts['architecture']] }}
 
 - name: Create NATS group
   ansible.builtin.group:

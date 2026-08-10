@@ -15,9 +15,9 @@ mod adcs;
 mod adcs_exploitation;
 mod bloodhound;
 mod certipy_auth;
-mod coercion;
+pub(crate) mod coercion;
 mod crack;
-mod credential_access;
+pub(crate) mod credential_access;
 mod credential_expansion;
 mod credential_reuse;
 mod cross_forest_enum;
@@ -33,9 +33,9 @@ mod golden_ticket;
 mod gpo;
 mod gpp_sysvol;
 mod group_enumeration;
-mod krbrelayup;
 mod laps;
 mod ldap_signing;
+mod local_auth_sweep;
 mod lsassy_dump;
 mod machine_account_quota;
 mod mssql;
@@ -45,6 +45,7 @@ mod mssql_link_pivot;
 mod nopac;
 mod ntlm_relay;
 mod ntlmv1_downgrade;
+mod orchestrator_planning;
 mod password_policy;
 mod petitpotam_unauth;
 mod print_nightmare;
@@ -65,7 +66,7 @@ mod smb_signing;
 mod smbclient_enum;
 mod spooler_check;
 mod stall_detection;
-mod trust;
+pub(crate) mod trust;
 mod unconstrained;
 mod webdav_detection;
 mod winrm_lateral;
@@ -76,15 +77,17 @@ pub use acl::auto_acl_chain_follow;
 pub use acl_discovery::auto_acl_discovery;
 pub use adcs::auto_adcs_enumeration;
 pub use adcs_exploitation::auto_adcs_exploitation;
-pub(crate) use adcs_exploitation::EXPLOITABLE_ESC_TYPES;
+pub(crate) use adcs_exploitation::{EXPLOITABLE_ESC_TYPES, UNEXPLOITABLE_ESC_TYPES};
 pub use bloodhound::auto_bloodhound;
 pub use certipy_auth::auto_certipy_auth;
 pub use coercion::auto_coercion;
 pub use crack::auto_crack_dispatch;
+pub(crate) use crack::{is_owned_domain_ntlm, MAX_CRACK_ATTEMPTS};
 pub use credential_access::auto_credential_access;
 pub use credential_expansion::auto_credential_expansion;
 pub use credential_reuse::auto_credential_reuse;
 pub use cross_forest_enum::auto_cross_forest_enum;
+pub(crate) use cross_forest_enum::is_cross_forest;
 pub use dacl_abuse::auto_dacl_abuse;
 pub use delegation::auto_delegation_enumeration;
 pub use dfs_coercion::auto_dfs_coercion;
@@ -94,12 +97,13 @@ pub use foreign_group_enum::auto_foreign_group_enum;
 pub use gmsa::auto_gmsa_extraction;
 pub use golden_cert::auto_golden_cert;
 pub use golden_ticket::auto_golden_ticket;
+pub(crate) use golden_ticket::GOLDEN_TICKET_DISPATCHED;
 pub use gpo::auto_gpo_abuse;
 pub use gpp_sysvol::auto_gpp_sysvol;
 pub use group_enumeration::auto_group_enumeration;
-pub use krbrelayup::auto_krbrelayup;
 pub use laps::auto_laps_extraction;
 pub use ldap_signing::auto_ldap_signing;
+pub use local_auth_sweep::auto_local_auth_sweep;
 pub use lsassy_dump::auto_lsassy_dump;
 pub use machine_account_quota::auto_machine_account_quota;
 pub use mssql::auto_mssql_detection;
@@ -110,6 +114,7 @@ pub use mssql_link_pivot::auto_mssql_link_pivot;
 pub use nopac::auto_nopac;
 pub use ntlm_relay::auto_ntlm_relay;
 pub use ntlmv1_downgrade::auto_ntlmv1_downgrade;
+pub use orchestrator_planning::auto_orchestrator_planning;
 pub use password_policy::auto_password_policy;
 pub use petitpotam_unauth::auto_petitpotam_unauth;
 pub use print_nightmare::auto_print_nightmare;
@@ -118,6 +123,7 @@ pub use rbcd::auto_rbcd_exploitation;
 pub use rdp_lateral::auto_rdp_lateral;
 pub use refresh::state_refresh;
 pub use s4u::auto_s4u_exploitation;
+pub(crate) use s4u::maybe_dispatch_post_s4u_secretsdump;
 pub use searchconnector_coercion::auto_searchconnector_coercion;
 pub use secretsdump::auto_krbtgt_extraction;
 pub use secretsdump::auto_local_admin_secretsdump;
@@ -138,17 +144,39 @@ pub use winrm_lateral::auto_winrm_lateral;
 pub use zerologon::auto_zerologon;
 
 pub(crate) fn crack_dedup_key(hash: &ares_core::models::Hash) -> String {
+    crack_dedup_key_parts(&hash.domain, &hash.username, &hash.hash_value)
+}
+
+/// [`crack_dedup_key`] for a submitted `crack` task payload, whose shape is
+/// fixed by `Dispatcher::request_crack`.
+///
+/// The submission layer only sees the payload, not the `Hash` it was built
+/// from, and it is the one place that observes *every* crack task id — the
+/// immediate submit and the deferred drain's re-submit alike. Reserving there
+/// rather than at the call site is what keeps a task that was deferred (and so
+/// returned no id to its caller) from coming back through the drain unguarded.
+pub(crate) fn crack_dedup_key_from_payload(payload: &serde_json::Value) -> Option<String> {
+    let hash_value = payload.get("hash_value")?.as_str()?;
+    let username = payload
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let domain = payload.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    Some(crack_dedup_key_parts(domain, username, hash_value))
+}
+
+fn crack_dedup_key_parts(domain: &str, username: &str, hash_value: &str) -> String {
     // secretsdump stores NTLM as `{LM}:{NT}` (32:32 hex). Naively slicing the
     // first 32 chars yields the constant blank-LM `aad3b435...` for every
     // user, collapsing all NTLM dedup keys for one user into one entry. Take
     // the NT half when the value looks like LM:NT; otherwise the value is
     // already a bare hash ($krb5tgs$, $krb5asrep$, raw NT) — use as-is.
-    let nt_only = extract_nt_from_lm_nt(&hash.hash_value).unwrap_or(&hash.hash_value);
-    let prefix = &nt_only[..32.min(nt_only.len())];
+    let nt_only = extract_nt_from_lm_nt(hash_value).unwrap_or(hash_value);
+    let prefix: String = nt_only.chars().take(32).collect();
     format!(
         "{}:{}:{}",
-        hash.domain.to_lowercase(),
-        hash.username.to_lowercase(),
+        domain.to_lowercase(),
+        username.to_lowercase(),
         prefix
     )
 }
@@ -185,6 +213,35 @@ mod tests {
             is_trust_key: false,
             trust_pair_label: None,
         }
+    }
+
+    #[test]
+    fn payload_dedup_key_matches_the_hash_it_was_built_from() {
+        for hash_value in [
+            "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+            "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$cifs/sql01*$abcdef0123456789",
+            "abc123",
+        ] {
+            let h = make_hash("Svc_SQL", "CONTOSO.LOCAL", hash_value);
+            let payload = serde_json::json!({
+                "hash_type": h.hash_type,
+                "hash_value": h.hash_value,
+                "username": h.username,
+                "domain": h.domain,
+            });
+            assert_eq!(
+                crack_dedup_key_from_payload(&payload),
+                Some(crack_dedup_key(&h)),
+                "payload key diverged for {hash_value}"
+            );
+        }
+    }
+
+    #[test]
+    fn payload_dedup_key_is_none_for_non_crack_payloads() {
+        let recon = serde_json::json!({"target_ip": "192.168.58.10", "domain": "contoso.local"});
+        assert_eq!(crack_dedup_key_from_payload(&recon), None);
+        assert_eq!(crack_dedup_key_from_payload(&serde_json::json!({})), None);
     }
 
     #[test]

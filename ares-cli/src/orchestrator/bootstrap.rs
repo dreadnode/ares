@@ -201,6 +201,116 @@ pub(crate) async fn discover_dc_domains(
     results
 }
 
+/// Group target IPs by /24 prefix.
+///
+/// Returns one CIDR string (`"a.b.c.0/24"`) per /24 that contains at least 2
+/// of the supplied IPv4 targets. Single-IP /24s are skipped — they don't
+/// signal "lab subnet to discover", just isolated hosts the operator named
+/// individually.
+///
+/// Non-IPv4 entries (CIDRs, hostnames) are ignored.
+pub(crate) fn infer_target_subnets(ips: &[String]) -> Vec<String> {
+    use std::collections::BTreeMap;
+    use std::net::Ipv4Addr;
+
+    let mut counts: BTreeMap<[u8; 3], usize> = BTreeMap::new();
+    for s in ips {
+        let Ok(ip) = s.parse::<Ipv4Addr>() else {
+            continue;
+        };
+        let oc = ip.octets();
+        *counts.entry([oc[0], oc[1], oc[2]]).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|(p, _)| format!("{}.{}.{}.0/24", p[0], p[1], p[2]))
+        .collect()
+}
+
+/// Dispatch a /24-wide SMB sweep + ping sweep per inferred subnet.
+///
+/// Bootstrap recon only scans the IPs the operator named. In lab/CTF
+/// environments those are typically just the DCs — but the same /24 will
+/// hold the SQL/web/CA/workstation hosts that hold the real attack
+/// surface (MSSQL pre-auth, web admin panels, ADCS web enrollment,
+/// description-field creds, etc.). Sweeping the surrounding /24 surfaces
+/// them so the credential-access and lateral pipelines have somewhere
+/// to point.
+///
+/// Sweep targets pass as CIDRs (`a.b.c.0/24`), which short-circuit the
+/// operation-scope IPv4 check — discovery is always allowed even on
+/// hosts that aren't in the original target list. Single-target tools
+/// run later still get gated by `OperationScope`, so the scope must be
+/// expanded separately (see `OrchestratorConfig::expand_scope_to_subnets`)
+/// to let agents pivot onto the discovered hosts.
+pub(crate) async fn dispatch_subnet_sweep(
+    dispatcher: &Arc<Dispatcher>,
+    config: &OrchestratorConfig,
+) -> usize {
+    let subnets = infer_target_subnets(&config.target_ips);
+    if subnets.is_empty() {
+        return 0;
+    }
+    let domain = &config.target_domain;
+    let mut count = 0;
+    for cidr in &subnets {
+        // smb_sweep over the /24 — netexec banner-grabs every live host
+        let payload = serde_json::json!({
+            "target_ip": cidr,
+            "target": cidr,
+            "domain": domain,
+            "technique": "smb_sweep",
+            "techniques": ["smb_sweep"],
+            "instructions": format!(
+                "Sweep the subnet {cidr} with netexec SMB to discover live hosts beyond                 the bootstrap target list. Call `smb_sweep` with `targets={cidr}`.                 Report every discovered host (IP + hostname + OS banner) in                 discovered_hosts so downstream recon/credential_access tasks can                 pivot onto non-DC hosts (SQL server, web server, workstation, ADCS box).",
+            ),
+        });
+        match dispatcher
+            .throttled_submit("recon", "recon", payload, 1)
+            .await
+        {
+            Ok(Some(task_id)) => {
+                info!(task_id = %task_id, cidr = %cidr, "Dispatched subnet smb_sweep");
+                count += 1;
+            }
+            Ok(None) => warn!(cidr = %cidr, "Subnet sweep throttled/deferred"),
+            Err(e) => warn!(cidr = %cidr, err = %e, "Failed to dispatch subnet sweep"),
+        }
+
+        // nmap ping/SYN sweep over the /24 — catches hosts that don't respond
+        // to SMB but do have TCP services exposed (web, MSSQL on non-1433, etc.)
+        let nmap_payload = serde_json::json!({
+            "target_ip": cidr,
+            "target": cidr,
+            "domain": domain,
+            "technique": "network_scan",
+            "techniques": ["network_scan"],
+            "ports": "21,22,53,80,88,135,139,389,443,445,464,593,636,1433,3268,3269,3389,5432,5985,5986,8000,8080,8443,9389",
+            "instructions": format!(
+                "Discover live hosts in {cidr} via nmap. Call `nmap_scan` with                 `target={cidr}` and the supplied `ports` list (covers DC, MSSQL,                 ADCS web enrollment, RDP, WinRM, web admin panels). Report every                 IP that has at least one open port in discovered_hosts. This                 bootstraps non-DC attack surface (MSSQL on sql01, web admin on                 web01, ADCS web on ca01, etc.).",
+            ),
+        });
+        match dispatcher
+            .throttled_submit("recon", "recon", nmap_payload, 1)
+            .await
+        {
+            Ok(Some(task_id)) => {
+                info!(task_id = %task_id, cidr = %cidr, "Dispatched subnet nmap_scan");
+                count += 1;
+            }
+            Ok(None) => warn!(cidr = %cidr, "Subnet nmap throttled/deferred"),
+            Err(e) => warn!(cidr = %cidr, err = %e, "Failed to dispatch subnet nmap"),
+        }
+    }
+    info!(
+        subnet_count = subnets.len(),
+        tasks = count,
+        "Subnet sweep dispatched"
+    );
+    count
+}
+
 /// Write initial operation metadata to Redis so workers can discover the operation.
 pub(crate) async fn bootstrap_meta(queue: &TaskQueue, config: &OrchestratorConfig) -> Result<()> {
     use chrono::Utc;
@@ -342,6 +452,15 @@ pub(crate) async fn dispatch_initial_recon(
                 "   GetADUsers.py -all -dc-ip <target_ip> <domain>/ 2>/dev/null\n\n",
                 "5. enum4linux-ng for comprehensive SMB/RPC enumeration:\n",
                 "   enum4linux-ng -A <target_ip>\n\n",
+                "6. IF the target is NOT a DC (LDAP/Kerberos closed), probe non-DC services unauthenticated:\n",
+                "   a. MSSQL pre-auth: impacket-mssqlclient 'sa:@<target_ip>' -no-pass (try empty / default `sa` pwd).\n",
+                "      Also try: netexec mssql <target_ip> -u sa -p \"\" (sa with blank password is the classic GOAD/lab finding).\n",
+                "   b. ADCS web enrollment / ESC8 surface: curl -sk -I https://<target_ip>/certsrv/ ; curl -sk -I http://<target_ip>/certsrv/.\n",
+                "      If /certsrv/ responds 401 with WWW-Authenticate NTLM, this is an unauth ADCS web endpoint (HTTP-NTLM relay target).\n",
+                "   c. IIS / web admin: curl -sk http://<target_ip>/ -I ; curl -sk https://<target_ip>/ -I ; check for /owa/, /ews/, /aspnet_client/, /Default.aspx.\n",
+                "   d. WinRM open: nmap -p 5985,5986 <target_ip> --script http-title — banner often leaks hostname / IIS / .NET version.\n",
+                "   e. RDP banner: nmap -p 3389 <target_ip> --script rdp-ntlm-info — leaks computer name, DNS name, target NetBIOS, and OS build (unauthenticated).\n",
+                "      rdp-ntlm-info is the canonical non-DC username/hostname leak — ALWAYS try it.\n\n",
                 "CRITICAL: Look for passwords in user DESCRIPTION fields! In many AD environments, ",
                 "admins store passwords in the description attribute. For each user found, report ",
                 "the description field content. If a description looks like a password (short string, ",
@@ -356,7 +475,7 @@ pub(crate) async fn dispatch_initial_recon(
                 "Also report ALL discovered users in the discovered_users array:\n",
                 "  {\"username\": \"samaccountname\", \"domain\": \"<AD domain>\", ",
                 "\"source\": \"user_enumeration\"}\n\n",
-                "If the target is not a DC (no LDAP/Kerberos), just report that and complete."
+                "If the target is not a DC (no LDAP/Kerberos), DO NOT give up — run step 6 against it (MSSQL/ADCS web/IIS/WinRM/RDP). Any banner, share name, or IIS path that leaks a hostname/username/version goes in discovered_hosts. A non-DC host with MSSQL open is a primary GOAD foothold path."
             ),
         });
         match dispatcher
@@ -385,6 +504,63 @@ mod tests {
             dn_to_domain("DC=child,DC=contoso,DC=local"),
             Some("child.contoso.local".to_string())
         );
+    }
+
+    #[test]
+    fn infer_target_subnets_clusters_by_24() {
+        let ips = vec![
+            "192.168.58.10".into(),
+            "192.168.58.11".into(),
+            "192.168.58.12".into(),
+            "192.168.58.22".into(),
+            "192.168.58.23".into(),
+            // Isolated standalone — should NOT produce a sweep target.
+            "192.168.60.50".into(),
+        ];
+        let subnets = super::infer_target_subnets(&ips);
+        assert_eq!(subnets, vec!["192.168.58.0/24".to_string()]);
+    }
+
+    #[test]
+    fn infer_target_subnets_skips_singleton_24() {
+        // Only one IP in this /24 → not a cluster → no sweep.
+        let ips = vec!["192.168.58.10".into()];
+        assert!(super::infer_target_subnets(&ips).is_empty());
+    }
+
+    #[test]
+    fn infer_target_subnets_two_clusters() {
+        let ips = vec![
+            "192.168.58.10".into(),
+            "192.168.58.11".into(),
+            "192.168.59.5".into(),
+            "192.168.59.6".into(),
+        ];
+        let subnets = super::infer_target_subnets(&ips);
+        assert_eq!(
+            subnets,
+            vec!["192.168.58.0/24".to_string(), "192.168.59.0/24".to_string()]
+        );
+    }
+
+    #[test]
+    fn infer_target_subnets_ignores_non_ipv4() {
+        let ips = vec![
+            "dc01.contoso.local".into(),
+            "192.168.58.10".into(),
+            "192.168.58.0/24".into(), // CIDR — ignored, not an IPv4
+            "192.168.58.11".into(),
+        ];
+        assert_eq!(
+            super::infer_target_subnets(&ips),
+            vec!["192.168.58.0/24".to_string()]
+        );
+    }
+
+    #[test]
+    fn infer_target_subnets_empty_input() {
+        let ips: Vec<String> = vec![];
+        assert!(super::infer_target_subnets(&ips).is_empty());
     }
 
     #[test]

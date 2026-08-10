@@ -93,14 +93,24 @@ pub(crate) fn parse_pygpoabuse_output(output: &str) -> GpoAbuseOutcome {
 /// Classify a `pygpoabuse_immediate_task` dispatch result. Splits the two
 /// signals the worker returns — a non-empty `error` field (non-zero exit /
 /// internal failure) versus structured stdout — into a single outcome the
-/// caller routes on. The asymmetry: if the worker flagged an error but the
-/// stdout otherwise parses as `Success`, we downgrade to `NoEvidence` rather
-/// than crediting — partial-success states (e.g. versionNumber bumped before
-/// the scheduled-task write failed) are unsafe to mark exploited.
+/// caller routes on. Two asymmetries:
+///
+/// - Worker error + stdout parses as `Success` → downgrade to `NoEvidence`.
+///   Partial-success states (e.g. versionNumber bumped before the scheduled
+///   task write failed) are unsafe to credit as exploited.
+/// - Worker error + no parseable markers → promote to `KnownFailure`. A
+///   non-zero exit with unrecognizable stdout is almost always terminal for
+///   the same input (traceback from an ACL deny, LDAP error the parser
+///   doesn't recognize, etc.). Leaving it as `NoEvidence` lets the caller
+///   clear the dedup and re-dispatch the same (cred, GPO, DC) tuple through
+///   `MAX_EXPLOIT_FAILURES` retries — 500+ retry-loop log lines per op —
+///   without any hope of a different outcome. `KnownFailure` locks the
+///   dedup after one attempt.
 pub(crate) fn classify_exec_outcome(output: &str, had_tool_error: bool) -> GpoAbuseOutcome {
     if had_tool_error {
         return match parse_pygpoabuse_output(output) {
             GpoAbuseOutcome::Success => GpoAbuseOutcome::NoEvidence,
+            GpoAbuseOutcome::NoEvidence => GpoAbuseOutcome::KnownFailure("tool_exited_nonzero"),
             other => other,
         };
     }
@@ -790,8 +800,6 @@ mod tests {
         assert_eq!(domain, "");
     }
 
-    // ── parse_pygpoabuse_output ────────────────────────────────────────
-
     #[test]
     fn parse_pygpoabuse_output_recognises_scheduled_task_success() {
         // Realistic pygpoabuse output for a successful GPO write: the tool
@@ -882,8 +890,6 @@ mod tests {
         assert_eq!(parse_pygpoabuse_output(""), GpoAbuseOutcome::NoEvidence);
     }
 
-    // ── build_pygpoabuse_args ──────────────────────────────────────────
-
     #[test]
     fn build_pygpoabuse_args_includes_all_required_fields() {
         let args = build_pygpoabuse_args(
@@ -934,8 +940,6 @@ mod tests {
         assert!(b["task_name"].as_str().unwrap().ends_with("beta2222"));
     }
 
-    // ── classify_exec_outcome ─────────────────────────────────────────
-
     #[test]
     fn classify_exec_outcome_clean_success_passes_through() {
         let outcome = classify_exec_outcome("[+] ScheduledTask created!\n", false);
@@ -960,12 +964,28 @@ mod tests {
     }
 
     #[test]
-    fn classify_exec_outcome_tool_error_with_no_evidence_stays_no_evidence() {
+    fn classify_exec_outcome_tool_error_with_no_evidence_promotes_to_known_failure() {
+        // Non-zero exit + stdout the parser can't classify (unhandled Python
+        // traceback, LDAP error text upstream doesn't recognize, etc.) is
+        // terminal for the same (cred, GPO, DC) input. Promote so the caller
+        // locks the dedup instead of clearing and looping through
+        // MAX_EXPLOIT_FAILURES retries — the wedge that caused this test to
+        // flip.
         let outcome = classify_exec_outcome("Connecting...\n", true);
-        assert_eq!(outcome, GpoAbuseOutcome::NoEvidence);
+        assert_eq!(
+            outcome,
+            GpoAbuseOutcome::KnownFailure("tool_exited_nonzero")
+        );
     }
 
-    // ── format_failure_summary ────────────────────────────────────────
+    #[test]
+    fn classify_exec_outcome_no_tool_error_no_markers_still_retryable() {
+        // The genuine transient case survives: tool exited zero, stdout
+        // parses to nothing (mid-connection kill, network blip). Caller
+        // should still be allowed to retry through the failure counter.
+        let outcome = classify_exec_outcome("Connecting...\n", false);
+        assert_eq!(outcome, GpoAbuseOutcome::NoEvidence);
+    }
 
     #[test]
     fn format_failure_summary_dispatch_error_wins() {
@@ -986,8 +1006,6 @@ mod tests {
         let s = format_failure_summary(None, None);
         assert_eq!(s, "no success markers in pygpoabuse output");
     }
-
-    // ── try_build_gpo_work ────────────────────────────────────────────
 
     fn vuln_with(details: serde_json::Value) -> VulnerabilityInfo {
         VulnerabilityInfo {

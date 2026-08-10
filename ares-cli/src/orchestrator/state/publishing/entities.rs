@@ -3,13 +3,14 @@
 use anyhow::Result;
 use redis::AsyncCommands;
 
-use ares_core::models::{OpStateEventPayload, Share, User, VulnerabilityInfo};
+use ares_core::models::{DomainEvidence, OpStateEventPayload, Share, User, VulnerabilityInfo};
 use ares_core::state::{self, RedisStateReader};
 
 use redis::aio::ConnectionLike;
 
-use super::emit_op_state;
+use super::{emit_op_state, realm_source_is_authoritative};
 use crate::dedup::is_ghost_machine_account;
+use crate::orchestrator::result_processing::is_acl_mutation_vuln;
 use crate::orchestrator::state::{SharedState, KEY_VULN_QUEUE};
 use crate::orchestrator::task_queue::TaskQueueCore;
 
@@ -22,12 +23,20 @@ impl SharedState {
     /// from creating phantom users attributed to the wrong domain — e.g.
     /// a user in `child.contoso.local` appearing as `fabrikam.local\user`
     /// when enumerated via a cross-forest GC query.
+    ///
+    /// An exact duplicate returns `Ok(false)` but is not discarded: any group
+    /// membership it carries is folded into the stored row, in memory, in Redis
+    /// and as a fresh `UserDiscovered` event. Dedup here is first-writer-wins
+    /// and only some sightings of a principal carry `memberOf`, so without the
+    /// fold the LDAP roster's membership is lost behind whichever enumerator
+    /// saw the account first.
     pub async fn publish_user(
         &self,
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         user: User,
     ) -> Result<bool> {
         // Check for duplicate in memory (exact match or cross-domain trust match)
+        let mut duplicate_of: Option<usize> = None;
         {
             let state = self.inner.read().await;
             let dedup = format!(
@@ -38,7 +47,7 @@ impl SharedState {
             let username_lower = user.username.to_lowercase();
             let domain_lower = user.domain.to_lowercase();
 
-            for existing in &state.users {
+            for (idx, existing) in state.users.iter().enumerate() {
                 let existing_key = format!(
                     "{}@{}",
                     existing.username.to_lowercase(),
@@ -46,7 +55,8 @@ impl SharedState {
                 );
                 // Exact duplicate
                 if existing_key == dedup {
-                    return Ok(false);
+                    duplicate_of = Some(idx);
+                    break;
                 }
                 // Cross-domain duplicate: same username, different domain, trust exists
                 if existing.username.to_lowercase() == username_lower
@@ -69,12 +79,42 @@ impl SharedState {
             }
         }
 
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
+
+        if let Some(idx) = duplicate_of {
+            if user.member_of.is_empty() {
+                return Ok(false);
+            }
+            let merged = {
+                let mut state = self.inner.write().await;
+                let Some(existing) = state.users.get_mut(idx) else {
+                    return Ok(false);
+                };
+                if !existing.merge_member_of(&user.member_of) {
+                    return Ok(false);
+                }
+                existing.clone()
+            };
+            reader.merge_user_member_of(&mut conn, &merged).await?;
+            emit_op_state(
+                self.recorder(),
+                &operation_id,
+                OpStateEventPayload::UserDiscovered {
+                    user: merged.clone(),
+                },
+            )
+            .await;
+            tracing::debug!(
+                username = %merged.username,
+                domain = %merged.domain,
+                groups = merged.member_of.len(),
+                "Merged LDAP group membership into known user"
+            );
+            return Ok(false);
+        }
+
         let added = reader.add_user(&mut conn, &user).await?;
         if added {
             emit_op_state(
@@ -84,9 +124,39 @@ impl SharedState {
             )
             .await;
             let user_domain = user.domain.clone();
+            let user_source = user.source.clone();
             {
                 let mut state = self.inner.write().await;
                 state.users.push(user);
+            }
+            // Promote the realm into state.domains if the user came from an
+            // authoritative AD source (LDAP query, Kerberos enum, NetExec user
+            // enum, secretsdump backfill). NetExec User Enum at the DC is the
+            // signal that recovers child domains the host-FQDN extractor
+            // missed (e.g. only the parent forest root was promoted from a
+            // bare zone-apex hostname).
+            if !user_domain.is_empty()
+                && user_domain.contains('.')
+                && realm_source_is_authoritative(&user_source)
+            {
+                let user_domain_lower = user_domain.to_lowercase();
+                let already_known = {
+                    let state = self.inner.read().await;
+                    state
+                        .domains
+                        .iter()
+                        .any(|d| d.eq_ignore_ascii_case(&user_domain_lower))
+                };
+                if !already_known {
+                    let _ = self
+                        .publish_candidate_domain(
+                            queue,
+                            &user_domain_lower,
+                            DomainEvidence::AuthenticatedAd,
+                            None,
+                        )
+                        .await;
+                }
             }
             // A new user in a domain unblocks AS-REP roasting for that domain:
             // the first auto_credential_access tick may have fired against the
@@ -97,12 +167,28 @@ impl SharedState {
             // forest where DCSync via the trust key won't work — AS-REP roast
             // of a vulnerable account is the only no-cred-needed entry point.
             if !user_domain.is_empty() {
-                let mut state = self.inner.write().await;
-                state.unmark_processed(super::super::DEDUP_ASREP_DOMAINS, &user_domain);
-                drop(state);
-                let _ = self
-                    .unpersist_dedup(queue, super::super::DEDUP_ASREP_DOMAINS, &user_domain)
-                    .await;
+                // The roast dedups on `{domain}:empty` / `{domain}:users`
+                // (see `asrep_dedup_key`), NOT the bare domain — clearing the
+                // bare domain here was a silent no-op, so a roastable account
+                // discovered AFTER the first userlist roast (e.g. a foreign-
+                // forest account found late via cross-forest LDAP) never
+                // triggered a re-roast and its AS-REP hash was never captured.
+                // Clear both suffixed variants so the next tick re-dispatches
+                // with the now-larger userlist.
+                let keys = crate::orchestrator::automation::credential_access::asrep_dedup_keys(
+                    &user_domain,
+                );
+                {
+                    let mut state = self.inner.write().await;
+                    for key in &keys {
+                        state.unmark_processed(super::super::DEDUP_ASREP_DOMAINS, key);
+                    }
+                }
+                for key in &keys {
+                    let _ = self
+                        .unpersist_dedup(queue, super::super::DEDUP_ASREP_DOMAINS, key)
+                        .await;
+                }
             }
         }
         Ok(added)
@@ -138,7 +224,27 @@ impl SharedState {
             return Ok(false);
         }
 
-        // Apply strategy weight override if provided
+        let acl_edge = is_acl_mutation_vuln(&vuln.vuln_id);
+        let low_value_acl = acl_edge && acl_edge_source_is_low_value(&vuln);
+        if acl_edge {
+            if let Some((cap, published, first)) = self.acl_publish_cap_reached(low_value_acl).await
+            {
+                if first {
+                    tracing::warn!(
+                        cap = cap,
+                        published = published,
+                        "ACL publish cap reached; further ACL/GPO vulnerabilities dropped this op"
+                    );
+                } else if low_value_acl {
+                    tracing::debug!(
+                        vuln_id = %vuln.vuln_id,
+                        "ACL edge declined: low-value trustee quota spent, budget reserved for actionable edges"
+                    );
+                }
+                return Ok(false);
+            }
+        }
+
         if let Some(strategy_cfg) = strategy {
             let effective = strategy_cfg.effective_priority(&vuln.vuln_type);
             if effective != vuln.priority {
@@ -152,10 +258,7 @@ impl SharedState {
             }
         }
 
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
         let added = reader.add_vulnerability(&mut conn, &vuln).await?;
@@ -182,8 +285,42 @@ impl SharedState {
             state
                 .discovered_vulnerabilities
                 .insert(vuln.vuln_id.clone(), vuln);
+            if acl_edge {
+                state.acl_published_count = state.acl_published_count.saturating_add(1);
+                if low_value_acl {
+                    state.acl_low_value_published_count =
+                        state.acl_low_value_published_count.saturating_add(1);
+                }
+            }
         }
         Ok(added)
+    }
+
+    async fn acl_publish_cap_reached(&self, low_value: bool) -> Option<(u32, u32, bool)> {
+        let read = self.inner.read().await;
+        let (cap, published, low_published) = (
+            read.acl_publish_cap,
+            read.acl_published_count,
+            read.acl_low_value_published_count,
+        );
+        drop(read);
+
+        if cap == 0 {
+            return None;
+        }
+
+        if low_value && published < cap && low_published >= low_value_quota(cap) {
+            return Some((cap, published, false));
+        }
+
+        if published < cap {
+            return None;
+        }
+
+        let mut w = self.inner.write().await;
+        let first = !w.acl_cap_reached_logged;
+        w.acl_cap_reached_logged = true;
+        Some((cap, published, first))
     }
 
     /// Add a share to state and Redis (with dedup).
@@ -203,10 +340,7 @@ impl SharedState {
             }
         }
 
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let reader = RedisStateReader::new(operation_id);
         let mut conn = queue.connection();
         let added = reader.add_share(&mut conn, &share).await?;
@@ -224,10 +358,7 @@ impl SharedState {
         event: &serde_json::Value,
         mitre_techniques: &[String],
     ) -> Result<()> {
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
 
@@ -257,14 +388,10 @@ impl SharedState {
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         task: ares_core::models::TaskInfo,
     ) -> Result<()> {
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let task_id = task.task_id.clone();
         let json = serde_json::to_string(&task).unwrap_or_default();
 
-        // Persist to Redis
         let key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -290,10 +417,7 @@ impl SharedState {
         task_id: &str,
         result: ares_core::models::TaskResult,
     ) -> Result<()> {
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let result_json = serde_json::to_string(&result).unwrap_or_default();
 
         let pending_key = format!(
@@ -310,7 +434,6 @@ impl SharedState {
         );
 
         let mut conn = queue.connection();
-        // Remove from pending, add to completed
         let _: Result<(), _> = redis::AsyncCommands::hdel(&mut conn, &pending_key, task_id).await;
         let _: Result<(), _> =
             redis::AsyncCommands::hset(&mut conn, &completed_key, task_id, &result_json).await;
@@ -333,10 +456,7 @@ impl SharedState {
         netbios: &str,
         fqdn: &str,
     ) -> Result<()> {
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -369,15 +489,23 @@ impl SharedState {
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         trust: ares_core::models::TrustInfo,
     ) -> Result<bool> {
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let reader = RedisStateReader::new(operation_id);
         let mut conn = queue.connection();
         let added = reader.add_trusted_domain(&mut conn, &trust).await?;
         if added {
             let domain_key = trust.domain.to_lowercase();
+            let op_id = self.operation_id().await;
+            tracing::info!(
+                convergence_stage = 1,
+                event = "trust_info_first_insert",
+                op_id = %op_id,
+                trusted_domain = %trust.domain,
+                trust_type = %trust.trust_type,
+                is_cross_forest = trust.is_cross_forest(),
+                sid_known = trust.security_identifier.is_some(),
+                "convergence: first TrustInfo insertion for this trusted-partner domain"
+            );
             // Capture the SID *before* moving `trust` into the map. Upserting
             // domain_sids from trust-enum data is the load-bearing step that
             // lets `auto_trust_follow` pass its parent-SID gate on hardened
@@ -430,6 +558,18 @@ fn are_in_same_forest(a: &str, b: &str) -> bool {
         return true;
     }
     a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
+}
+
+fn low_value_quota(cap: u32) -> u32 {
+    (cap / 5).max(1)
+}
+
+fn acl_edge_source_is_low_value(vuln: &VulnerabilityInfo) -> bool {
+    let source = ["source", "source_user", "from"]
+        .iter()
+        .find_map(|k| vuln.details.get(*k).and_then(|v| v.as_str()))
+        .unwrap_or_default();
+    !source.is_empty() && crate::orchestrator::acl_graph::is_low_value_acl_source(source)
 }
 
 fn should_drop_ghost_acl_vulnerability(vuln: &VulnerabilityInfo) -> bool {
@@ -489,6 +629,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: "test".to_string(),
+            member_of: Vec::new(),
         }
     }
 
@@ -578,6 +719,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_user_netexec_enum_promotes_unknown_realm() {
+        // Regression: a child realm (e.g. `child.contoso.local`) was never
+        // landing in state.domains even when NetExec User Enum returned a
+        // batch of users like `child.contoso.local\alice`. The realm on a
+        // NetExec user-enum response came from the DC's SAMR reply —
+        // promotion closes the gap when the host FQDN extractor missed the
+        // child (e.g. SMB returned the child realm as a zone-apex alias
+        // hostname rather than as a proper child FQDN).
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let mut user = make_user("alice", "child.contoso.local");
+        user.source = "netexec_user_enum".into();
+        state.publish_user(&q, user).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(
+            s.domains.iter().any(|d| d == "child.contoso.local"),
+            "netexec_user_enum realm should be promoted to state.domains, got {:?}",
+            s.domains
+        );
+    }
+
+    #[tokio::test]
+    async fn child_domain_discovered_via_user_enum() {
+        // End-to-end regression for a production bug: state.domains held
+        // only the two forest roots even though NetExec User Enum returned
+        // users in a child realm, Kerberos enum found more, and an
+        // authenticated cred landed in that realm. None of those paths had
+        // been promoting the realm; the child domain was a ghost.
+        //
+        // After the fix, EACH of the three independent paths
+        // (netexec_user_enum, kerberos_enum, netexec_auth credential) must
+        // be sufficient on its own to put the child realm in
+        // state.domains. We verify each in isolation, then together.
+        let q = mock_queue();
+
+        // Path 1: netexec_user_enum alone is sufficient.
+        {
+            let state = SharedState::new("op-path1".into());
+            let mut user = make_user("alice", "child.contoso.local");
+            user.source = "netexec_user_enum".into();
+            state.publish_user(&q, user).await.unwrap();
+            let s = state.inner.read().await;
+            assert!(
+                s.domains.iter().any(|d| d == "child.contoso.local"),
+                "netexec_user_enum should be enough to discover child realm, got {:?}",
+                s.domains
+            );
+        }
+
+        // Path 2: kerberos_enum alone is sufficient.
+        {
+            let state = SharedState::new("op-path2".into());
+            let mut user = make_user("sql_svc", "child.contoso.local");
+            user.source = "kerberos_enum".into();
+            state.publish_user(&q, user).await.unwrap();
+            let s = state.inner.read().await;
+            assert!(
+                s.domains.iter().any(|d| d == "child.contoso.local"),
+                "kerberos_enum should be enough to discover child realm, got {:?}",
+                s.domains
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_user_low_trust_source_does_not_promote() {
+        // `output_extraction` users come from parsing arbitrary tool prose —
+        // realm could be misattributed. Don't pollute state.domains.
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let mut user = make_user("alice", "child.contossso.com");
+        user.source = "output_extraction".into();
+        state.publish_user(&q, user).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(
+            s.domains.is_empty(),
+            "output_extraction must not promote realm, got {:?}",
+            s.domains
+        );
+    }
+
+    #[tokio::test]
     async fn publish_user_dedup_exact() {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
@@ -589,6 +816,41 @@ mod tests {
 
         let s = state.inner.read().await;
         assert_eq!(s.users.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_user_dedup_folds_late_member_of_into_the_stored_row() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let mut bare = make_user("alice", "contoso.local");
+        bare.source = "netexec_user_enum".into();
+        assert!(state.publish_user(&q, bare).await.unwrap());
+
+        let mut with_groups = make_user("alice", "contoso.local");
+        with_groups.member_of = vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".into()];
+        assert!(
+            !state.publish_user(&q, with_groups).await.unwrap(),
+            "a re-sighting is not a new user"
+        );
+
+        {
+            let s = state.inner.read().await;
+            assert_eq!(s.users.len(), 1);
+            assert_eq!(
+                s.users[0].member_of,
+                vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string()]
+            );
+        }
+
+        let reader = RedisStateReader::new("op-1".to_string());
+        let mut conn = q.connection();
+        let stored = reader.get_users(&mut conn).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored[0].member_of,
+            vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -641,6 +903,124 @@ mod tests {
         let v = &s.discovered_vulnerabilities["VULN-001"];
         assert_eq!(v.vuln_type, "smb_signing");
         assert_eq!(v.target, "192.168.58.1");
+    }
+
+    #[tokio::test]
+    async fn acl_publish_cap_drops_once_limit_reached() {
+        let state = SharedState::new("op-cap".to_string());
+        let q = mock_queue();
+        state.set_acl_publish_cap(2).await;
+
+        for i in 0..2 {
+            let v = make_vuln(&format!("acl_genericall_{i}"), "genericall", "alice");
+            assert!(state.publish_vulnerability(&q, v).await.unwrap());
+        }
+
+        let over = make_vuln("acl_genericall_over", "genericall", "alice");
+        assert!(!state.publish_vulnerability(&q, over).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.acl_published_count, 2);
+        assert!(s.acl_cap_reached_logged);
+        assert!(!s
+            .discovered_vulnerabilities
+            .contains_key("acl_genericall_over"));
+    }
+
+    fn acl_edge_from(vuln_id: &str, source: &str) -> VulnerabilityInfo {
+        let mut details = HashMap::new();
+        details.insert("source".to_string(), serde_json::json!(source));
+        details.insert("target".to_string(), serde_json::json!("web01"));
+        details.insert("target_type".to_string(), serde_json::json!("Computer"));
+        details.insert("domain".to_string(), serde_json::json!("contoso.local"));
+        make_vuln_with_details(vuln_id, "genericwrite", "192.168.58.10", details)
+    }
+
+    #[tokio::test]
+    async fn low_value_trustees_cannot_spend_the_whole_acl_budget() {
+        let state = SharedState::new("op-acl-budget".to_string());
+        let q = mock_queue();
+        let cap = 200u32;
+        state.set_acl_publish_cap(cap).await;
+
+        let da_sid = "S-1-5-21-1111111111-2222222222-3333333333-512";
+        for i in 0..cap {
+            let v = acl_edge_from(&format!("acl_genericwrite_da_{i:04}"), da_sid);
+            state.publish_vulnerability(&q, v).await.unwrap();
+        }
+
+        let mut actionable = 0usize;
+        for i in 0..cap {
+            let v = acl_edge_from(
+                &format!("acl_genericwrite_svc_{i:04}"),
+                &format!("svc_{i:04}"),
+            );
+            if state.publish_vulnerability(&q, v).await.unwrap() {
+                actionable += 1;
+            }
+        }
+
+        let s = state.inner.read().await;
+        assert!(
+            s.acl_low_value_published_count <= low_value_quota(cap),
+            "privileged-trustee edges took {} of a {} slot budget",
+            s.acl_low_value_published_count,
+            cap
+        );
+        assert!(
+            actionable >= (cap - low_value_quota(cap)) as usize,
+            "only {actionable} actionable edges were admitted; the budget was spent on trustees \
+             both ACL drivers permanently refuse"
+        );
+        assert!(
+            s.acl_published_count <= cap,
+            "the cap itself must still hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_low_value_trustee_still_gets_its_reserved_share() {
+        let state = SharedState::new("op-acl-share".to_string());
+        let q = mock_queue();
+        state.set_acl_publish_cap(200).await;
+
+        let everyone = acl_edge_from("acl_genericwrite_everyone_web01", "S-1-1-0");
+        assert!(
+            state.publish_vulnerability(&q, everyone).await.unwrap(),
+            "the quota reserves budget, it does not blacklist a trustee class"
+        );
+    }
+
+    #[tokio::test]
+    async fn acl_publish_cap_does_not_apply_to_other_vuln_types() {
+        let state = SharedState::new("op-cap-scope".to_string());
+        let q = mock_queue();
+        state.set_acl_publish_cap(1).await;
+
+        let acl = make_vuln("acl_genericall_0", "genericall", "alice");
+        assert!(state.publish_vulnerability(&q, acl).await.unwrap());
+
+        let acl_over = make_vuln("acl_genericall_1", "genericall", "bob");
+        assert!(!state.publish_vulnerability(&q, acl_over).await.unwrap());
+
+        let other = make_vuln("VULN-900", "smb_signing", "192.168.58.9");
+        assert!(state.publish_vulnerability(&q, other).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn acl_publish_cap_zero_means_unlimited() {
+        let state = SharedState::new("op-cap-zero".to_string());
+        let q = mock_queue();
+        state.set_acl_publish_cap(0).await;
+
+        for i in 0..25 {
+            let v = make_vuln(&format!("acl_genericall_{i}"), "genericall", "alice");
+            assert!(state.publish_vulnerability(&q, v).await.unwrap());
+        }
+
+        let s = state.inner.read().await;
+        assert_eq!(s.acl_published_count, 25);
+        assert!(!s.acl_cap_reached_logged);
     }
 
     #[tokio::test]

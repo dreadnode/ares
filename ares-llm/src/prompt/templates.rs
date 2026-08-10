@@ -41,6 +41,8 @@ const TASK_RECON_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/re
 const TASK_CRACK_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/crack.md.tera");
 const TASK_LATERAL_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/lateral.md.tera");
 const TASK_COERCION_TEMPLATE: &str = include_str!("../../templates/redteam/tasks/coercion.md.tera");
+const TASK_ORCHESTRATOR_PLAN_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/orchestrator_plan.md.tera");
 const TASK_PRIVESC_ENUMERATION_TEMPLATE: &str =
     include_str!("../../templates/redteam/tasks/privesc_enumeration.md.tera");
 const TASK_ACL_ANALYSIS_TEMPLATE: &str =
@@ -68,6 +70,8 @@ const TASK_EXPLOIT_UNCONSTRAINED_TEMPLATE: &str =
 const TASK_EXPLOIT_GOLDEN_TICKET_TEMPLATE: &str =
     include_str!("../../templates/redteam/tasks/exploit_golden_ticket.md.tera");
 
+const TASK_CREDACCESS_CERT_AUTH_TEMPLATE: &str =
+    include_str!("../../templates/redteam/tasks/credaccess_cert_auth.md.tera");
 const TASK_CREDACCESS_KERBEROS_TEMPLATE: &str =
     include_str!("../../templates/redteam/tasks/credaccess_kerberos.md.tera");
 const TASK_CREDACCESS_LOW_HANGING_WITH_CREDS_TEMPLATE: &str =
@@ -144,6 +148,7 @@ pub const TASK_RECON: &str = "redteam/tasks/recon";
 pub const TASK_CRACK: &str = "redteam/tasks/crack";
 pub const TASK_LATERAL: &str = "redteam/tasks/lateral";
 pub const TASK_COERCION: &str = "redteam/tasks/coercion";
+pub const TASK_ORCHESTRATOR_PLAN: &str = "redteam/tasks/orchestrator_plan";
 pub const TASK_PRIVESC_ENUMERATION: &str = "redteam/tasks/privesc_enumeration";
 pub const TASK_ACL_ANALYSIS: &str = "redteam/tasks/acl_analysis";
 pub const TASK_ACL_CHAIN_STEP: &str = "redteam/tasks/acl_chain_step";
@@ -161,6 +166,7 @@ pub const TASK_EXPLOIT_UNCONSTRAINED: &str = "redteam/tasks/exploit_unconstraine
 pub const TASK_EXPLOIT_GOLDEN_TICKET: &str = "redteam/tasks/exploit_golden_ticket";
 
 // Credential access task templates
+pub const TASK_CREDACCESS_CERT_AUTH: &str = "redteam/tasks/credaccess_cert_auth";
 pub const TASK_CREDACCESS_KERBEROS: &str = "redteam/tasks/credaccess_kerberos";
 pub const TASK_CREDACCESS_LOW_HANGING_WITH_CREDS: &str =
     "redteam/tasks/credaccess_low_hanging_with_creds";
@@ -232,6 +238,7 @@ static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
         (TASK_CRACK, TASK_CRACK_TEMPLATE),
         (TASK_LATERAL, TASK_LATERAL_TEMPLATE),
         (TASK_COERCION, TASK_COERCION_TEMPLATE),
+        (TASK_ORCHESTRATOR_PLAN, TASK_ORCHESTRATOR_PLAN_TEMPLATE),
         (TASK_PRIVESC_ENUMERATION, TASK_PRIVESC_ENUMERATION_TEMPLATE),
         (TASK_ACL_ANALYSIS, TASK_ACL_ANALYSIS_TEMPLATE),
         (TASK_ACL_CHAIN_STEP, TASK_ACL_CHAIN_STEP_TEMPLATE),
@@ -259,6 +266,10 @@ static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
             TASK_EXPLOIT_GOLDEN_TICKET_TEMPLATE,
         ),
         // Credential access task templates
+        (
+            TASK_CREDACCESS_CERT_AUTH,
+            TASK_CREDACCESS_CERT_AUTH_TEMPLATE,
+        ),
         (TASK_CREDACCESS_KERBEROS, TASK_CREDACCESS_KERBEROS_TEMPLATE),
         (
             TASK_CREDACCESS_LOW_HANGING_WITH_CREDS,
@@ -399,7 +410,9 @@ pub fn render_agent_instructions_with_extras(
     ctx.insert("undominated_forests", undominated_forests);
     op.insert_into(&mut ctx);
     for (k, v) in extras {
-        ctx.insert(k.to_string(), v);
+        // tera 2.0's `Context::insert` keys require `Into<Cow<'static, str>>`,
+        // so borrowed `&str` keys must be promoted to owned `String`.
+        ctx.insert((*k).to_string(), v);
     }
 
     TEMPLATES
@@ -453,6 +466,7 @@ pub fn render_task_template(
 ) -> Result<String> {
     let mut ctx = Context::new();
     for (key, value) in variables {
+        // tera 2.0 requires owned (`'static`) keys; `key` is borrowed from the map.
         ctx.insert(key.clone(), value);
     }
     render_template_with_context(template_name, &ctx)
@@ -483,6 +497,8 @@ mod tests {
         assert!(result.contains("- nmap_scan"));
         assert!(result.contains("- enumerate_users"));
         assert!(result.contains("- run_bloodhound"));
+        assert!(result.contains("data 52e"));
+        assert!(result.contains("null_session=true"));
     }
 
     #[test]
@@ -506,6 +522,8 @@ mod tests {
         assert!(result.contains("Credential Access Agent"));
         assert!(result.contains("- secretsdump"));
         assert!(result.contains("- kerberoast"));
+        assert!(result.contains("## Stop Conditions"));
+        assert!(result.contains("`task_complete`"));
     }
 
     #[test]
@@ -545,6 +563,8 @@ mod tests {
                 .unwrap();
         assert!(result.contains("Lateral Movement Agent"));
         assert!(result.contains("- psexec"));
+        assert!(result.contains("## Stop Conditions"));
+        assert!(result.contains("neither\nends the task"));
     }
 
     #[test]
@@ -564,6 +584,19 @@ mod tests {
             render_agent_instructions(TEMPLATE_ORCHESTRATOR, &capabilities, false, &[], TEST_OP)
                 .unwrap();
         assert!(result.contains("Red Team Orchestrator"));
+        assert!(result.contains("get_pending_tasks"));
+    }
+
+    #[test]
+    fn orchestrator_template_shows_no_secret_arguments() {
+        let result =
+            render_agent_instructions(TEMPLATE_ORCHESTRATOR, &[], false, &[], TEST_OP).unwrap();
+        for arg in ["password=", "hash_value=", "nt_hash=", "ticket_path="] {
+            assert!(
+                !result.contains(arg),
+                "orchestrator template still shows a secret argument: {arg}"
+            );
+        }
     }
 
     #[test]
@@ -637,11 +670,14 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert(
             "hash_value".to_string(),
-            "$krb5tgs$23$*svc_sql$".to_string(),
+            "$krb5tgs$23$*svc_sql$\n$krb5tgs$23$*svc_web$".to_string(),
         );
         vars.insert("hash_type".to_string(), "Kerberos TGS".to_string());
         let result = render_task_template(TEMPLATE_CRACKER_TASK, &vars).unwrap();
         assert!(result.contains("$krb5tgs$23$*svc_sql$"));
+        assert!(result.contains("$krb5tgs$23$*svc_sql$\n$krb5tgs$23$*svc_web$"));
+        assert!(result.contains("```text"));
+        assert!(result.contains("entire multi-line value"));
         assert!(result.contains("Kerberos TGS"));
     }
 
@@ -695,5 +731,37 @@ mod tests {
     fn invalid_template_name() {
         let result = render_agent_instructions("nonexistent", &[], false, &[], TEST_OP);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn blue_prompts_do_not_teach_golden_ticket_false_positives() {
+        // A live investigation (op-20260725-165847) tagged T1558.001 off
+        // `ServiceName=krbtgt` + `TicketOptions=0x40810010` + a non-DC source
+        // IP. It learned all three from these prompts, which recommended a
+        // `4769 |= "krbtgt"` query and called ordinary TicketOptions values
+        // "unusual". Every one of those matches ordinary Kerberos traffic:
+        // krbtgt as a 4769 ServiceName is a TGT renewal, 0x40810010 is the
+        // normal value, and every workstation requests tickets from a non-DC
+        // IP. Golden ticket is decided by the sweep's 4769-without-4768
+        // correlation; nothing here may re-teach a single-event shortcut.
+        for (name, body) in [
+            ("threat_hunter", BLUE_THREAT_HUNTER_TEMPLATE),
+            ("triage", BLUE_TRIAGE_TEMPLATE),
+        ] {
+            assert!(
+                !body.contains(r#"|= "4769" |= "krbtgt""#),
+                "{name} must not recommend a 4769/krbtgt query as a golden ticket detector"
+            );
+            assert!(
+                !body.contains("unusual `TicketOptions`"),
+                "{name} must not describe ordinary TicketOptions values as unusual"
+            );
+        }
+        // The hunter must state that the correlation owns the verdict.
+        assert!(
+            BLUE_THREAT_HUNTER_TEMPLATE.contains("4769-without-4768")
+                || BLUE_THREAT_HUNTER_TEMPLATE.contains("no preceding 4768"),
+            "threat hunter must point at the correlation as the basis for T1558.001"
+        );
     }
 }

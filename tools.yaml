@@ -51,7 +51,7 @@ roles:
         binaries: [lsassy, gMSADumper]
         fn_names: [lsassy, ldap_search_descriptions]
       - category: Impacket
-        binaries: [impacket-GetNPUsers, impacket-GetUserSPNs, impacket-secretsdump]
+        binaries: [impacket-secretsdump, impacket-GetNPUsers, impacket-GetUserSPNs]
         fn_names: [secretsdump, ntds_dit_extract]
 
   cracker:
@@ -68,7 +68,7 @@ roles:
         binaries: [bloodyAD, pywhisker]
         fn_names: [bloodyad_add_group_member, bloodyad_set_password, bloodyad_add_genericall, adminsd_holder_add_ace, gmsa_read_password_bloodyad, pywhisker]
       - category: Kerberoasting
-        binaries: [targetedKerberoast]
+        binaries: [targetedKerberoast, impacket-GetUserSPNs]
         fn_names: [targeted_kerberoast]
       - category: SMB
         binaries: [rpcclient]
@@ -76,6 +76,9 @@ roles:
       - category: Impacket
         binaries: [impacket-dacledit]
         fn_names: [dacl_edit]
+      - category: Impacket
+        binaries: [impacket-owneredit]
+        fn_names: [owner_edit]
       - category: GPO abuse
         binaries: [dacledit.py]
         fn_names: [sharpgpoabuse, pygpoabuse_immediate_task]
@@ -96,8 +99,8 @@ roles:
         binaries: [printerbug, addspn, dnstool]
         fn_names: [unconstrained_tgt_dump, unconstrained_coerce_and_capture, addspn, dnstool]
       - category: Delegation and kerberos
-        binaries: [KrbRelayUp, pygpoabuse, raiseChild.py]
-        fn_names: [find_delegation, s4u_attack, krbrelayup, raise_child]
+        binaries: [pygpoabuse, raiseChild.py]
+        fn_names: [find_delegation, s4u_attack, raise_child]
       - category: Impacket
         binaries:
           - impacket-findDelegation
@@ -110,7 +113,10 @@ roles:
           - impacket-ticketer
           - impacket-secretsdump
           - impacket-psexec
-        fn_names: [generate_golden_ticket, add_computer, rbcd_write, extract_trust_key, create_inter_realm_ticket, get_sid]
+        fn_names: [generate_golden_ticket, generate_silver_ticket, add_computer, rbcd_write, extract_trust_key, create_inter_realm_ticket, get_sid]
+      - category: On-target payload staging
+        binaries: [impacket-smbserver]
+        fn_names: [windows_stage_and_run]
 
   lateral:
     provisioned_by: ansible/playbooks/ares/lateral_movement.yml

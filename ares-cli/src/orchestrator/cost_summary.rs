@@ -10,10 +10,11 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
-use ares_core::token_usage::{estimate_usage_cost, get_token_usage};
+use ares_core::token_usage::{estimate_role_costs, estimate_usage_cost, get_token_usage};
 
 use crate::orchestrator::config::OrchestratorConfig;
 use crate::orchestrator::task_queue::TaskQueue;
+use crate::util::{format_model_cost_line, format_number, format_role_cost_line};
 
 /// How often to log the cost summary.
 const SUMMARY_INTERVAL: Duration = Duration::from_secs(120);
@@ -55,11 +56,12 @@ async fn cost_summary_loop(
         match get_token_usage(&mut conn, &config.operation_id).await {
             Ok(Some(usage)) => {
                 let in_tok = usage.input_tokens;
+                let cached_tok = usage.cache_read_input_tokens;
                 let out_tok = usage.output_tokens;
-                if in_tok == 0 && out_tok == 0 {
+                if in_tok == 0 && cached_tok == 0 && out_tok == 0 {
                     continue;
                 }
-                let total = in_tok + out_tok;
+                let total = in_tok + cached_tok + out_tok;
 
                 let (total_cost, breakdown, _unpriced) = estimate_usage_cost(&usage);
 
@@ -76,7 +78,21 @@ async fn cost_summary_loop(
                     _ => String::new(),
                 };
 
-                info!("💰 [token-usage] {total} tokens (in: {in_tok}  out: {out_tok}){cost_str}");
+                info!(
+                    "💰 [token-usage] {} tokens (in: {}  cached: {}  out: {}){cost_str}",
+                    format_number(total),
+                    format_number(in_tok),
+                    format_number(cached_tok),
+                    format_number(out_tok)
+                );
+                if breakdown.len() > 1 {
+                    for item in &breakdown {
+                        info!("💰 [token-usage] {}", format_model_cost_line(item));
+                    }
+                }
+                for item in &estimate_role_costs(&usage) {
+                    info!("💰 [token-usage] {}", format_role_cost_line(item));
+                }
             }
             Ok(None) => {}
             Err(e) => {

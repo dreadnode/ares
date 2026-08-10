@@ -15,7 +15,7 @@ pub fn estimate_cost(model: &str, prompt_tokens: u64, completion_tokens: u64) ->
         std::sync::LazyLock::new(|| {
             HashMap::from([
                 (
-                    "claude-sonnet-4-20250514",
+                    "claude-sonnet-4-6",
                     ModelCost {
                         input_per_million: 3.0,
                         output_per_million: 15.0,
@@ -62,13 +62,13 @@ mod tests {
 
     #[test]
     fn estimate_cost_known_model_claude_sonnet() {
-        let cost = estimate_cost("claude-sonnet-4-20250514", 1_000_000, 0);
+        let cost = estimate_cost("claude-sonnet-4-6", 1_000_000, 0);
         assert!((cost - 3.0).abs() < 1e-9);
     }
 
     #[test]
     fn estimate_cost_known_model_output_tokens() {
-        let cost = estimate_cost("claude-sonnet-4-20250514", 0, 1_000_000);
+        let cost = estimate_cost("claude-sonnet-4-6", 0, 1_000_000);
         assert!((cost - 15.0).abs() < 1e-9);
     }
 

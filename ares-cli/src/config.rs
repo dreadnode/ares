@@ -47,7 +47,6 @@ fn config_show(config_path: Option<String>, models_only: bool) -> Result<()> {
 
     println!("# Resolved config: {}\n", path.display());
 
-    // Operation
     println!("operation:");
     println!("  name: {}", cfg.operation.name);
     println!("  namespace: {}", cfg.operation.namespace);
@@ -80,7 +79,6 @@ fn config_show(config_path: Option<String>, models_only: bool) -> Result<()> {
         cfg.operation.stop_on_golden_ticket
     );
 
-    // Agents
     println!("\nagents:");
     let mut roles: Vec<_> = cfg.agents.iter().collect();
     roles.sort_by_key(|(k, _)| (*k).clone());
@@ -88,18 +86,11 @@ fn config_show(config_path: Option<String>, models_only: bool) -> Result<()> {
         println!("  {}:", role);
         println!("    model: {}", agent.model);
         println!("    max_steps: {}", agent.max_steps);
-        if !agent.pod_selector.is_empty() {
-            println!("    pod_selector: {}", agent.pod_selector);
-        }
-        if !agent.capabilities.is_empty() {
-            println!("    capabilities: {} tools", agent.capabilities.len());
-        }
         if !agent.tools.is_empty() {
             println!("    tools: {} dispatch actions", agent.tools.len());
         }
     }
 
-    // Timeouts
     println!("\ntimeouts:");
     println!("  agent_heartbeat: {}s", cfg.timeouts.agent_heartbeat);
     println!("  task_timeout: {}s", cfg.timeouts.task_timeout);
@@ -112,13 +103,11 @@ fn config_show(config_path: Option<String>, models_only: bool) -> Result<()> {
     println!("  hash_cracking: {}s", cfg.timeouts.hash_cracking);
     println!("  exploitation: {}s", cfg.timeouts.exploitation);
 
-    // Recovery
     println!("\nrecovery:");
     println!("  enabled: {}", cfg.recovery.enabled);
     println!("  max_retries: {}", cfg.recovery.max_retries);
     println!("  retry_delay: {}s", cfg.recovery.retry_delay);
 
-    // Vulnerability priorities
     println!("\nvulnerability_priorities:");
     let mut vulns: Vec<_> = cfg.vulnerability_priorities.iter().collect();
     vulns.sort_by_key(|(_, v)| **v);
@@ -126,7 +115,6 @@ fn config_show(config_path: Option<String>, models_only: bool) -> Result<()> {
         println!("  {}: {}", vuln, priority);
     }
 
-    // Context management
     println!("\ncontext_management:");
     println!(
         "  max_context_tokens: {}",
@@ -141,7 +129,6 @@ fn config_show(config_path: Option<String>, models_only: bool) -> Result<()> {
         cfg.context_management.max_output_chars
     );
 
-    // Grafana
     if let Some(ref g) = cfg.grafana {
         println!("\ngrafana:");
         println!("  enabled: {}", g.enabled);
@@ -157,14 +144,12 @@ fn config_validate(config_path: Option<String>) -> Result<()> {
 
     let mut warnings = Vec::new();
 
-    // Check all agents have models
     for (role, agent) in &cfg.agents {
         if agent.model.is_empty() {
             warnings.push(format!("Agent '{}' has no model set", role));
         }
     }
 
-    // Check expected roles exist
     let expected_roles = [
         "orchestrator",
         "recon",
@@ -181,7 +166,6 @@ fn config_validate(config_path: Option<String>) -> Result<()> {
         }
     }
 
-    // Check timeouts are reasonable
     if cfg.timeouts.operation_timeout < cfg.timeouts.task_timeout {
         warnings.push("operation_timeout is less than task_timeout".to_string());
     }
@@ -218,7 +202,6 @@ fn config_set_model(
     let cfg = AresConfig::load(&path)?;
 
     if all {
-        // Replace model for all agents
         let mut new_contents = contents;
         for (role_name, agent) in &cfg.agents {
             new_contents = replace_model_in_yaml(&new_contents, role_name, &agent.model, &model);
@@ -277,7 +260,6 @@ fn replace_model_in_yaml(yaml: &str, role: &str, _old_model: &str, new_model: &s
         if in_target_role && !replaced {
             let trimmed = line.trim();
             if trimmed.starts_with("model:") {
-                // Replace the model value, preserving indentation
                 let indent = &line[..line.len() - line.trim_start().len()];
                 let new_line = format!("{}model: \"{}\"", indent, new_model);
                 result.push_str(&new_line);

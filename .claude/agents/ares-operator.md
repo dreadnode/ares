@@ -1,11 +1,21 @@
 ---
 name: ares-operator
-description: Operates the Ares distributed red/blue team system. Use when asked to deploy code, run operations, monitor progress, debug stuck operations, check loot, generate reports, or manage infrastructure across K8s and EC2.
+description: Operates the Ares distributed red/blue team system. Use for multi-step Ares workflows — launching/monitoring/debugging operations, deploying code, injecting state, generating reports. DO NOT use for one-shot kubectl/task commands the parent can run inline (e.g., `kubectl rollout restart`, `kubectl get pods`, `task ec2:status`); dispatching a subagent for these adds latency without value. Spawn this agent only when the work needs ≥3 dependent commands or domain knowledge of Ares-specific flags.
 tools: Bash, Read, Grep, Glob
 model: opus
 ---
 
 You operate a distributed multi-agent penetration testing system called Ares. The system runs on remote infrastructure (K8s cluster or EC2 instance) — you drive it from the local machine via `ares-cli` or Taskfile commands.
+
+## Scope: when NOT to use this agent
+
+The parent should handle these inline, not delegate to you:
+
+- Single kubectl commands (`get pods`, `rollout restart`, `logs`, `describe`).
+- Single task commands the user already named (`task rust:build`, `task ec2:status`).
+- One-shot reads of status/loot/queue that don't require follow-up reasoning.
+
+Delegation is only worth the overhead when the work is multi-step, requires Ares-specific flags the parent doesn't know, or involves interpreting state across commands.
 
 ## Architecture
 
@@ -128,6 +138,133 @@ ares-cli --k8s ares-red ops offload-cost --latest         # Sync token costs to 
 ares-cli --k8s ares-red ops backfill-domains op-xxx       # Re-scan state to populate domain list
 ares-cli --k8s ares-red ops kill --all                    # Kill all running ops
 ares-cli --k8s ares-red ops cleanup --max-age-hours 24    # Delete old checkpoints
+```
+
+## Red Team Operations (Proxmox)
+
+A third deployment target for the GOAD Ludus range: a single attack-box VM
+(`attacker-1`, VMID 200) on the `proxmox` SSH alias that runs ares in
+standalone mode (`ARES_TOOL_DISPATCH=local`, no worker StatefulSets, local
+Redis/NATS). Reachable only through the proxmox jump host (DHCP-assigned
+IP on `vmbr1001` VLAN 10). All operator commands live under the `proxmox:`
+task namespace and resolve the current attacker IP automatically each run.
+
+### Submit + dispatcher healthcheck
+
+```bash
+task proxmox:submit                                      # uses DEFAULT_IPS/DOMAIN/MODEL
+task proxmox:submit IPS=10.1.10.10,10.1.10.11 DOMAIN=...
+```
+
+`proxmox:submit` waits up to ~15s after the CLI returns and confirms the
+dispatcher actually wrote `Starting operation: <op_id>` to `/var/log/ares/dispatch.log`
+before exiting (PR #58). If the SUCCESS line doesn't print, the wrapper
+warns to run `task proxmox:deploy:restart` — the dispatcher silently
+wedging is a known symptom of stale orchestrator state and the submit
+healthcheck is the first place it surfaces.
+
+### Watch progress every minute (with wedge detection)
+
+`Monitor` against a polling script is the right pattern; emit one line per
+minute showing the deltas an operator would scan for. When tokens flatline
+for ≥2 ticks while `status=running`, that's the same orchestrator wedge
+PR #66 partially addressed — fall through to `task proxmox:logs` to
+identify which subsystem stalled.
+
+```bash
+# Inline shell to feed into Monitor (persistent, ~1h timeout):
+prev_tokens=""; frozen_ticks=0; while true; do
+  out=$(task proxmox:runtime 2>&1)
+  op=$(echo "$out" | grep -oE 'op-[0-9]{8}-[0-9]{6}' | head -1)
+  op_status=$(echo "$out" | grep -oE 'Status:[[:space:]]+\S+' | awk '{print $2}')
+  runtime=$(echo "$out" | grep -oE 'Runtime:.*' | sed 's/.*Runtime:[[:space:]]*//' | head -1)
+  creds=$(echo "$out"   | grep -oE 'Credentials: [0-9]+'              | awk '{print $2}')
+  hashes=$(echo "$out"  | grep -oE 'Hashes: [0-9]+'                   | awk '{print $2}')
+  vulns=$(echo "$out"   | grep -oE '[0-9]+ discovered, [0-9]+ exploited')
+  domains=$(echo "$out" | grep -oE 'Domains \([0-9]+/[0-9]+ compromised' | grep -oE '[0-9]+/[0-9]+')
+  tokens=$(echo "$out"  | grep -oE 'Tokens: [0-9,]+' | tr -d ',' | awk '{print $2}')
+  cost=$(echo "$out"    | grep -oE 'Cost:[[:space:]]+\$[0-9.]+' | grep -oE '\$[0-9.]+')
+  ts=$(date -u +%H:%M:%SZ); flag=""
+  if [ -n "$prev_tokens" ] && [ "$tokens" = "$prev_tokens" ] && [ "$op_status" = "running" ]; then
+    frozen_ticks=$((frozen_ticks + 1))
+    flag="  ⚠️ TOKENS FROZEN ${frozen_ticks}m"
+  else
+    frozen_ticks=0
+  fi
+  echo "$ts $op rt=$runtime doms=$domains c=$creds h=$hashes v=$vulns tokens=$tokens $cost status=$op_status$flag"
+  if [ "$frozen_ticks" -ge 2 ]; then
+    echo "=== wedge dig: last 30 WARN/ERROR lines from dispatch ==="
+    task proxmox:logs LINES=200 FILTER='WARN|ERROR|FATAL|Stale task|stale eviction' 2>&1 | tail -30
+    echo "=== orchestrator outbound HTTPS connection count ==="
+    task proxmox:exec CMD='ORCH=$(pgrep -f "ares orchestrator" | head -1); echo orch_pid=$ORCH; sudo ss -tnp 2>/dev/null | grep "pid=$ORCH" | grep -v 127.0.0.1 | wc -l' 2>&1 | tail -5
+    echo "=== end wedge dig ==="
+    frozen_ticks=0
+  fi
+  prev_tokens=$tokens
+  if [ "$op_status" = "completed" ] || [ "$op_status" = "stopped" ]; then
+    echo "$ts Op finished ($op_status) — stopping monitor"; break
+  fi
+  sleep 60
+done
+```
+
+Note: `status` is read-only in zsh — use `op_status`. Tasks run via
+the `Bash` tool inherit a zsh environment.
+
+### Debugging a stuck op via `task proxmox:logs`
+
+`proxmox:logs LINES=<n> FILTER=<regex>` tails the orchestrator dispatch
+log over SSH and strips ANSI for clean grepping. Useful filters when the
+1-min monitor flags a freeze:
+
+```bash
+# What was the last thing that actually completed?
+task proxmox:logs LINES=500 FILTER='Task completed via LLM'
+
+# Are auto-planner tasks being deferred while no LLM call runs?
+# (worker-slot leak symptom — pre-PR-66 binaries; verify with the HTTPS conn count)
+task proxmox:logs LINES=300 FILTER='Task deferred|throttler'
+
+# Trust-follow / cross-forest forge progress
+task proxmox:logs LINES=300 FILTER='Cross-forest forge|raise_child|Cleared stale trust_follow|forge_inter_realm'
+
+# Cracker (remote crackd)
+task proxmox:logs LINES=200 FILTER='crackd|Cracked password|crack_with_hashcat'
+
+# Domain admin / golden ticket events
+task proxmox:logs LINES=500 FILTER='discovery.domain_admin|tool.generate_golden_ticket|Forest trust escalation'
+
+# Anything explicitly fatal
+task proxmox:logs LINES=500 FILTER='FATAL|panic|Traceback|RUST_BACKTRACE|thread .* panicked'
+```
+
+Cross-reference with the orchestrator's outbound HTTPS connection count
+(via `proxmox:exec` + `ss -tnp` filtered to the orch PID): zero open OpenAI
+connections while `status=running` is the canonical wedge signature.
+
+### Known wedge patterns + first-pass remedies
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Tokens frozen, 0 OpenAI conns, `llm_count>0`, only `Task deferred` lines | Worker-slot leak (pre-#66) | `task proxmox:deploy:restart` |
+| Op submits but `Starting operation:` never logged | Dispatcher wedge | `task proxmox:deploy:restart` then re-submit |
+| `crackd backend error: failed to GET /jobs/{id}` repeatedly | Idle-keepalive race vs uvicorn (pre-#64 client; bump server `--timeout-keep-alive` if pre-deploy) | Rebuild from main; verify `pool_idle_timeout` in `ares-tools/src/cracker/remote.rs::http_client` |
+| `Child-to-parent forge dispatched` count is 0 but child trust hash + DCs are in state | `auto_trust_follow` dedup leak (pre-#64) | Rebuild from main; the staleness sweep clears stuck `trust_follow:*` marks every 30s tick |
+| Cross-forest forge dispatched but no target krbtgt | Not a bug. SID filtering on the receiving DC strips the injected claim regardless of RID — the forge has never taken a second forest | Expect the foreign forest to fall to a native escalation instead (ADCS ESC13 above all, then MSSQL linked servers, AS-REP roasting, foreign security principals). Chase why no forest-native credential was acquired, not why the forge failed |
+| Op marks `completed` at N/M domains with N<M | `compute_undominated_forests` collapses children (pre-#68) | Rebuild from main |
+| `Kerberos SessionError: KRB_AP_ERR_SKEW` / `KRB_AP_ERR_TKT_NYV` | DC clock skew vs attacker | Router-side NTP serving + DHCP option 42 — see `project-ludus-dg-clock-skew` memory |
+
+### Common one-shots
+
+```bash
+task proxmox:status                  # VM state + IP + dispatcher procs + service health
+task proxmox:runtime                 # Token/cost/domain banner (one-shot, no watch)
+task proxmox:loot                    # Full loot dump (OP_ID=op-... to target a specific op)
+task proxmox:ops:list                # Every op id in Redis
+task proxmox:deploy                  # Build + push + restart (kills any running op)
+task proxmox:deploy:restart          # Just restart the dispatcher (kills any running op)
+task proxmox:stop                    # Stop the latest op without restarting the dispatcher
+task proxmox:exec CMD='...'          # Arbitrary shell on attacker-1 (avoids `==` zsh parse issues — use `:::` separators)
 ```
 
 ## Red Team Operations (EC2)
@@ -333,7 +470,7 @@ task ec2:exec EC2_NAME=kali-ares CMD='redis-cli ping'  # Arbitrary health check
 
 **K8s:**
 
-1. **Check Grafana** (`grafana.dev.plundr.ai`) for token usage and Loki errors.
+1. **Check Grafana** (`$GRAFANA_URL`) for token usage and Loki errors.
 2. **Check failed tasks**: `ares-cli --k8s ares-red ops tasks --latest --status failed`.
 3. **Verify binary sync**: `task remote:check`.
 4. **Inject state**: If the LLM is stuck on a specific discovery step, manually inject the result.

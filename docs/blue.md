@@ -9,7 +9,7 @@ findings to MITRE ATT&CK, and writes investigation reports.
 **Key Capabilities:**
 
 - Alert triage and multi-stage investigation (triage → causation → lateral → synthesis)
-- LogQL/PromQL query optimization with rate limiting and retry
+- LogQL/PromQL query optimization with result caching and retry
 - Evidence extraction using the Pyramid of Pain framework
 - MITRE ATT&CK technique mapping and gap analysis
 - Lateral movement detection and scope expansion
@@ -41,9 +41,7 @@ The investigation orchestrator manages the full investigation lifecycle:
 
 Runs the worker-side investigation loop with:
 
-- Adaptive query limits based on alert severity and stage
-- Query optimization and duplicate detection
-- Rate limiting to prevent resource abuse
+- Query optimization and result caching (see [Query Management](#query-management))
 - Automatic retry with exponential backoff
 - Resilience mechanisms for failed queries
 
@@ -74,7 +72,6 @@ The `SharedBlueTeamState` model tracks:
 - First-level evidence gathering
 - IOC extraction (IPs, domains, hashes, processes)
 - Basic timeline construction
-- Query limit: 8 queries (12 for critical alerts)
 
 #### 2. CAUSATION - "WHY did it happen?"
 
@@ -82,7 +79,6 @@ The `SharedBlueTeamState` model tracks:
 - Precursor attack identification
 - Attack chain reconstruction
 - Evidence validation and correlation
-- Query limit: 14 queries
 
 #### 3. LATERAL - "What is the SCOPE?"
 
@@ -90,7 +86,6 @@ The `SharedBlueTeamState` model tracks:
 - Impact assessment across hosts/users
 - Scope expansion to compromised assets
 - Connection graph construction
-- Query limit: 20 queries
 
 #### 4. SYNTHESIS - Report generation
 
@@ -99,7 +94,6 @@ The `SharedBlueTeamState` model tracks:
 - Pyramid of Pain assessment
 - Recommendations generation
 - Markdown report creation
-- Query limit: 20 queries
 
 ### Investigation Stage Progression
 
@@ -264,22 +258,8 @@ Example templates:
 get_combined_questions() -> Vec<InvestigativeQuestion>
 ```
 
-Generates investigative questions from three engines:
-
-1. **MITRE Navigator Engine**
-   - Maps evidence to MITRE techniques
-   - Predicts follow-on techniques in attack chains
-   - Identifies tactic gaps in coverage
-
-2. **Pyramid Climber Engine**
-   - Pushes investigation from IOCs toward TTPs
-   - Encourages evidence at higher pyramid levels
-   - Guides analysts toward actionable intelligence
-
-3. **Detection Recipes Engine**
-   - Windows Security Event patterns
-   - Structured investigation workflows
-   - Event ID correlation patterns
+Generates investigative questions from the two engines described under
+[Question Engines](#question-engines), sorted by priority.
 
 ### Learning Tools
 
@@ -382,45 +362,26 @@ Automatic validation of recorded evidence:
 - Suggested IOCs from query data
 - Source query tracking for provenance
 
-### Query Resilience
-
-**Location:** `ares-core/src/`
-
-Ensures reliable query execution:
-
-- Automatic retry with exponential backoff
-- Timeout handling with time range reduction
-- Query result caching
-- Connection pooling
-
 ## Query Management
 
-### Adaptive Query Limits
+### Budget
 
-Query limits scale based on alert severity and investigation stage:
+An investigation is bounded by **agent steps**, not by a query quota. The
+budget is `--max-steps` on the CLI (`MAX_STEPS_BLUE`, default 50 for
+watch/poll; `MAX_STEPS_BLUE_ONCE`, default 15 for one-shot runs). The
+orchestrator additionally enforces a hard timeout watchdog and emits a partial
+report if it fires.
 
-**Base Limits:**
+### Caching and retry
 
-- Normal alerts: 8 queries per investigation
-- Critical alerts: 12 queries per investigation
+Both live in the Loki tool layer (`ares-tools/src/blue/loki.rs`):
 
-**Stage-Based Limits:**
-
-- Triage: 8 queries
-- Causation: 14 queries
-- Lateral: 20 queries
-- Synthesis: 20 queries
-
-**Bonus Queries:**
-
-- +3 for finding evidence
-- +2 for reaching Pyramid level 4+ (Tools/TTPs)
-
-**Hard Limits:**
-
-- Maximum 25 total queries
-- Maximum 2 runs of identical query (duplicate detection)
-- Free retries for queries returning 0 results
+- **Result cache** — keyed on `(logql, start_time, end_time)`, 5-minute TTL,
+  100 entries max. Historical log data is immutable, so a short TTL is safe and
+  it collapses the repeated identical queries an agent tends to issue within one
+  investigation.
+- **Retry** — up to 3 attempts on transient failures (timeouts, 429/502/503/504)
+  with exponential backoff (1s, 2s, 4s), honouring `Retry-After` on 429s.
 
 ### LogQL Optimization
 
@@ -470,131 +431,103 @@ The blue agent uses MCP to connect to Grafana and access observability data:
 - Multi-architecture image rendering
 
 **Setup:**
-See [Grafana MCP Setup](grafana-mcp-setup.md) for MCP server installation instructions.
+See [Grafana MCP](grafana-mcp.md) for server installation and the tool reference.
 
 ### Markdown Report Generation
 
 **Location:** `ares-core/src/reports/`
 
-Investigation reports include:
-
-1. **Executive Summary**
-   - High-level findings
-   - Alert context and severity
-   - Key evidence summary
-
-2. **Timeline of Events**
-   - Chronological attack progression
-   - Pyramid level indicators
-   - MITRE technique mappings
-
-3. **MITRE ATT&CK Mapping**
-   - Identified techniques and tactics
-   - Tactical coverage analysis
-   - Attack lifecycle visualization
-
-4. **Pyramid of Pain Assessment**
-   - IOC type distribution
-   - Progression toward TTPs
-   - Actionable intelligence rating
-
-5. **Evidence Inventory**
-   - Complete evidence list with sources
-   - Confidence ratings
-   - Validation status
-
-6. **Scope Analysis**
-   - Affected hosts and users
-   - Impacted services
-   - Lateral movement paths
-
-7. **Recommendations**
-   - Immediate response actions
-   - Remediation steps
-   - Detection improvements
-
-8. **Appendix**
-   - Raw query data
-   - Investigation metadata
-   - JSON export
+Reports are written in this order: executive summary, timeline of events,
+MITRE ATT&CK mapping, Pyramid of Pain assessment, evidence inventory, scope
+analysis, recommendations, and an appendix carrying the raw query data and a
+JSON export.
 
 ### Investigation Persistence
 
-Completed investigations are stored for learning and reference:
+Completed investigations are stored for historical lookup, query-effectiveness
+statistics, similar-case matching, and false-positive tracking.
 
-- Investigation store for historical lookup
-- Query effectiveness statistics
-- Pattern matching for similar cases
-- False positive tracking
+## Question Engines
 
-## Advanced Investigation Capabilities
+Two engines generate the investigative questions that steer an investigation.
+`get_combined_questions` (`ares-tools/src/blue/engines/tools.rs`) runs both and
+returns the union sorted by priority — MITRE questions from the identified
+techniques, pyramid questions from the recorded evidence. An engine contributes
+nothing when its input is empty, so an investigation with no evidence yet gets
+MITRE questions only.
 
-### Four Question Engines
+- **MITRE Navigator** (`engines/mitre.rs`) — maps evidence to techniques,
+  predicts follow-on techniques, and flags tactic gaps. It ranks precursor
+  questions highest, so "what came before this?" leads the list.
+- **Pyramid Climber** (`engines/pyramid.rs`) — pushes the investigation up the
+  Pyramid of Pain, from hashes and IPs toward tools and TTPs.
 
-The blue agent uses four mandatory question engines to guide investigations:
+Two static datasets back these but are *not* engines and generate no questions
+of their own — they are lookup tables the agent queries directly:
 
-#### 1. Precursor Attack Chain Engine
+- **Attack chains** (`engines/data.rs`) — precursor and follow-on technique
+  relationships, read by the MITRE engine and exposed as
+  `get_attack_chain_precursors`.
+- **Detection recipes** (`engines/data.rs`) — Windows Event ID patterns and
+  correlation sequences, exposed as `get_detection_recipe` and
+  `list_detection_recipes`.
 
-Identifies what came BEFORE the detected technique:
+## Response Actions
 
-- Analyzes MITRE attack phases
-- Identifies likely precursor techniques
-- Builds complete attack chains
-- Focuses on root cause analysis
+Blue's response actions are **simulated**. Nothing in ares writes to Active
+Directory, resets a krbtgt, revokes a certificate, or touches a host firewall.
+There is no responder agent and no privileged path into the lab — blue detects
+and decides, and the decision is recorded rather than enforced.
 
-#### 2. MITRE Navigator Engine
+An investigation names an action by calling `confirm_escalation` with a
+`containment_action`, one of:
 
-Maps techniques and predicts progression:
+| Action | Meaning |
+| ------ | ------- |
+| `escalate_to_human` | Default. Raise the incident, take no further action. |
+| `disable_ad_account` | Would disable the named principal |
+| `isolate_host_firewall` | Would block the named host at the network edge |
+| `revoke_krbtgt` | Would rotate the named domain's krbtgt |
+| `revoke_certificate` | Would revoke the named certificate |
 
-- Maps evidence to MITRE techniques
-- Predicts follow-on techniques
-- Identifies tactical gaps in coverage
-- Suggests techniques commonly seen together
+Each call does two things
+(`ares-cli/src/orchestrator/blue/simulated_response.rs`):
 
-#### 3. Pyramid of Pain Climber Engine
+1. Emits a span named `blue.simulated_response.<action_type>` tagged
+   `attack_team=blue`, which is what the demo dashboard's response panel groups
+   on.
+2. Publishes the matching op-state event through the recorder, so the red side
+   can observe it.
 
-Pushes investigation toward actionable intelligence:
+### How red reacts
 
-- Guides from IOCs (hashes, IPs) toward TTPs
-- Encourages evidence at higher pyramid levels
-- Focuses on attacker behaviors vs artifacts
-- Prioritizes hard-to-change indicators
+The loop closes on the red side, and this part is real. Red classifies its own
+tool failures into containment signals
+(`ares-cli/src/orchestrator/result_processing/containment_recovery.rs`):
 
-#### 4. Detection Recipes Engine
+| Signal | Triggered by |
+| ------ | ------------ |
+| `CredentialRevoked` | `STATUS_LOGON_FAILURE`, LDAP `INVALID_CREDENTIALS` |
+| `KrbtgtRotated` | `KRB_AP_ERR_MODIFIED` across the realm |
+| `HostIsolated` | SMB/WinRM/LDAP all unreachable for one host |
+| `CertificateRevoked` | `KDC_ERR_CLIENT_REVOKED` during PKINIT |
 
-Provides structured investigation workflows:
+When a signal fires, the exploitation queue drops entries whose preconditions
+are now invalid rather than retrying the dead credential or host, and the LLM
+prompt reflects that the principal, host, certificate, or realm is gone. That
+is what stops a containment event from turning into a retry loop.
 
-- Windows Event ID patterns
-- Event correlation sequences
-- Investigation checklists
-- Known attack patterns
-
-### Agent Instructions & Anti-Patterns
-
-**Critical Focus Areas:**
-
-- Query efficiency: query → record evidence → complete (minimize query loops)
-- Use current time values (not stale alert timestamps)
-- Mandatory datasource discovery workflow
-- Label value enumeration to prevent timeouts
-- Immediate evidence recording after queries
-- Precursor investigation emphasis (root cause)
-- Lateral scope expansion for high/critical alerts
-
-**Anti-Patterns to Avoid:**
-
-- Multiple queries without recording evidence
-- Broad regex patterns in label selectors
-- Long time ranges on high-cardinality data
-- Duplicate or redundant queries
-- Investigation without following question engines
-- Ignoring query result validation
+Because the actions are simulated, a signal in a live run is more often red
+invalidating its *own* working credential through cross-realm recon than an
+actual lab rotation — verify with netexec before concluding blue caused it.
 
 ## Key Files Reference
 
 | Component | Path |
 | ----------- | ------ |
 | Blue Orchestrator | `ares-cli/src/orchestrator/blue/` |
+| Simulated Response | `ares-cli/src/orchestrator/blue/simulated_response.rs` |
+| Red Containment Recovery | `ares-cli/src/orchestrator/result_processing/containment_recovery.rs` |
 | Blue Worker Task Loop | `ares-cli/src/worker/blue_task_loop.rs` |
 | Blue CLI Commands | `ares-cli/src/blue/` |
 | Core Models | `ares-core/src/models/` |
@@ -606,28 +539,22 @@ Provides structured investigation workflows:
 
 ## Configuration
 
-### Investigation Configuration
-
-Blue agent configuration in `config/` files:
+There is no `blue_team:` section in `config/ares.yaml`. What blue reads from
+the config file is the backend wiring it needs to reach observability data:
 
 ```yaml
-blue_team:
-  investigation:
-    max_queries: 25  # Hard query limit
-    timeout_per_step: 60  # Seconds per investigation step
-    timeout_buffer: 120  # Extra seconds before hard timeout
-    query_cache_ttl: 300  # Query cache TTL in seconds
-
-  observability:
-    loki_timeout: 30  # Loki query timeout
-    prometheus_timeout: 30  # Prometheus query timeout
-    default_log_limit: 100  # Default log line limit
-
-  reporting:
-    format: markdown  # Report format
-    include_raw_data: true  # Include appendix with raw data
-    export_json: true  # Export JSON alongside markdown
+observability:
+  loki_url: ""
+  prometheus_url: "http://localhost:9090"
 ```
+
+On EC2 the authoritative environment is `/etc/ares/env`, not this file — a
+missing `LOKI_URL` there produces an investigation that reports `fired=0`
+because it is blind, not because the range was quiet.
+
+Everything else is set per run: the step budget via `--max-steps`, the model
+via `MODEL` / `ARES_LLM_MODEL`, and the cache and retry behaviour is compiled
+in (see [Caching and retry](#caching-and-retry)).
 
 ## Usage
 
@@ -635,7 +562,7 @@ blue_team:
 
 - **API keys** in `.env` or 1Password: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `GRAFANA_SERVICE_ACCOUNT_TOKEN`, `DREADNODE_API_KEY`
-- **Grafana MCP** configured (see [Grafana MCP Usage](grafana_mcp_usage.md))
+- **Grafana MCP** configured (see [Grafana MCP](grafana-mcp.md))
 - **Redis** accessible (K8s in-cluster, or port-forwarded for local/EC2)
 - **ares** binary built (`cargo build --release`)
 
@@ -666,23 +593,28 @@ All blue team tasks are invoked via `task blue:<command>`. Most accept
 task blue:once OPERATION_ID=op-xxx
 task blue:once LATEST=true
 
-# Single investigation from a red team operation (K8s remote)
-task blue:once:remote LATEST=true
-
 # Submit a specific alert JSON file
-task blue:investigate ALERT=alert.json
+task blue:submit ALERT=alert.json
+task blue:submit ALERT=alert.json INVESTIGATION_ID=inv-xxx MULTI_AGENT=true
 
 # Continuous poll mode (re-checks every POLL_INTERVAL seconds)
 task blue:poll
 
-# Multi-agent investigation via K8s orchestrator
-task blue:multi ALERT=alert.json
-task blue:multi ALERT=alert.json INVESTIGATION_ID=inv-xxx MULTI_AGENT=true
-
 # Multi-agent from red team operation (K8s remote)
 task blue:multi:remote LATEST=true
 task blue:multi:remote OPERATION_ID=op-xxx
+task blue:multi:remote LATEST=true MAX_STEPS=15   # short run
 ```
+
+`blue:submit` reads `BLUE_TRANSPORT` like every other blue task: `ec2`
+(default, over SSM), `k8s` (`kubectl exec` into the blue orchestrator), or
+`local`. The alert is passed by value rather than by path, since under the
+remote transports a local file path does not resolve on the far side.
+
+It deliberately does not forward `--grafana-api-key`: the EC2 transport ships
+argv through SSM `send-command`, which would persist the token in SSM command
+history and CloudTrail. `blue submit` falls back to the remote's own
+`GRAFANA_SERVICE_ACCOUNT_TOKEN`, which is what the investigation reads anyway.
 
 #### Monitoring Investigations
 
@@ -704,11 +636,20 @@ task blue:multi:runtime LATEST=true
 # Triage decision audit trail
 task blue:multi:triage-status LATEST=true
 
-# Follow logs
-task blue:multi:logs                          # orchestrator only
-task blue:multi:logs ALL=true                 # all blue pods
-task blue:multi:logs ROLE=threat-hunter       # specific role
+# Follow logs (transport-aware)
+task blue:multi:logs                          # EC2: blue lines in the orchestrator log
+task blue:multi:logs ALL=true                 # EC2: the whole orchestrator log (red+blue)
+task blue:multi:logs BLUE_TRANSPORT=k8s ROLE=threat-hunter   # K8s: one role's pods
+task blue:multi:logs BLUE_TRANSPORT=k8s ALL=true             # K8s: all blue pods
 ```
+
+On EC2 blue is not a separate process: `ec2:launch` runs the orchestrator with
+`ARES_BLUE_ENABLED=1` and systemd appends both streams to
+`/var/log/ares/orchestrator.log`, so blue lines are interleaved with red and
+there are no per-role blue pods to select. The default view greps for
+`blue|investigation|inv-`, because log lines carry no module target
+(telemetry defaults to `show_target=false`).
+
 
 #### Viewing Results
 
@@ -728,9 +669,14 @@ task blue:multi:techniques LATEST=true
 task blue:reports:consolidate LATEST=true
 task blue:reports:consolidate OPERATION_ID=op-xxx OUTPUT_DIR=./reports
 
-# Export detection playbook (runs on red orchestrator pod)
+# Export detection playbook as JSON to ./reports/blue/ (reads RED operation
+# state, so under BLUE_TRANSPORT=k8s it targets the red orchestrator)
 task blue:playbook LATEST=true
-task blue:playbook OPERATION_ID=op-xxx JSON=true
+task blue:playbook OPERATION_ID=op-xxx
+
+# The markdown variant is written by the CLI itself, on the box:
+#   ares ops export-detection op-xxx --output-dir <dir>
+#     -> <dir>/op-xxx/detection_playbook.{json,md}
 
 # List / view local reports
 task blue:reports:list
@@ -821,26 +767,7 @@ task red:ec2:multi TARGET=dreadgoad DOMAIN=contoso.local BLUE_ENABLED=1
 | `POLL_INTERVAL` | `30` | Seconds between poll cycles |
 | `MAX_STEPS_BLUE` | `50` | Max agent steps (watch/poll mode) |
 | `MAX_STEPS_BLUE_ONCE` | `15` | Max agent steps (once/investigate mode) |
-| `GRAFANA_URL` | _(none - must be set)_ | Grafana instance |
+| `GRAFANA_URL` | *(none - must be set)* | Grafana instance |
 | `K8S_NAMESPACE` | `attack-simulation` | K8s namespace for remote commands |
 | `REPORT_DIR` | `./reports` | Report output directory |
 | `LOG_DIR` | `./logs` | Log output directory |
-
-## Summary
-
-The **Ares Blue Agent** handles autonomous SOC investigation:
-
-1. Picks up alerts from Grafana
-2. Queries Loki and Prometheus with rate limiting and retry
-3. Extracts evidence using the Pyramid of Pain framework
-4. Maps to MITRE ATT&CK for tactical context and gap analysis
-5. Identifies attack precursors to build complete attack chains
-6. Detects lateral movement and expands investigation scope
-7. Correlates related alerts to identify campaign patterns
-8. Learns from past investigations
-9. Generates reports with timelines, recommendations, and evidence
-10. Posts annotations back to Grafana
-
-The blue agent cuts investigation time by automating the triage-to-report
-pipeline. The Red-Blue correlation loop surfaces detection gaps that
-manual review tends to miss.

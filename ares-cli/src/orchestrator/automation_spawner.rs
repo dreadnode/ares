@@ -52,6 +52,7 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_gmsa_extraction);
     spawn_auto!(auto_unconstrained_exploitation);
     spawn_auto!(auto_stall_detection);
+    spawn_auto!(auto_orchestrator_planning);
     spawn_auto!(auto_credential_reuse);
     spawn_auto!(auto_shadow_credentials);
     spawn_auto!(auto_rbcd_exploitation);
@@ -78,7 +79,6 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_petitpotam_unauth);
     spawn_auto!(auto_winrm_lateral);
     spawn_auto!(auto_group_enumeration);
-    spawn_auto!(auto_krbrelayup);
     spawn_auto!(auto_searchconnector_coercion);
     spawn_auto!(auto_lsassy_dump);
     spawn_auto!(auto_rdp_lateral);
@@ -90,6 +90,7 @@ pub(crate) fn spawn_automation_tasks(
     spawn_auto!(auto_dns_enum);
     spawn_auto!(auto_domain_user_enum);
     spawn_auto!(auto_pth_spray);
+    spawn_auto!(auto_local_auth_sweep);
     spawn_auto!(auto_dacl_abuse);
     spawn_auto!(auto_smbclient_enum);
     spawn_auto!(auto_acl_discovery);

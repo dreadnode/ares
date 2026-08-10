@@ -1,4 +1,4 @@
-//! Convenience methods for common task types (request_crack, request_recon, etc.).
+//! Convenience methods for common task types (request_recon, etc.).
 
 use anyhow::Result;
 use serde_json::json;
@@ -6,6 +6,7 @@ use tracing::{debug, info, instrument};
 
 use ares_core::models::{Credential, Hash};
 
+use crate::orchestrator::acl_graph::is_usable_hash;
 use crate::orchestrator::state::{StateInner, DEDUP_CROSS_REALM_LATERAL, DEDUP_SCANNED_TARGETS};
 
 use super::Dispatcher;
@@ -45,8 +46,13 @@ impl ExploitAuth {
 /// Lookup order:
 ///   1. Credential by `account_name` (any domain).
 ///   2. Credential in the target domain, excluding delegation accounts.
-///   3. Hash by `account_name` (any domain).
-///   4. Hash in the target domain.
+///   3. [`is_usable_hash`] hash by `account_name` (any domain).
+///   4. [`is_usable_hash`] hash in the target domain.
+///
+/// An uncracked kerberoast/AS-REP blob is crack material, never auth: counting
+/// one satisfied [`ExploitAuth::matches_domain`] on domain alone, so the gate
+/// below dispatched the exploit with the ciphertext in `payload["hash"]`
+/// instead of deferring it until the cracker returned a plaintext.
 ///
 /// When no `domain` is supplied, falls back to "any non-delegation credential"
 /// — preserved for legacy callers that dispatch domain-agnostic exploits.
@@ -84,12 +90,12 @@ fn select_exploit_auth(
         state
             .hashes
             .iter()
-            .find(|h| h.username.eq_ignore_ascii_case(acct))
+            .find(|h| h.username.eq_ignore_ascii_case(acct) && is_usable_hash(h))
     } else if !domain.is_empty() {
         state
             .hashes
             .iter()
-            .find(|h| h.domain.eq_ignore_ascii_case(domain))
+            .find(|h| h.domain.eq_ignore_ascii_case(domain) && is_usable_hash(h))
     } else {
         None
     }
@@ -116,6 +122,17 @@ fn vuln_type_is_preauth(vtype: &str) -> bool {
     )
 }
 
+fn lateral_backing_vuln_id(state: &StateInner, target_ip: &str, technique: &str) -> Option<String> {
+    if !technique.to_ascii_lowercase().contains("winrm") {
+        return None;
+    }
+    state
+        .discovered_vulnerabilities
+        .values()
+        .find(|v| v.vuln_type.eq_ignore_ascii_case("winrm_access") && v.target == target_ip)
+        .map(|v| v.vuln_id.clone())
+}
+
 /// Vuln types whose exploitation primitive lives in the `acl` worker's
 /// toolset (bloodyAD, pywhisker, dacl_edit). Used to route `request_exploit`
 /// to the right worker when the emitting parser left `recommended_agent`
@@ -125,7 +142,7 @@ fn vuln_type_is_preauth(vtype: &str) -> bool {
 /// Matches on substrings so we cover both the bare form (e.g.
 /// `allextendedrights`) and the prefixed form emitted by acl_discovery
 /// (`acl_allextendedrights_<sid>_<target>`).
-fn is_acl_style_vuln_type(vtype: &str) -> bool {
+pub(crate) fn is_acl_style_vuln_type(vtype: &str) -> bool {
     let v = vtype.to_ascii_lowercase();
     v.contains("genericall")
         || v.contains("genericwrite")
@@ -140,21 +157,74 @@ fn is_acl_style_vuln_type(vtype: &str) -> bool {
         || v.contains("addself")
 }
 
+/// Gather crack-seed material from op state for crack automation:
+/// distinct usernames (for the cracker's dynamic username→candidate generator)
+/// and distinct recovered plaintexts (every op credential — cracked passwords
+/// AND harvested cleartext like autologon/SYSVOL/description leaks). Machine
+/// accounts (`$`-suffixed) are dropped from the username seed — their passwords
+/// are un-guessable and only bloat the candidate list. Both are bounded so the
+/// task payload (and the Redis message that carries it) stays small.
+pub(crate) fn collect_crack_seed(state: &StateInner) -> (Vec<String>, Vec<String>) {
+    const MAX_USERNAMES: usize = 512;
+    const MAX_PASSWORDS: usize = 256;
+
+    let mut users_seen = std::collections::HashSet::new();
+    let mut usernames = Vec::new();
+    for name in state
+        .users
+        .iter()
+        .map(|u| u.username.as_str())
+        .chain(state.credentials.iter().map(|c| c.username.as_str()))
+    {
+        let name = name.trim();
+        if name.is_empty() || name.ends_with('$') {
+            continue;
+        }
+        if users_seen.insert(name.to_lowercase()) {
+            usernames.push(name.to_string());
+            if usernames.len() >= MAX_USERNAMES {
+                break;
+            }
+        }
+    }
+
+    let mut pw_seen = std::collections::HashSet::new();
+    let mut passwords = Vec::new();
+    for password in state.credentials.iter().map(|c| c.password.as_str()) {
+        let password = password.trim();
+        if password.is_empty() || password.len() > 128 {
+            continue;
+        }
+        if pw_seen.insert(password.to_string()) {
+            passwords.push(password.to_string());
+            if passwords.len() >= MAX_PASSWORDS {
+                break;
+            }
+        }
+    }
+
+    (usernames, passwords)
+}
+
 impl Dispatcher {
-    /// Submit a crack task for a hash.
     #[instrument(
         name = "automation.request_crack",
         skip(self, hash),
-        fields(username = %hash.username, domain = %hash.domain, hash_type = %hash.hash_type),
+        fields(hash_type = %hash.hash_type, username = %hash.username, domain = %hash.domain),
     )]
     pub async fn request_crack(&self, hash: &ares_core::models::Hash) -> Result<Option<String>> {
+        let (known_usernames, known_passwords) = {
+            let state = self.state.read().await;
+            collect_crack_seed(&state)
+        };
         let payload = json!({
             "hash_type": hash.hash_type,
             "hash_value": hash.hash_value,
             "username": hash.username,
             "domain": hash.domain,
+            "known_usernames": known_usernames,
+            "known_passwords": known_passwords,
         });
-        // Crack tasks are non-LLM, normal priority
         self.throttled_submit("crack", "cracker", payload, 5).await
     }
 
@@ -232,18 +302,12 @@ impl Dispatcher {
             }
         }
 
-        // Mark nmap targets as scanned (optimistic, to prevent duplicate dispatches)
-        if is_nmap {
-            {
-                let mut state = self.state.write().await;
-                state.mark_processed(DEDUP_SCANNED_TARGETS, target_ip.to_string());
-            }
-            // Persist to Redis so it survives restarts
-            let _ = self
-                .state
-                .persist_dedup(&self.queue, DEDUP_SCANNED_TARGETS, target_ip)
-                .await;
-        }
+        // `scanned_targets` is marked when the scan task is actually dispatched
+        // (see `submit_to_llm`), not here at submit-request time. Marking before
+        // the throttle decision recorded a target as scanned even when the task
+        // was deferred and later evicted from the deferred queue unrun, which
+        // permanently suppressed the scan via Guard 2/Guard 3 above — leaving
+        // member-server hosts as bare IPs with no ports in loot.
 
         let mut payload = json!({
             "target_ip": target_ip,
@@ -466,6 +530,22 @@ impl Dispatcher {
                 return Ok(None);
             }
         }
+        let backing_vuln = {
+            let state = self.state.read().await;
+            lateral_backing_vuln_id(&state, target_ip, technique)
+        };
+        if let Some(vuln_id) = backing_vuln {
+            if self.state.is_exploit_abandoned(&vuln_id).await {
+                debug!(
+                    target_ip = target_ip,
+                    technique = technique,
+                    vuln_id = %vuln_id,
+                    "Skipping lateral — backing vuln abandoned at max exploit failures"
+                );
+                return Ok(None);
+            }
+        }
+
         let payload = json!({
             "technique": technique,
             "target_ip": target_ip,
@@ -822,6 +902,64 @@ mod tests {
         assert_eq!(auth.hash.as_ref().unwrap().domain, "fabrikam.local");
     }
 
+    fn make_asrep_hash(username: &str, domain: &str) -> Hash {
+        let mut h = make_hash(username, domain);
+        h.hash_type = "AS-REP".into();
+        h.hash_value = format!("$krb5asrep$23${username}@{domain}:aabbccdd");
+        h
+    }
+
+    #[test]
+    fn select_auth_skips_uncracked_asrep_hash() {
+        let mut state = StateInner::new("op-test".into());
+        state.hashes.push(make_asrep_hash("bob", "fabrikam.local"));
+
+        let auth = select_exploit_auth(&state, None, "fabrikam.local");
+
+        assert!(
+            auth.hash.is_none(),
+            "AS-REP ciphertext is crack material, not auth the exploit worker can use"
+        );
+        assert!(
+            !auth.matches_domain("fabrikam.local"),
+            "the gate must defer the exploit, not dispatch it with a roast blob attached"
+        );
+    }
+
+    #[test]
+    fn select_auth_skips_asrep_hash_matched_by_account_name() {
+        let mut state = StateInner::new("op-test".into());
+        state.hashes.push(make_asrep_hash("bob", "fabrikam.local"));
+
+        let auth = select_exploit_auth(&state, Some("bob"), "fabrikam.local");
+
+        assert!(auth.hash.is_none());
+    }
+
+    #[test]
+    fn select_auth_takes_ntlm_hash_past_an_asrep_hash() {
+        let mut state = StateInner::new("op-test".into());
+        state.hashes.push(make_asrep_hash("bob", "fabrikam.local"));
+        state.hashes.push(make_hash("carol", "fabrikam.local"));
+
+        let auth = select_exploit_auth(&state, None, "fabrikam.local");
+
+        assert_eq!(auth.hash.as_ref().unwrap().username, "carol");
+        assert!(auth.matches_domain("fabrikam.local"));
+    }
+
+    #[test]
+    fn select_auth_takes_cracked_password_while_asrep_hash_lingers() {
+        let mut state = StateInner::new("op-test".into());
+        state.hashes.push(make_asrep_hash("bob", "fabrikam.local"));
+        state.credentials.push(make_cred("bob", "fabrikam.local"));
+
+        let auth = select_exploit_auth(&state, None, "fabrikam.local");
+
+        assert_eq!(auth.credential.as_ref().unwrap().username, "bob");
+        assert!(auth.matches_domain("fabrikam.local"));
+    }
+
     #[test]
     fn select_auth_domain_match_is_case_insensitive() {
         let mut state = StateInner::new("op-test".into());
@@ -988,5 +1126,116 @@ mod tests {
         assert!(is_acl_style_vuln_type("genericwrite"));
         assert!(is_acl_style_vuln_type("GenericWrite"));
         assert!(is_acl_style_vuln_type("acl_genericwrite_dc01"));
+    }
+
+    fn make_cred_pw(username: &str, password: &str) -> Credential {
+        Credential {
+            id: format!("cred-{username}"),
+            username: username.into(),
+            password: password.into(),
+            domain: "contoso.local".into(),
+            source: "test".into(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        }
+    }
+
+    fn make_user(username: &str) -> ares_core::models::User {
+        ares_core::models::User {
+            username: username.into(),
+            domain: "contoso.local".into(),
+            description: String::new(),
+            is_admin: false,
+            source: "test".into(),
+            member_of: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn collect_crack_seed_dedups_users_and_harvests_passwords() {
+        let mut state = StateInner::new("op-test".into());
+        state.users.push(make_user("alice"));
+        // Machine account — dropped from the username seed.
+        state.users.push(make_user("dc01$"));
+        // A credential whose username duplicates a user (case-insensitive) and
+        // whose password is a harvested cleartext we want as a crack candidate.
+        state.credentials.push(make_cred_pw("Alice", "P@ssw0rd!"));
+        state.credentials.push(make_cred_pw("bob", "P@ssw0rd!")); // dup password
+        state.credentials.push(make_cred_pw("carol", "P@ssw0rd2!"));
+
+        let (usernames, passwords) = collect_crack_seed(&state);
+
+        // alice (from users, deduped against the "Alice" cred), bob, carol.
+        // dc01$ dropped.
+        assert!(usernames.iter().any(|u| u.eq_ignore_ascii_case("alice")));
+        assert!(usernames.iter().any(|u| u == "bob"));
+        assert!(usernames.iter().any(|u| u == "carol"));
+        assert!(!usernames.iter().any(|u| u.ends_with('$')));
+        assert_eq!(usernames.len(), 3, "case-insensitive username dedup");
+
+        // Passwords deduped; both harvested plaintexts present, no blanks.
+        assert_eq!(passwords.len(), 2);
+        assert!(passwords.contains(&"P@ssw0rd!".to_string()));
+        assert!(passwords.contains(&"P@ssw0rd2!".to_string()));
+    }
+
+    fn winrm_access_vuln(vuln_id: &str, target: &str) -> ares_core::models::VulnerabilityInfo {
+        ares_core::models::VulnerabilityInfo {
+            vuln_id: vuln_id.into(),
+            vuln_type: "winrm_access".into(),
+            target: target.into(),
+            discovered_by: "test".into(),
+            discovered_at: chrono::Utc::now(),
+            details: Default::default(),
+            recommended_agent: String::new(),
+            priority: 1,
+        }
+    }
+
+    #[test]
+    fn winrm_lateral_resolves_the_backing_vuln() {
+        let mut state = StateInner::new("op-test".into());
+        state.discovered_vulnerabilities.insert(
+            "winrm_access_192_168_58_30".into(),
+            winrm_access_vuln("winrm_access_192_168_58_30", "192.168.58.30"),
+        );
+
+        assert_eq!(
+            lateral_backing_vuln_id(&state, "192.168.58.30", "winrm_exec").as_deref(),
+            Some("winrm_access_192_168_58_30"),
+            "without this the abandonment cap has no key to check and the planner \
+             re-dispatches the same dead winrm target every turn"
+        );
+    }
+
+    #[test]
+    fn non_winrm_lateral_has_no_backing_vuln() {
+        let mut state = StateInner::new("op-test".into());
+        state.discovered_vulnerabilities.insert(
+            "winrm_access_192_168_58_30".into(),
+            winrm_access_vuln("winrm_access_192_168_58_30", "192.168.58.30"),
+        );
+
+        assert!(
+            lateral_backing_vuln_id(&state, "192.168.58.30", "psexec").is_none(),
+            "psexec is not backed by winrm_access; gating it on that vuln would \
+             suppress an unrelated technique"
+        );
+    }
+
+    #[test]
+    fn winrm_lateral_against_another_host_has_no_backing_vuln() {
+        let mut state = StateInner::new("op-test".into());
+        state.discovered_vulnerabilities.insert(
+            "winrm_access_192_168_58_30".into(),
+            winrm_access_vuln("winrm_access_192_168_58_30", "192.168.58.30"),
+        );
+
+        assert!(
+            lateral_backing_vuln_id(&state, "192.168.58.40", "winrm_exec").is_none(),
+            "the cap is per target; one dead host must not suppress the others"
+        );
     }
 }

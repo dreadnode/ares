@@ -15,6 +15,7 @@ fn make_user(domain: &str, username: &str) -> User {
         description: String::new(),
         is_admin: false,
         source: String::new(),
+        member_of: Vec::new(),
     }
 }
 
@@ -451,6 +452,46 @@ fn normalize_state_domains_strips_trailing_dots() {
     assert_eq!(creds[0].domain, "contoso.local");
     assert_eq!(hashes[0].domain, "contoso.local");
     assert_eq!(domains[0], "contoso.local");
+}
+
+#[test]
+fn normalize_state_domains_drops_workgroup_pseudo_domain() {
+    // WORKGROUP arrives as a user domain (so it would otherwise pass the
+    // valid-domain gate), but must be dropped as a pseudo-domain so it can't
+    // inflate the `(N/M domains, X/Y forests)` counts downstream.
+    let users = vec![
+        make_user("contoso.local", "admin"),
+        make_user("WORKGROUP", "localuser"),
+    ];
+    let mut creds = vec![];
+    let mut hashes = vec![];
+    let mut domains = vec!["contoso.local".to_string(), "WORKGROUP".to_string()];
+    let hosts = vec![];
+
+    normalize_state_domains(&users, &mut creds, &mut hashes, &mut domains, &hosts, None);
+
+    assert_eq!(domains, vec!["contoso.local".to_string()]);
+}
+
+#[test]
+fn normalize_state_domains_drops_win_computer_name_pseudo_domain() {
+    // A WIN-<11> computer-name FQDN leaked in as a user domain (the classic
+    // kali workgroup leak) must not survive as a phantom realm.
+    let users = vec![
+        make_user("contoso.local", "admin"),
+        make_user("WIN-ABCDEFGHIJK.leak.local", "svc"),
+    ];
+    let mut creds = vec![];
+    let mut hashes = vec![];
+    let mut domains = vec![
+        "contoso.local".to_string(),
+        "WIN-ABCDEFGHIJK.leak.local".to_string(),
+    ];
+    let hosts = vec![];
+
+    normalize_state_domains(&users, &mut creds, &mut hashes, &mut domains, &hosts, None);
+
+    assert_eq!(domains, vec!["contoso.local".to_string()]);
 }
 
 #[test]
@@ -1211,6 +1252,17 @@ fn is_ghost_machine_account_matches_nopac_pattern() {
     assert!(is_ghost_machine_account("WIN-3KSGCLTS7NX"));
 }
 
+/// Accounts minted by `add_computer` are ours too. Before this, the agent named
+/// them after whatever the lab looked like, so they rendered as captured loot
+/// beside the real host account they were imitating.
+#[test]
+fn is_ghost_machine_account_matches_minted_add_computer_accounts() {
+    use super::is_ghost_machine_account;
+    assert!(is_ghost_machine_account("ARES-1A2B3C4D$"));
+    assert!(is_ghost_machine_account("ARES-1A2B3C4D"));
+    assert!(is_ghost_machine_account("ares-1a2b3c4d$"));
+}
+
 #[test]
 fn is_ghost_machine_account_rejects_real_hosts() {
     use super::is_ghost_machine_account;
@@ -1219,6 +1271,11 @@ fn is_ghost_machine_account_rejects_real_hosts() {
     assert!(!is_ghost_machine_account("WIN-2019$")); // wrong length
     assert!(!is_ghost_machine_account("administrator"));
     assert!(!is_ghost_machine_account(""));
+    // A real lab host must still count as loot, including one whose name the
+    // agent might have been imitating.
+    assert!(!is_ghost_machine_account("SQL01$"));
+    assert!(!is_ghost_machine_account("ARES-XYZ$")); // not 8 hex digits
+    assert!(!is_ghost_machine_account("ARES-1A2B3C4D5$")); // wrong length
 }
 
 #[test]

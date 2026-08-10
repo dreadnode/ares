@@ -42,19 +42,24 @@ fn generate_recon_prompt() {
     assert!(prompt.contains("192.168.58.0/24"));
     assert!(prompt.contains("contoso.local"));
     assert!(prompt.contains("- nmap_scan"));
+    assert!(prompt.contains("Invalid credentials (49)"));
+    assert!(prompt.contains("null_session=true"));
 }
 
 #[test]
 fn generate_crack_prompt() {
     let payload = serde_json::json!({
         "hash_type": "ntlm",
-        "hash_value": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+        "hash_value": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0\n$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$spn*$aa$bb",
         "username": "admin",
         "domain": "contoso.local"
     });
     let prompt = generate_task_prompt("crack", "task-002", &payload, None).unwrap();
     assert!(prompt.contains("Crack Task: task-002"));
     assert!(prompt.contains("ntlm"));
+    assert!(prompt.contains("```text\naad3b435b51404eeaad3b435b51404ee"));
+    assert!(prompt.contains("\n$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$spn*$aa$bb\n```"));
+    assert!(prompt.contains("entire multi-line value"));
     assert!(prompt.contains("admin"));
 }
 
@@ -119,6 +124,81 @@ fn generate_coercion_prompt() {
     assert!(prompt.contains("Coercion Task: task-006"));
     assert!(prompt.contains("192.168.58.10"));
     assert!(prompt.contains("- petitpotam"));
+}
+
+#[test]
+fn coercion_prompt_renders_singular_technique_key() {
+    let payload = serde_json::json!({
+        "technique": "mssql_ntlm_coercion",
+        "target_ip": "192.168.58.22",
+        "listener_ip": "192.168.58.100",
+        "credential": {
+            "username": "svc_sql",
+            "password": "P@ssw0rd!",
+            "domain": "contoso.local",
+        },
+    });
+    let prompt = generate_task_prompt("coercion", "task-006b", &payload, None).unwrap();
+    assert!(prompt.contains("- mssql_ntlm_coercion"));
+    assert!(prompt.contains("192.168.58.22"));
+}
+
+#[test]
+fn coercion_prompt_singular_technique_distinguishes_sibling_drivers() {
+    for technique in [
+        "ntlm_relay_ldap",
+        "ntlm_relay_adcs",
+        "share_coercion",
+        "dfs_coercion",
+        "searchconnector_coercion",
+    ] {
+        let payload = serde_json::json!({
+            "technique": technique,
+            "target_ip": "192.168.58.10",
+            "listener_ip": "192.168.58.100",
+        });
+        let prompt = generate_task_prompt("coercion", "task-006c", &payload, None).unwrap();
+        assert!(
+            prompt.contains(&format!("- {technique}")),
+            "{technique} missing from rendered prompt"
+        );
+    }
+}
+
+#[test]
+fn coercion_prompt_falls_back_to_relay_target() {
+    let payload = serde_json::json!({
+        "technique": "ntlm_relay_adcs",
+        "relay_target": "192.168.58.240",
+        "listener_ip": "192.168.58.100",
+    });
+    let prompt = generate_task_prompt("coercion", "task-006d", &payload, None).unwrap();
+    assert!(prompt.contains("**Target:** 192.168.58.240"));
+    assert!(!prompt.contains("**Target:** unknown"));
+}
+
+#[test]
+fn coercion_prompt_plural_key_wins_over_singular() {
+    let payload = serde_json::json!({
+        "technique": "ignored_singular",
+        "techniques": ["petitpotam", "dfscoerce"],
+        "target_ip": "192.168.58.10",
+        "listener_ip": "192.168.58.100",
+    });
+    let prompt = generate_task_prompt("coercion", "task-006e", &payload, None).unwrap();
+    assert!(prompt.contains("- petitpotam"));
+    assert!(prompt.contains("- dfscoerce"));
+    assert!(!prompt.contains("ignored_singular"));
+}
+
+#[test]
+fn coercion_prompt_target_still_unknown_without_any_target_key() {
+    let payload = serde_json::json!({
+        "technique": "petitpotam",
+        "listener_ip": "192.168.58.100",
+    });
+    let prompt = generate_task_prompt("coercion", "task-006f", &payload, None).unwrap();
+    assert!(prompt.contains("**Target:** unknown"));
 }
 
 #[test]
@@ -514,6 +594,32 @@ fn exploit_adcs_esc1() {
 }
 
 #[test]
+fn exploit_adcs_esc1_reads_parameters_nested_under_details() {
+    // The shape `Dispatcher::request_exploit` builds — the whole vulnerability
+    // record under `details`, nothing but vuln_type/target at the top level.
+    // Reading only the top level renders every parameter blank and the agent
+    // fails the task on a missing-parameter precondition.
+    let payload = serde_json::json!({
+        "vuln_id": "adcs_esc1_192.168.58.15_subca",
+        "vuln_type": "adcs_esc1",
+        "target": "192.168.58.15",
+        "details": {
+            "ca_name": "CONTOSO-CA",
+            "ca_host": "192.168.58.15",
+            "template_name": "SubCA",
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10"
+        }
+    });
+    let prompt = generate_task_prompt("exploit", "t-24b", &payload, None).unwrap();
+    assert!(prompt.contains("ADCS ADCS_ESC1 EXPLOITATION"));
+    assert!(prompt.contains("CONTOSO-CA"));
+    assert!(prompt.contains("SubCA"));
+    assert!(prompt.contains("contoso.local"));
+    assert!(prompt.contains("192.168.58.10"));
+}
+
+#[test]
 fn exploit_adcs_esc8() {
     let payload = serde_json::json!({
         "vuln_type": "adcs_esc8",
@@ -579,6 +685,43 @@ fn exploit_adcs_esc8_omits_fallback_block_when_only_one_candidate() {
 }
 
 #[test]
+fn exploit_adcs_esc9_renders_the_victim_account() {
+    let payload = serde_json::json!({
+        "vuln_type": "adcs_esc9",
+        "target": "192.168.58.15",
+        "ca_server": "192.168.58.50",
+        "template": "ESC9Tmpl",
+        "domain": "contoso.local",
+        "username": "alice",
+        "password": "P@ssw0rd!",
+        "victim_account": "bob",
+        "victim_write_source": "alice",
+        "victim_write_right": "genericwrite",
+        "victim_credential_known": false,
+    });
+    let prompt = generate_task_prompt("exploit", "t-27", &payload, None).unwrap();
+    assert!(prompt.contains("Victim Account (rewrite THIS account's userPrincipalName): bob"));
+    assert!(prompt.contains("write held by alice via genericwrite"));
+    assert!(prompt.contains("`user` for certipy_account_update = bob, NEVER alice"));
+    assert!(prompt.contains("certipy_shadow it first"));
+}
+
+#[test]
+fn exploit_adcs_esc9_without_a_victim_renders_no_victim_block() {
+    let payload = serde_json::json!({
+        "vuln_type": "adcs_esc9",
+        "target": "192.168.58.15",
+        "ca_server": "192.168.58.50",
+        "template": "ESC9Tmpl",
+        "domain": "contoso.local",
+        "username": "alice",
+    });
+    let prompt = generate_task_prompt("exploit", "t-28", &payload, None).unwrap();
+    assert!(!prompt.contains("Victim Account"));
+    assert!(!prompt.contains("certipy_account_update ="));
+}
+
+#[test]
 fn exploit_trust_key_extraction() {
     let payload = serde_json::json!({
         "vuln_type": "trust_key",
@@ -592,13 +735,38 @@ fn exploit_trust_key_extraction() {
     let prompt = generate_task_prompt("exploit", "t-30", &payload, None).unwrap();
     assert!(prompt.contains("TRUST KEY EXTRACTION"));
     assert!(prompt.contains("extract_trust_key"));
-    assert!(prompt.contains("create_inter_realm_ticket"));
     assert!(prompt.contains("fabrikam.local"));
-    assert!(prompt.contains("secretsdump_kerberos"));
+}
+
+/// The inter-forest branch must not steer the model at the trust-key forge:
+/// SID filtering on the receiving DC strips the injected claim regardless of
+/// RID, so no forge variant escalates. It has to route to a credential native
+/// to the target forest driving a native escalation.
+#[test]
+fn exploit_cross_forest_steers_to_native_escalation_not_forge() {
+    let payload = serde_json::json!({
+        "vuln_type": "trust_key",
+        "target": "192.168.58.10",
+        "domain": "contoso.local",
+        "trusted_domain": "fabrikam.local",
+        "username": "Administrator",
+        "password": "P@ss1",
+        "dc_ip": "192.168.58.10"
+    });
+    let prompt = generate_task_prompt("exploit", "t-30b", &payload, None).unwrap();
+    assert!(prompt.contains("THE TRUST KEY DOES NOT ESCALATE HERE"));
+    assert!(prompt.contains("Take fabrikam.local from inside fabrikam.local"));
+    assert!(prompt.contains("ESC13"));
+    assert!(prompt.contains("AS-REP roastable accounts"));
+    assert!(prompt.contains("MSSQL linked servers"));
+    assert!(prompt.contains("Foreign security principals"));
+    assert!(!prompt.contains("forge_inter_realm_and_dump"));
+    assert!(!prompt.contains("impacket-ticketer"));
+    assert!(!prompt.contains("always try"));
 }
 
 #[test]
-fn exploit_child_to_parent_has_raise_child() {
+fn exploit_child_to_parent_describes_automatic_forge() {
     let payload = serde_json::json!({
         "vuln_type": "child_to_parent",
         "target": "192.168.58.10",
@@ -610,8 +778,12 @@ fn exploit_child_to_parent_has_raise_child() {
     });
     let prompt = generate_task_prompt("exploit", "t-31", &payload, None).unwrap();
     assert!(prompt.contains("TRUST KEY EXTRACTION"));
-    assert!(prompt.contains("raise_child"));
+    assert!(prompt.contains("forge_inter_realm_and_dump"));
     assert!(prompt.contains("Enterprise Admins"));
+    assert!(prompt.contains("SID filtering is not applied inside a forest"));
+    assert!(prompt.contains("impacket-ticketer"));
+    assert!(!prompt.contains("raise_child"));
+    assert!(!prompt.contains("THE TRUST KEY DOES NOT ESCALATE HERE"));
 }
 
 #[test]
@@ -660,6 +832,35 @@ fn exploit_mssql_lateral_enumeration() {
     assert!(prompt.contains("mssql_enum_linked_servers"));
     assert!(prompt.contains("mssql_ntlm_coerce"));
     assert!(prompt.contains("svc_sql"));
+}
+
+#[test]
+fn exploit_mssql_lateral_renders_objectives() {
+    let payload = serde_json::json!({
+        "vuln_type": "mssql_access",
+        "target": "192.168.58.30",
+        "domain": "contoso.local",
+        "objectives": [
+            "STOP CONDITION: call `task_complete` as soon as any win lands.",
+            "1. Enable xp_cmdshell, run `whoami` to confirm code execution.",
+        ]
+    });
+    let prompt = generate_task_prompt("exploit", "t-33", &payload, None).unwrap();
+    assert!(prompt.contains("TASK OBJECTIVES"));
+    assert!(prompt.contains("STOP CONDITION: call `task_complete` as soon as any win lands."));
+    assert!(prompt.contains("1. Enable xp_cmdshell, run `whoami` to confirm code execution."));
+}
+
+#[test]
+fn exploit_mssql_lateral_omits_objectives_block_when_absent() {
+    let payload = serde_json::json!({
+        "vuln_type": "mssql_access",
+        "target": "192.168.58.30",
+        "domain": "contoso.local"
+    });
+    let prompt = generate_task_prompt("exploit", "t-34", &payload, None).unwrap();
+    assert!(!prompt.contains("TASK OBJECTIVES"));
+    assert!(prompt.contains("MSSQL LATERAL ENUMERATION"));
 }
 
 #[test]

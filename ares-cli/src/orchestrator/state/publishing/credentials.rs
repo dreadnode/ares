@@ -25,6 +25,18 @@ fn is_valid_ntlm_hash_value(value: &str) -> bool {
     }
 }
 
+fn krbtgt_nt_half(hash: &Hash) -> Option<&str> {
+    if !hash.username.trim().eq_ignore_ascii_case("krbtgt")
+        || !hash.hash_type.to_lowercase().contains("ntlm")
+        || hash.domain.trim().is_empty()
+    {
+        return None;
+    }
+    let value = hash.hash_value.trim();
+    let nt = value.rsplit(':').next().unwrap_or(value);
+    is_hex32(nt).then_some(nt)
+}
+
 impl SharedState {
     /// Add a credential to state and Redis (with dedup).
     ///
@@ -88,10 +100,7 @@ impl SharedState {
             }
         }
 
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
         let added = reader.add_credential(&mut conn, &cred).await?;
@@ -154,6 +163,32 @@ impl SharedState {
         // Mirrors the same normalization in `sanitize_credential`.
         hash.domain = hash.domain.to_lowercase();
 
+        // Canonicalize flat NetBIOS → FQDN when known. `secretsdump.py`'s NTDS
+        // output emits `CHILD\administrator:500:...`; the extractor stamps
+        // `domain="child"` verbatim. Other emitters (LDAP dumps, orchestrator
+        // summaries) tag the same secret with the FQDN. Without this step both
+        // land as separate Redis fields (`ntlm:child:administrator:<h>` and
+        // `ntlm:child.contoso.local:administrator:<h>`), splitting the same
+        // identity and defeating dedup. `canonicalize_domain_label` returns
+        // `None` when the flat name is unknown to state — keep the original
+        // label rather than mint a phantom FQDN.
+        if !hash.domain.is_empty() {
+            let state_read = self.inner.read().await;
+            if let Some(canonical) =
+                super::super::canonicalize_domain_label(&hash.domain, &state_read)
+            {
+                if canonical != hash.domain {
+                    tracing::debug!(
+                        username = %hash.username,
+                        original = %hash.domain,
+                        canonical = %canonical,
+                        "Canonicalizing hash domain flat→FQDN before dedup"
+                    );
+                    hash.domain = canonical;
+                }
+            }
+        }
+
         // Reject malformed NTLM hashes before they enter state. Accept both a
         // bare NT half and standard secretsdump LM:NT pairs; tools can consume
         // either, but relay artifacts with partial/extra bytes only cause
@@ -171,10 +206,24 @@ impl SharedState {
             }
         }
 
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        if let Some(incoming_nt) = krbtgt_nt_half(&hash) {
+            let state_read = self.inner.read().await;
+            if let Some(existing) = state_read.hashes.iter().find(|h| {
+                !h.domain.eq_ignore_ascii_case(&hash.domain)
+                    && krbtgt_nt_half(h).is_some_and(|nt| nt.eq_ignore_ascii_case(incoming_nt))
+            }) {
+                tracing::warn!(
+                    incoming_domain = %hash.domain,
+                    incoming_source = %hash.source,
+                    existing_domain = %existing.domain,
+                    existing_source = %existing.source,
+                    "Dropping krbtgt NTLM hash already held by another domain — a krbtgt secret is unique per domain, so the incoming label is misattributed"
+                );
+                return Ok(false);
+            }
+        }
+
+        let operation_id = self.operation_id().await;
         let operation_id_for_redis = operation_id.clone();
         let reader = RedisStateReader::new(operation_id.clone());
         let mut conn = queue.connection();
@@ -212,6 +261,24 @@ impl SharedState {
         )
         .await;
 
+        // Convergence timestamp: a `$`-suffixed NTLM hash is a machine-account
+        // or trust key — the input the cross-forest pivot needs to fire. Log
+        // once on first landing so we can measure "op start → trust key in
+        // state" against the trust-info and pivot-dispatch stages.
+        if hash.username.trim_end_matches(' ').ends_with('$')
+            && hash.hash_type.to_lowercase().contains("ntlm")
+        {
+            tracing::info!(
+                convergence_stage = 2,
+                event = "trust_key_hash_first_landing",
+                op_id = %operation_id,
+                account = %hash.username,
+                domain = %hash.domain,
+                has_aes = hash.aes_key.is_some(),
+                "convergence: first machine/trust-key NTLM hash landing"
+            );
+        }
+
         // Capture identity fields before `hash` is moved into state.hashes —
         // they drive the implicit-user backfill below.
         let backfill_username = hash.username.clone();
@@ -220,8 +287,9 @@ impl SharedState {
             let is_krbtgt = hash.username.to_lowercase() == "krbtgt"
                 && hash.hash_type.to_lowercase().contains("ntlm");
             let hash_domain = hash.domain.clone();
+            let hash_source = hash.source.clone();
             let mut state = self.inner.write().await;
-            state.hashes.push(hash);
+            state.push_hash_capped(hash);
 
             // Track per-domain domination when krbtgt NTLM hash arrives
             if is_krbtgt {
@@ -290,37 +358,45 @@ impl SharedState {
                 let dc_target = state.domain_controllers.get(&krbtgt_domain).cloned();
 
                 // Auto-set domain admin when the first krbtgt NTLM hash arrives.
-                if !state.has_domain_admin {
-                    let da_domain = krbtgt_domain.clone();
-                    drop(state);
-                    let path = Some("secretsdump → krbtgt NTLM hash".to_string());
+                let is_first_da = !state.has_domain_admin;
+                let da_domain = krbtgt_domain.clone();
+                drop(state);
+
+                let path = Some(crate::orchestrator::state::krbtgt_da_path(&hash_source));
+                let mut da_flag_ok = true;
+                if is_first_da {
                     if let Err(e) = self.set_domain_admin(queue, path.clone()).await {
                         tracing::warn!(err = %e, "Failed to auto-set domain admin from krbtgt hash");
+                        da_flag_ok = false;
                     } else {
                         tracing::info!(
                             "🎯 Domain Admin auto-set from krbtgt NTLM hash in publish_hash"
                         );
-                        // Emit DA timeline event
-                        let techniques = vec!["T1003.006".to_string(), "T1078.002".to_string()];
-                        let event_id =
-                            format!("evt-da-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-                        let event = serde_json::json!({
-                            "id": event_id,
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "source": "domain_admin",
-                            "description": format!(
-                                "CRITICAL: Domain Admin achieved for {} via {}",
-                                da_domain,
-                                path.as_deref().unwrap_or("krbtgt hash")
-                            ),
-                            "mitre_techniques": techniques,
-                        });
-                        let _ = self
-                            .persist_timeline_event(queue, &event, &techniques)
-                            .await;
                     }
-                } else {
-                    drop(state);
+                }
+
+                // One CRITICAL event per domain that falls. Gating this on
+                // `is_first_da` emitted a single event for the whole op, so a
+                // 3-of-3 forest compromise read as 1 domain in the report.
+                let emit_da_event = da_flag_ok && (newly_dominated.is_some() || is_first_da);
+                if emit_da_event {
+                    let techniques = vec!["T1003.006".to_string(), "T1078.002".to_string()];
+                    let event_id =
+                        format!("evt-da-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+                    let event = serde_json::json!({
+                        "id": event_id,
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                        "source": "domain_admin",
+                        "description": format!(
+                            "CRITICAL: Domain Admin achieved for {} via {}",
+                            da_domain,
+                            path.as_deref().unwrap_or("krbtgt hash")
+                        ),
+                        "mitre_techniques": techniques,
+                    });
+                    let _ = self
+                        .persist_timeline_event(queue, &event, &techniques)
+                        .await;
                 }
 
                 // Mirror in-memory `dominated_domains` to a Redis SET so
@@ -395,6 +471,7 @@ impl SharedState {
                 description: String::new(),
                 is_admin: false,
                 source: "secretsdump_implicit".to_string(),
+                member_of: Vec::new(),
             };
             // Errors here are non-fatal — the hash already landed.
             let _ = self.publish_user(queue, user).await;
@@ -464,6 +541,102 @@ impl SharedState {
         );
 
         Ok(true)
+    }
+
+    /// Flip `is_admin` on every credential for `username`@`domain`, in memory
+    /// **and** in Redis.
+    ///
+    /// Returns `true` only when this call performed a genuine `false → true`
+    /// transition in memory, so a repeated `Pwn3d!` line for an
+    /// already-upgraded principal does not re-fire the caller's timeline event
+    /// and priority dispatch. `false` also covers "no credential for this
+    /// principal is in state", which must stay distinguishable from success:
+    /// emitting an admin event with no credential behind it is the phantom
+    /// shape that `seimpersonate` credit had.
+    ///
+    /// The in-memory-only mutation this replaces is why 437 credential rows
+    /// across 92 reports rendered `Admin = No` and zero rendered `Yes`, in ops
+    /// that had a `Pwn3d!` event for that very principal: reports read Redis,
+    /// and `add_credential` is `hset_nx`, so re-publishing an upgraded
+    /// credential is a no-op rather than an update. This writes the field with
+    /// `hset`, the same in-memory/Redis reconciliation `mark_host_owned`
+    /// already does for `Host::owned`.
+    ///
+    /// Redis is reconciled whenever the principal matches at all, not only on a
+    /// fresh flip — an operation that already mutated memory before this fix
+    /// has `is_admin` true in state and false in Redis, and only an
+    /// unconditional pass heals that disagreement.
+    ///
+    /// Every matching row is rewritten, not just the first. The dedup key
+    /// includes a password digest (`cred:{domain}:{username}:{md5_16}`), so one
+    /// principal legitimately holds several rows — a plaintext from a
+    /// description leak and the same account's cracked password are different
+    /// fields — and leaving the others stale would let a shadow row keep
+    /// reporting the principal as non-admin.
+    pub async fn mark_credentials_admin(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        username: &str,
+        domain: &str,
+    ) -> Result<bool> {
+        let (op_id, flipped) = {
+            let mut state = self.inner.write().await;
+            let mut matched = false;
+            let mut flipped = false;
+            for cred in state.credentials.iter_mut() {
+                if cred.username.eq_ignore_ascii_case(username)
+                    && cred.domain.eq_ignore_ascii_case(domain)
+                {
+                    matched = true;
+                    if !cred.is_admin {
+                        cred.is_admin = true;
+                        flipped = true;
+                    }
+                }
+            }
+            if !matched {
+                return Ok(false);
+            }
+            (state.operation_id.clone(), flipped)
+        };
+
+        let cred_key = format!("{}:{}:{}", state::KEY_PREFIX, op_id, state::KEY_CREDENTIALS);
+        let mut conn = queue.connection();
+        let entries: std::collections::HashMap<String, String> =
+            redis::AsyncCommands::hgetall(&mut conn, &cred_key)
+                .await
+                .unwrap_or_default();
+
+        let mut rewritten = 0usize;
+        for (field, value) in &entries {
+            let Ok(mut cred) = serde_json::from_str::<Credential>(value) else {
+                continue;
+            };
+            if !cred.username.eq_ignore_ascii_case(username)
+                || !cred.domain.eq_ignore_ascii_case(domain)
+                || cred.is_admin
+            {
+                continue;
+            }
+            cred.is_admin = true;
+            let updated = serde_json::to_string(&cred).unwrap_or_default();
+            if redis::AsyncCommands::hset::<_, _, _, ()>(&mut conn, &cred_key, field, &updated)
+                .await
+                .is_ok()
+            {
+                rewritten += 1;
+            }
+        }
+
+        tracing::info!(
+            username = %username,
+            domain = %domain,
+            rows_rewritten = rewritten,
+            flipped,
+            "Credential is_admin persisted to state and Redis"
+        );
+
+        Ok(flipped)
     }
 }
 
@@ -571,6 +744,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_foreign_forest_credential_lands_in_state() {
+        // A verified foothold credential for a forest we do NOT own (its domain
+        // is absent from state.domains) must still persist to state.credentials.
+        // auto_adcs_enumeration reads state.credentials to build cred_domains
+        // and dispatch certipy_find against the foreign CA — if a spray/AS-REP/
+        // SMB-verified foreign cred were dropped here, cred_domains would never
+        // list the foreign forest and it could never fall. The domain is NOT
+        // promoted into the authoritative state.domains registry.
+        let state = SharedState::new("op-foreign".to_string());
+        let q = mock_queue();
+        {
+            let mut s = state.inner.write().await;
+            s.domains.push("contoso.local".to_string());
+        }
+
+        let mut cred = make_cred("svc_sql", "Passw0rd!Foreign", "fabrikam.local");
+        cred.source = "password_spray".to_string();
+        let added = state.publish_credential(&q, cred).await.unwrap();
+        assert!(added, "foreign-forest foothold cred must be accepted");
+
+        let s = state.inner.read().await;
+        assert!(
+            s.credentials
+                .iter()
+                .any(|c| c.domain == "fabrikam.local" && c.username == "svc_sql"),
+            "foreign-forest cred must land in state.credentials, got {:?}",
+            s.credentials
+        );
+        assert!(
+            !s.domains.iter().any(|d| d == "fabrikam.local"),
+            "foreign domain must not be promoted into authoritative state.domains"
+        );
+    }
+
+    #[tokio::test]
     async fn publish_credential_rejects_phantom_description_field_dup() {
         // Forest-wide LDAP/GC searches can return a user from one domain while
         // the parser's tracked `current_domain` points at another. When that
@@ -584,7 +792,7 @@ mod tests {
         let real = Credential {
             id: uuid::Uuid::new_v4().to_string(),
             username: "alice".to_string(),
-            password: "Heartsbane".to_string(),
+            password: "P@ssw0rd!".to_string(),
             domain: "child.contoso.local".to_string(),
             source: "initial".to_string(),
             discovered_at: None,
@@ -597,7 +805,7 @@ mod tests {
         let phantom = Credential {
             id: uuid::Uuid::new_v4().to_string(),
             username: "alice".to_string(),
-            password: "Heartsbane".to_string(),
+            password: "P@ssw0rd!".to_string(),
             domain: "contoso.local".to_string(),
             source: "description_field".to_string(),
             discovered_at: None,
@@ -821,6 +1029,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_hash_canonicalizes_flat_netbios_to_fqdn() {
+        // The secretsdump NTDS extractor tags hashes with the flat NetBIOS name
+        // it sees in `CHILD\administrator:500:...:<h>:::`, while LDAP dumps and
+        // orchestrator-side emitters tag the same identity with the FQDN. Both
+        // must collapse into a single dedup slot; leaving flat- and FQDN-keyed
+        // rows side-by-side splits candidate selection (which keys on FQDN).
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        {
+            let mut s = state.inner.write().await;
+            s.domains.push("child.contoso.local".to_string());
+        }
+
+        let flat = make_hash("admin", "CHILD", "NTLM", NTLM_HASH_A);
+        let fqdn = make_hash("admin", "child.contoso.local", "NTLM", NTLM_HASH_A);
+        assert!(state.publish_hash(&q, flat).await.unwrap());
+        assert!(!state.publish_hash(&q, fqdn).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 1);
+        assert_eq!(s.hashes[0].domain, "child.contoso.local");
+    }
+
+    #[tokio::test]
+    async fn publish_hash_preserves_unknown_flat_domain() {
+        // When the flat name doesn't resolve to any known FQDN (no
+        // netbios_to_fqdn entry, no first-label match against state.domains,
+        // no trust metadata), keep the label rather than mint a phantom FQDN.
+        // The hash still stores as `ntlm:unknown:...` — better a truthful
+        // "unattributed" tag than a fabricated domain that pollutes candidate
+        // selection.
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        {
+            let mut s = state.inner.write().await;
+            s.domains.push("contoso.local".to_string());
+        }
+
+        let hash = make_hash("admin", "STRANGER", "NTLM", NTLM_HASH_A);
+        assert!(state.publish_hash(&q, hash).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 1);
+        assert_eq!(s.hashes[0].domain, "stranger");
+    }
+
+    #[tokio::test]
     async fn publish_krbtgt_hash_sets_domain_admin() {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
@@ -902,6 +1157,109 @@ mod tests {
         assert!(s.dominated_domains.is_empty());
     }
 
+    const KRBTGT_NT_A: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90"; // pragma: allowlist secret
+    const KRBTGT_NT_B: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"; // pragma: allowlist secret
+
+    async fn state_with_domains(op_id: &str, domains: &[&str]) -> SharedState {
+        let state = SharedState::new(op_id.to_string());
+        {
+            let mut s = state.inner.write().await;
+            for d in domains {
+                s.domains.push((*d).to_string());
+            }
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_rejects_same_nt_half_under_a_second_domain() {
+        let state = state_with_domains("op-1", &["contoso.local", "child.contoso.local"]).await;
+        let q = mock_queue();
+
+        let real = make_hash("krbtgt", "contoso.local", "NTLM", KRBTGT_NT_A);
+        assert!(state.publish_hash(&q, real).await.unwrap());
+
+        let mut phantom = make_hash("krbtgt", "child.contoso.local", "NTLM", KRBTGT_NT_A);
+        phantom.source = "output_extraction".to_string();
+        assert!(
+            !state.publish_hash(&q, phantom).await.unwrap(),
+            "a krbtgt secret is unique per domain; the second label must be rejected"
+        );
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 1);
+        assert!(s.dominated_domains.contains("contoso.local"));
+        assert!(
+            !s.dominated_domains.contains("child.contoso.local"),
+            "misattributed krbtgt must not dominate a second domain"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_collision_detected_across_lm_nt_and_bare_nt_forms() {
+        let state = state_with_domains("op-1", &["contoso.local", "fabrikam.local"]).await;
+        let q = mock_queue();
+
+        let lm_nt = format!("aad3b435b51404eeaad3b435b51404ee:{KRBTGT_NT_A}");
+        let real = make_hash("krbtgt", "contoso.local", "NTLM", &lm_nt);
+        assert!(state.publish_hash(&q, real).await.unwrap());
+
+        let phantom = make_hash("krbtgt", "fabrikam.local", "NTLM", KRBTGT_NT_A);
+        assert!(!state.publish_hash(&q, phantom).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.dominated_domains.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_allows_distinct_values_per_domain() {
+        let state = state_with_domains("op-1", &["contoso.local", "child.contoso.local"]).await;
+        let q = mock_queue();
+
+        let root = make_hash("krbtgt", "contoso.local", "NTLM", KRBTGT_NT_A);
+        let child = make_hash("krbtgt", "child.contoso.local", "NTLM", KRBTGT_NT_B);
+        assert!(state.publish_hash(&q, root).await.unwrap());
+        assert!(state.publish_hash(&q, child).await.unwrap());
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 2);
+        assert!(s.dominated_domains.contains("contoso.local"));
+        assert!(s.dominated_domains.contains("child.contoso.local"));
+    }
+
+    #[tokio::test]
+    async fn publish_non_krbtgt_still_keeps_shared_hash_across_domains() {
+        let state = state_with_domains("op-1", &["contoso.local", "fabrikam.local"]).await;
+        let q = mock_queue();
+
+        let a = make_hash("Administrator", "contoso.local", "NTLM", KRBTGT_NT_A);
+        let b = make_hash("Administrator", "fabrikam.local", "NTLM", KRBTGT_NT_A);
+        assert!(state.publish_hash(&q, a).await.unwrap());
+        assert!(
+            state.publish_hash(&q, b).await.unwrap(),
+            "a reused local Administrator password across realms is a real finding"
+        );
+
+        let s = state.inner.read().await;
+        assert_eq!(s.hashes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn publish_krbtgt_without_domain_is_not_treated_as_a_collision() {
+        let state = state_with_domains("op-1", &["contoso.local"]).await;
+        let q = mock_queue();
+
+        let real = make_hash("krbtgt", "contoso.local", "NTLM", KRBTGT_NT_A);
+        assert!(state.publish_hash(&q, real).await.unwrap());
+
+        let unlabeled = make_hash("krbtgt", "", "NTLM", KRBTGT_NT_A);
+        state.publish_hash(&q, unlabeled).await.unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s.dominated_domains.contains("contoso.local"));
+        assert_eq!(s.dominated_domains.len(), 1);
+    }
+
     #[tokio::test]
     async fn update_hash_cracked_password() {
         let state = SharedState::new("op-1".to_string());
@@ -920,6 +1278,200 @@ mod tests {
         assert_eq!(s.hashes[0].cracked_password.as_deref(), Some("CrackedPW!"));
     }
 
+    /// Read the `is_admin` flags Redis actually holds for `username`.
+    ///
+    /// Every assertion about this fix has to go through Redis: reports read
+    /// Redis, and the bug was that memory and Redis disagreed. An in-memory-only
+    /// assertion passes against the broken code.
+    async fn redis_admin_flags(
+        state: &SharedState,
+        q: &TaskQueueCore<MockRedisConnection>,
+        username: &str,
+    ) -> Vec<bool> {
+        let op_id = state.inner.read().await.operation_id.clone();
+        let key = format!(
+            "{}:{}:{}",
+            ares_core::state::KEY_PREFIX,
+            op_id,
+            ares_core::state::KEY_CREDENTIALS
+        );
+        let mut conn = q.connection();
+        let entries: std::collections::HashMap<String, String> =
+            redis::AsyncCommands::hgetall(&mut conn, &key)
+                .await
+                .unwrap_or_default();
+        entries
+            .values()
+            .filter_map(|v| serde_json::from_str::<Credential>(v).ok())
+            .filter(|c| c.username.eq_ignore_ascii_case(username))
+            .map(|c| c.is_admin)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn mark_credentials_admin_persists_the_flag_to_redis() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            redis_admin_flags(&state, &q, "alice").await,
+            vec![false],
+            "precondition: the published credential is not admin yet"
+        );
+
+        let flipped = state
+            .mark_credentials_admin(&q, "alice", "contoso.local")
+            .await
+            .unwrap();
+
+        assert!(flipped, "a false→true transition must report true");
+        assert_eq!(
+            redis_admin_flags(&state, &q, "alice").await,
+            vec![true],
+            "is_admin never reached Redis — this is the defect that rendered 437 rows as `Admin = No`"
+        );
+        assert!(state.inner.read().await.credentials[0].is_admin);
+    }
+
+    #[tokio::test]
+    async fn mark_credentials_admin_updates_every_row_for_the_principal() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // Two rows, one principal: the dedup key carries a password digest, so
+        // a description leak and a cracked password are separate fields.
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+        state
+            .publish_credential(&q, make_cred("alice", "Summer2026!", "contoso.local"))
+            .await
+            .unwrap();
+
+        assert_eq!(redis_admin_flags(&state, &q, "alice").await.len(), 2);
+
+        state
+            .mark_credentials_admin(&q, "alice", "contoso.local")
+            .await
+            .unwrap();
+
+        let flags = redis_admin_flags(&state, &q, "alice").await;
+        assert_eq!(
+            flags,
+            vec![true, true],
+            "a stale shadow row keeps reporting the principal as non-admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_credentials_admin_is_case_insensitive_on_principal() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+
+        // netexec prints the domain uppercased in the `Pwn3d!` line.
+        let flipped = state
+            .mark_credentials_admin(&q, "ALICE", "CONTOSO.LOCAL")
+            .await
+            .unwrap();
+
+        assert!(flipped);
+        assert_eq!(redis_admin_flags(&state, &q, "alice").await, vec![true]);
+    }
+
+    #[tokio::test]
+    async fn mark_credentials_admin_reports_false_when_no_credential_matches() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+
+        // An admin event with no credential behind it is the `seimpersonate`
+        // phantom shape; the caller keys its timeline event off this bool.
+        assert!(!state
+            .mark_credentials_admin(&q, "bob", "contoso.local")
+            .await
+            .unwrap());
+        assert!(!state
+            .mark_credentials_admin(&q, "alice", "fabrikam.local")
+            .await
+            .unwrap());
+        assert_eq!(redis_admin_flags(&state, &q, "alice").await, vec![false]);
+    }
+
+    #[tokio::test]
+    async fn mark_credentials_admin_reports_false_on_a_repeat_but_still_heals_redis() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        state
+            .publish_credential(&q, make_cred("alice", "P@ssw0rd!", "contoso.local"))
+            .await
+            .unwrap();
+
+        assert!(state
+            .mark_credentials_admin(&q, "alice", "contoso.local")
+            .await
+            .unwrap());
+        assert!(
+            !state
+                .mark_credentials_admin(&q, "alice", "contoso.local")
+                .await
+                .unwrap(),
+            "a repeated Pwn3d! line must not re-fire the caller's timeline event"
+        );
+
+        // The pre-fix shape: memory true, Redis false. Only an unconditional
+        // Redis pass reconciles it, so the repeat call must still write.
+        state.inner.write().await.credentials[0].is_admin = true;
+        let key = format!(
+            "{}:{}:{}",
+            ares_core::state::KEY_PREFIX,
+            "op-1",
+            ares_core::state::KEY_CREDENTIALS
+        );
+        let mut conn = q.connection();
+        let entries: std::collections::HashMap<String, String> =
+            redis::AsyncCommands::hgetall(&mut conn, &key)
+                .await
+                .unwrap();
+        let (field, value) = entries.iter().next().unwrap();
+        let mut stale: Credential = serde_json::from_str(value).unwrap();
+        stale.is_admin = false;
+        let _: () = redis::AsyncCommands::hset(
+            &mut conn,
+            &key,
+            field,
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(redis_admin_flags(&state, &q, "alice").await, vec![false]);
+
+        state
+            .mark_credentials_admin(&q, "alice", "contoso.local")
+            .await
+            .unwrap();
+        assert_eq!(
+            redis_admin_flags(&state, &q, "alice").await,
+            vec![true],
+            "an in-memory/Redis disagreement must heal on the next Pwn3d! line"
+        );
+    }
+
     #[tokio::test]
     async fn update_hash_cracked_password_not_found() {
         let state = SharedState::new("op-1".to_string());
@@ -930,6 +1482,62 @@ mod tests {
             .await
             .unwrap();
         assert!(!updated);
+    }
+
+    #[tokio::test]
+    async fn cracked_kerberoast_hash_stamped_when_password_already_known() {
+        // Kerberoast/AS-REP hashes dedup by principal (`krb:{domain}:{user}:{spn}`
+        // / `asrep:{domain}:{user}`), so an account has a single ticket Hash row
+        // per op regardless of re-roasts. The gap this guards: when the account's
+        // password is *already known* from another source (GPP, cleartext, a
+        // prior crack, a spray hit), cracking the ticket re-derives that same
+        // plaintext and `publish_credential` dedups it — the credential key is
+        // `cred:{domain}:{user}:{md5(password)}`, independent of source, so the
+        // publish returns Ok(false). Result processing must still stamp the
+        // ticket Hash's cracked_password on that duplicate path; otherwise
+        // `is_reportable_hash` surfaces the raw ticket blob *alongside* the
+        // cracked Credential and the external scoreboard double-counts the
+        // account. This exercises the primitive the fix relies on: the stamp is
+        // independent of whether the credential row was new.
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        // svc_sql's password is already known — a Credential exists (e.g. GPP).
+        state
+            .publish_credential(&q, make_cred("svc_sql", "SqlPass1", "contoso.local"))
+            .await
+            .unwrap();
+        // Its kerberoast ticket lands uncracked.
+        let ticket = make_hash(
+            "svc_sql",
+            "contoso.local",
+            "kerberoast",
+            "$krb5tgs$18$svc_sql$CONTOSO.LOCAL$aaaa0000$bbbb",
+        );
+        state.publish_hash(&q, ticket).await.unwrap();
+
+        // The crack re-derives the known plaintext; the credential is a duplicate.
+        assert!(
+            !state
+                .publish_credential(&q, make_cred("svc_sql", "SqlPass1", "contoso.local"))
+                .await
+                .unwrap(),
+            "a cracked credential for an already-known password dedups to Ok(false)"
+        );
+
+        // The ticket Hash must still be stamped so it drops from the loot report
+        // (is_reportable_hash keys on cracked_password.is_some()).
+        assert!(state
+            .update_hash_cracked_password(&q, "svc_sql", "contoso.local", "SqlPass1")
+            .await
+            .unwrap());
+        let s = state.inner.read().await;
+        let ticket = s
+            .hashes
+            .iter()
+            .find(|h| h.hash_type == "kerberoast")
+            .expect("kerberoast ticket present");
+        assert_eq!(ticket.cracked_password.as_deref(), Some("SqlPass1"));
     }
 
     #[tokio::test]

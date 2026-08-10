@@ -9,13 +9,35 @@ vars:
   PROFILE: '{{.PROFILE | default "infrastructure"}}'
   REGION: '{{.REGION | default "us-west-2"}}'
 
+  # Transport for `ares blue *` commands. Blue investigations live on whichever
+  # backend the orchestrator is deployed to. `ec2` (default) proxies over SSM,
+  # `k8s` over `kubectl exec`, and `local` runs the CLI on this host — which
+  # only works while Redis and NATS are reachable here (task ec2:redis:forward
+  # + ec2:nats:forward, or the K8s equivalents).
+  BLUE_TRANSPORT: '{{.BLUE_TRANSPORT | default "ec2"}}'
+  EC2_NAME: '{{.EC2_NAME | default "kali-ares"}}'
+  EC2_PROFILE: '{{.EC2_PROFILE | default ""}}'
+  EC2_REGION: '{{.EC2_REGION | default ""}}'
+  TRANSPORT_ARGS:
+    sh: |
+      case "{{.BLUE_TRANSPORT}}" in
+        ec2)
+          args="--ec2 {{.EC2_NAME}}"
+          [ -n "{{.EC2_PROFILE}}" ] && args="$args --ec2-profile {{.EC2_PROFILE}}"
+          [ -n "{{.EC2_REGION}}" ] && args="$args --ec2-region {{.EC2_REGION}}"
+          echo "$args"
+          ;;
+        local) echo "" ;;
+        *) echo "--k8s {{.K8S_NAMESPACE}}" ;;
+      esac
+
   # 1Password API keys (shared across tasks) - read from .env if exists, otherwise 1Password
   ANTHROPIC_API_KEY:
     sh: grep -E '^ANTHROPIC_API_KEY=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' || op item get "Dreadnode Claude" --fields api-key --reveal 2>/dev/null || echo ""
   DREADNODE_API_KEY:
     sh: grep -E '^DREADNODE_API_KEY=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' || op item get "Dreadnode Dev Platform" --fields api-key --reveal 2>/dev/null || echo ""
   GRAFANA_SERVICE_ACCOUNT_TOKEN:
-    sh: grep -E '^GRAFANA_SERVICE_ACCOUNT_TOKEN=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' || op item get "Ares Grafana MCP" --fields api-token --reveal 2>/dev/null || echo ""
+    sh: grep -E '^GRAFANA_SERVICE_ACCOUNT_TOKEN=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' || op item get "Ares Grafana MCP" --fields grafana-token --reveal 2>/dev/null || echo ""
   OPENAI_API_KEY:
     sh: grep -E '^OPENAI_API_KEY=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' || op item get "Dreadnode Openai" --fields dreadnode-ares-api-key --reveal 2>/dev/null || echo ""
 
@@ -81,69 +103,37 @@ tasks:
           --grafana-url {{.GRAFANA_URL}} \
           2>&1 | tee -a "$LOGFILE"
 
-  once:remote:
-    desc: "Submit blue investigation on K8s cluster (usage: task blue:once:remote [OPERATION_ID=op-xxx] [LATEST=true])"
-    silent: true
-    vars:
-      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
-      LATEST: '{{.LATEST | default ""}}'
-    preconditions:
-      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
-        msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:once:remote OPERATION_ID=op-xxx  OR  task blue:once:remote LATEST=true"
-    cmds:
-      - |
-        echo "Submitting blue investigation on K8s cluster..."
-        echo "K8s namespace: {{.K8S_NAMESPACE}}"
-        echo ""
-
-        # Build operation context args
-        OP_ARGS=""
-        if [ "{{.LATEST}}" = "true" ]; then
-          OP_ARGS="--latest"
-        elif [ -n "{{.OPERATION_ID}}" ]; then
-          OP_ARGS="{{.OPERATION_ID}}"
-        fi
-
-        MODEL_FLAG=""
-        if [ -n "{{.MODEL_ARG}}" ]; then
-          MODEL_FLAG="--model {{.MODEL_ARG}}"
-        fi
-
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
-          env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
-          ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
-          GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
-          GRAFANA_URL="{{.GRAFANA_URL}}" \
-          ares blue from-operation $OP_ARGS \
-          $MODEL_FLAG \
-          --max-steps {{.MAX_STEPS_BLUE_ONCE}} \
-          --grafana-url "{{.GRAFANA_URL}}"
-
-  investigate:
-    desc: "Submit a specific alert for investigation (usage: task blue:investigate ALERT=alert.json)"
+  submit:
+    desc: "Submit an alert for investigation (usage: task blue:submit ALERT=alert.json [INVESTIGATION_ID=inv-xxx] [MULTI_AGENT=true] [MAX_STEPS=25] [BLUE_TRANSPORT=ec2|k8s|local])"
     silent: true
     vars:
       ALERT: '{{.ALERT | default ""}}'
+      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
+      MULTI_AGENT: '{{.MULTI_AGENT | default "false"}}'
+      MAX_STEPS: '{{.MAX_STEPS | default .MAX_STEPS_BLUE_ONCE}}'
     preconditions:
       - sh: test -n "{{.ALERT}}"
-        msg: "ALERT variable is required. Usage: task blue:investigate ALERT=alert.json"
+        msg: "ALERT variable is required. Usage: task blue:submit ALERT=alert.json"
       - sh: test -f "{{.ALERT}}"
         msg: "Alert file not found: {{.ALERT}}"
     cmds:
       - |
-        export ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}"
-        export GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}"
-        export OPENAI_API_KEY="{{.OPENAI_API_KEY}}"
-
-        MODEL_FLAG=""
-        if [ -n "{{.MODEL_ARG}}" ]; then
-          MODEL_FLAG="--model {{.MODEL_ARG}}"
-        fi
-
-        {{.ARES_CLI}} blue submit {{.ALERT}} \
-          $MODEL_FLAG \
-          --max-steps {{.MAX_STEPS_BLUE_ONCE}} \
-          --grafana-url {{.GRAFANA_URL}}
+        # The alert is passed by value, not by path: under the ec2/k8s
+        # transports the CLI re-execs on the remote, where a local path does
+        # not resolve. `blue submit` accepts either form.
+        #
+        # The Grafana token is deliberately NOT passed as --grafana-api-key: the
+        # ec2 transport ships argv through SSM send-command, which persists it
+        # in SSM command history and CloudTrail. submit falls back to the
+        # remote's own GRAFANA_SERVICE_ACCOUNT_TOKEN (/etc/ares/env on the box,
+        # the secret env in the blue pod), which is where the investigation
+        # reads it from anyway.
+        {{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue submit "$(cat {{.ALERT}})" \
+          {{if ne .INVESTIGATION_ID ""}}--investigation-id {{.INVESTIGATION_ID}}{{end}} \
+          {{if ne .MODEL_ARG ""}}--model {{.MODEL_ARG}}{{end}} \
+          --max-steps {{.MAX_STEPS}} \
+          {{if eq .MULTI_AGENT "true"}}--multi-agent{{end}} \
+          --grafana-url "{{.GRAFANA_URL}}"
 
   # ===========================================================================
   # Reports
@@ -184,59 +174,59 @@ tasks:
         fi
 
   playbook:
-    desc: "Export detection playbook from red team operation (usage: task blue:playbook [OPERATION_ID=op-xxx] [LATEST=true])"
+    desc: "Export the detection playbook for a red team operation as JSON (usage: task blue:playbook [OPERATION_ID=op-xxx] [LATEST=true] [BLUE_TRANSPORT=ec2|k8s|local])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default ""}}'
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
-      JSON: '{{.JSON | default "false"}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
         msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:playbook OPERATION_ID=op-xxx  OR  task blue:playbook LATEST=true"
     cmds:
-      - cmd: mkdir -p "{{.OUTPUT_DIR}}"
-        silent: true
       - |
-        # Generate playbook on pod (uses red team orchestrator, not blue)
-        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} --k8s-deploy ares-orchestrator ops export-detection \
+        # --json streams the playbook over the transport's stdout instead of
+        # writing it on the remote. The file-writing path put the artifacts in
+        # <output-dir>/<op-id>/, so the kubectl cp of a flat
+        # <op-id>_detection_playbook.json never matched and this task silently
+        # copied nothing. Note this reads RED operation state, so the k8s
+        # transport must land on ares-orchestrator, not the blue deployment.
+        PLAYBOOK=$({{.ARES_CLI}} {{if eq .BLUE_TRANSPORT "k8s"}}--k8s {{.K8S_NAMESPACE}} --k8s-deploy ares-orchestrator{{else}}{{.TRANSPORT_ARGS}}{{end}} ops export-detection \
           {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}} \
           {{if eq .LATEST "true"}}--latest{{end}} \
-          {{if eq .JSON "true"}}--json{{end}} \
-          --output-dir /tmp/reports
+          --json) || exit 1
 
-        # Resolve operation ID for kubectl cp
-        if [ "{{.LATEST}}" = "true" ]; then
-          RESOLVED_OP_ID=$({{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} --k8s-deploy ares-orchestrator ops list --latest 2>/dev/null | tr -d '\n')
-        else
-          RESOLVED_OP_ID="{{.OPERATION_ID}}"
+        OP_ID=$(printf '%s' "$PLAYBOOK" | sed -n 's/.*"operation_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        if [ -z "$OP_ID" ]; then
+          echo "Could not resolve the operation id from the playbook output" >&2
+          exit 1
         fi
 
-        # Copy playbook files from pod to local machine
-        if [ -n "$RESOLVED_OP_ID" ]; then
-          ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app.kubernetes.io/name=ares-orchestrator -o jsonpath='{.items[0].metadata.name}')
-          kubectl cp "{{.K8S_NAMESPACE}}/${ORCH_POD}:/tmp/reports/${RESOLVED_OP_ID}_detection_playbook.json" "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.json" 2>/dev/null || true
-          kubectl cp "{{.K8S_NAMESPACE}}/${ORCH_POD}:/tmp/reports/${RESOLVED_OP_ID}_detection_playbook.md" "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.md" 2>/dev/null || true
-          if [ -f "{{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.json" ]; then
-            echo "Detection playbook saved to: {{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.json"
-            echo "Detection playbook saved to: {{.OUTPUT_DIR}}/${RESOLVED_OP_ID}_detection_playbook.md"
-          fi
-        fi
+        mkdir -p "{{.OUTPUT_DIR}}/blue"
+        OUTFILE="{{.OUTPUT_DIR}}/blue/${OP_ID}_detection_playbook.json"
+        printf '%s\n' "$PLAYBOOK" > "$OUTFILE"
+        echo "Detection playbook saved to: $OUTFILE"
+        echo "Markdown variant: run 'ops export-detection $OP_ID --output-dir <dir>' on the box (writes <dir>/$OP_ID/detection_playbook.md)"
 
   reports:consolidate:
-    desc: "Generate a consolidated report from Redis state (usage: task blue:reports:consolidate [OPERATION_ID=op-xxx] [LATEST=true])"
+    desc: "Generate a consolidated report from Redis state (usage: task blue:reports:consolidate [OPERATION_ID=op-xxx] [LATEST=true] [REGENERATE=true])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default ""}}'
       OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+      REGENERATE: '{{.REGENERATE | default "false"}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
         msg: "Either OPERATION_ID or LATEST=true is required"
     cmds:
-      - cmd: mkdir -p "{{.OUTPUT_DIR}}"
-        silent: true
       - |
+        set -euo pipefail
+        mkdir -p "{{.OUTPUT_DIR}}/blue"
+
+        # Blue state lives in the orchestrator's Redis on the remote backend
+        # (EC2 or K8s), never on localhost — so both the generate and the
+        # fetch-back must go over the transport, same as multi:list/status/etc.
         LATEST_FLAG=""
         if [ "{{.LATEST}}" = "true" ]; then
           LATEST_FLAG="--latest"
@@ -245,7 +235,40 @@ tasks:
         if [ -n "{{.OPERATION_ID}}" ]; then
           OP_ID_ARG="--operation-id {{.OPERATION_ID}}"
         fi
-        {{.ARES_CLI}} blue report $OP_ID_ARG $LATEST_FLAG --output-dir "{{.OUTPUT_DIR}}"
+        REGEN_ARG=""
+        if [ "{{.REGENERATE}}" = "true" ]; then
+          REGEN_ARG="--regenerate"
+        fi
+        REMOTE_DIR="/tmp/ares-blue-reports"
+
+        # Generate on the remote backend; it prints "... saved to <path>".
+        GEN_OUT=$({{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue report $OP_ID_ARG $LATEST_FLAG $REGEN_ARG --output-dir "$REMOTE_DIR")
+        printf '%s\n' "$GEN_OUT"
+        REMOTE_PATH=$(printf '%s\n' "$GEN_OUT" | sed -n 's/.* saved to //p' | tail -1)
+        if [ -z "$REMOTE_PATH" ]; then
+          echo "ERROR: could not determine remote report path from generator output" >&2
+          exit 1
+        fi
+        LOCAL_PATH="{{.OUTPUT_DIR}}/blue/$(basename "$REMOTE_PATH")"
+
+        # Pull the generated markdown back to the local machine.
+        if [ "{{.BLUE_TRANSPORT}}" = "ec2" ]; then
+          . .taskfiles/ec2/scripts/run-ssm.sh
+          export AWS_REGION="{{.EC2_REGION | default "us-west-1"}}"
+          export AWS_PROFILE="{{.EC2_PROFILE | default "lab"}}"
+          INSTANCE_ID=$(resolve_instance_id "{{.EC2_NAME}}")
+          run_ssm_cmd "$INSTANCE_ID" "cat $REMOTE_PATH" 60 > "$LOCAL_PATH"
+        else
+          kubectl exec -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- cat "$REMOTE_PATH" > "$LOCAL_PATH"
+        fi
+
+        if [ -s "$LOCAL_PATH" ]; then
+          echo "Report saved to: $LOCAL_PATH"
+        else
+          echo "ERROR: fetched report is empty ($LOCAL_PATH)" >&2
+          rm -f "$LOCAL_PATH"
+          exit 1
+        fi
 
   reports:clean:
     desc: Remove all blue team reports
@@ -268,59 +291,14 @@ tasks:
   # Multi-Agent Blue Team Tasks (via K8s orchestrator service)
   # ===========================================================================
 
-  multi:
-    desc: "Submit investigation to blue orchestrator (usage: task blue:multi ALERT=alert.json [INVESTIGATION_ID=inv-xxx])"
-    silent: true
-    vars:
-      ALERT: '{{.ALERT | default ""}}'
-      INVESTIGATION_ID: '{{.INVESTIGATION_ID | default ""}}'
-      MULTI_AGENT: '{{.MULTI_AGENT | default "false"}}'
-      MODEL_ARG: '{{.MODEL}}'
-    preconditions:
-      - sh: test -n "{{.ALERT}}"
-        msg: "ALERT variable is required. Usage: task blue:multi ALERT=alert.json"
-      - sh: test -f "{{.ALERT}}"
-        msg: "Alert file not found: {{.ALERT}}"
-    cmds:
-      - |
-        echo "Submitting investigation to blue orchestrator service..."
-        echo "Alert file: {{.ALERT}}"
-        echo "K8s namespace: {{.K8S_NAMESPACE}}"
-        echo ""
-
-        INV_ID_ARG=""
-        if [ -n "{{.INVESTIGATION_ID}}" ]; then
-          INV_ID_ARG="--investigation-id {{.INVESTIGATION_ID}}"
-        fi
-
-        MULTI_AGENT_FLAG=""
-        if [ "{{.MULTI_AGENT}}" = "true" ]; then
-          MULTI_AGENT_FLAG="--multi-agent"
-        fi
-
-        MODEL_FLAG=""
-        if [ -n "{{.MODEL_ARG}}" ]; then
-          MODEL_FLAG="--model {{.MODEL_ARG}}"
-        fi
-
-        kubectl exec -i -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator -- \
-          env OPENAI_API_KEY="{{.OPENAI_API_KEY}}" \
-          ANTHROPIC_API_KEY="{{.ANTHROPIC_API_KEY}}" \
-          GRAFANA_SERVICE_ACCOUNT_TOKEN="{{.GRAFANA_SERVICE_ACCOUNT_TOKEN}}" \
-          GRAFANA_URL="{{.GRAFANA_URL}}" \
-          ares blue submit "$(cat {{.ALERT}})" \
-          $INV_ID_ARG \
-          $MODEL_FLAG \
-          --max-steps {{.MAX_STEPS_BLUE}} \
-          $MULTI_AGENT_FLAG
-
   multi:remote:
-    desc: "Submit multi-agent blue investigation from red team operation (usage: task blue:multi:remote [OPERATION_ID=op-xxx] [LATEST=true])"
+    desc: "Submit multi-agent blue investigation from red team operation (usage: task blue:multi:remote [OPERATION_ID=op-xxx] [LATEST=true] [MAX_STEPS=15])"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
       LATEST: '{{.LATEST | default ""}}'
       MODEL_ARG: '{{.MODEL}}'
+      MAX_STEPS: '{{.MAX_STEPS | default .MAX_STEPS_BLUE}}'
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
         msg: "Either OPERATION_ID or LATEST=true is required. Usage: task blue:multi:remote OPERATION_ID=op-xxx  OR  task blue:multi:remote LATEST=true"
@@ -350,7 +328,7 @@ tasks:
           GRAFANA_URL="{{.GRAFANA_URL}}" \
           ares blue from-operation $OP_ARGS \
           $MODEL_FLAG \
-          --max-steps {{.MAX_STEPS_BLUE}} \
+          --max-steps {{.MAX_STEPS}} \
           --grafana-url "{{.GRAFANA_URL}}"
 
   multi:status:
@@ -364,15 +342,15 @@ tasks:
         msg: "Either INVESTIGATION_ID or LATEST=true is required"
     cmds:
       - >-
-        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue status
+        {{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue status
         {{if ne .INVESTIGATION_ID ""}}{{.INVESTIGATION_ID}}{{end}}
         {{if eq .LATEST "true"}}--latest{{end}}
 
   multi:list:
-    desc: "List all investigations"
+    desc: "List all investigations (set BLUE_TRANSPORT=k8s to query the K8s cluster instead of EC2)"
     silent: true
     cmds:
-      - '{{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue list'
+      - '{{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue list'
 
   multi:evidence:
     desc: "Show evidence for an investigation (usage: task blue:multi:evidence [INVESTIGATION_ID=inv-xxx] [LATEST=true])"
@@ -386,7 +364,7 @@ tasks:
         msg: "Either INVESTIGATION_ID or LATEST=true is required"
     cmds:
       - >-
-        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue evidence
+        {{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue evidence
         {{if ne .INVESTIGATION_ID ""}}{{.INVESTIGATION_ID}}{{end}}
         {{if eq .LATEST "true"}}--latest{{end}}
         {{if eq .JSON "true"}}--json{{end}}
@@ -402,7 +380,7 @@ tasks:
         msg: "Either INVESTIGATION_ID or LATEST=true is required"
     cmds:
       - >-
-        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue techniques
+        {{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue techniques
         {{if ne .INVESTIGATION_ID ""}}{{.INVESTIGATION_ID}}{{end}}
         {{if eq .LATEST "true"}}--latest{{end}}
 
@@ -417,7 +395,7 @@ tasks:
         msg: "Either INVESTIGATION_ID or LATEST=true is required"
     cmds:
       - >-
-        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue runtime
+        {{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue runtime
         {{if ne .INVESTIGATION_ID ""}}{{.INVESTIGATION_ID}}{{end}}
         {{if eq .LATEST "true"}}--latest{{end}}
 
@@ -432,7 +410,7 @@ tasks:
         msg: "Either INVESTIGATION_ID or LATEST=true is required"
     cmds:
       - >-
-        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue triage-status
+        {{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue triage-status
         {{if ne .INVESTIGATION_ID ""}}{{.INVESTIGATION_ID}}{{end}}
         {{if eq .LATEST "true"}}--latest{{end}}
 
@@ -448,7 +426,7 @@ tasks:
         msg: "Either OPERATION_ID or LATEST=true is required"
     cmds:
       - >-
-        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue operation-status
+        {{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue operation-status
         {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}}
         {{if eq .LATEST "true"}}--latest{{end}}
         {{if ne .WATCH "0"}}--watch {{.WATCH}}{{end}}
@@ -462,7 +440,7 @@ tasks:
       - sh: test -n "{{.INVESTIGATION_ID}}"
         msg: "INVESTIGATION_ID variable is required"
     cmds:
-      - '{{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue delete "{{.INVESTIGATION_ID}}" --force'
+      - '{{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue delete "{{.INVESTIGATION_ID}}" --force'
 
   multi:delete-operation:
     desc: "Delete an operation and all its investigations (usage: task blue:multi:delete-operation OPERATION_ID=op-xxx)"
@@ -473,7 +451,7 @@ tasks:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
     cmds:
-      - '{{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue delete-operation "{{.OPERATION_ID}}" --force'
+      - '{{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue delete-operation "{{.OPERATION_ID}}" --force'
 
   multi:cleanup:
     desc: "Clean up old investigations (usage: task blue:multi:cleanup [MAX_AGE_HOURS=24] [ALL=true])"
@@ -484,13 +462,13 @@ tasks:
       DRY_RUN: '{{.DRY_RUN | default "false"}}'
     cmds:
       - >-
-        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} blue cleanup
+        {{.ARES_CLI}} {{.TRANSPORT_ARGS}} blue cleanup
         --max-age-hours {{.MAX_AGE_HOURS}}
         {{if eq .ALL "true"}}--all --force{{end}}
         {{if eq .DRY_RUN "true"}}--dry-run{{end}}
 
   multi:logs:
-    desc: "Follow blue team logs (usage: task blue:multi:logs [ALL=true] [ROLE=orchestrator|triage|threat-hunter|lateral-analyst])"
+    desc: "Follow blue team logs (usage: task blue:multi:logs [ALL=true] [ROLE=triage|threat-hunter|lateral-analyst] [BLUE_TRANSPORT=ec2|k8s|local])"
     silent: true
     vars:
       ALL: '{{.ALL | default "false"}}'
@@ -499,28 +477,56 @@ tasks:
       MAX_LOG_REQUESTS: '{{.MAX_LOG_REQUESTS | default "50"}}'
     cmds:
       - |
-        if [ "{{.ALL}}" = "true" ]; then
-          echo "Following all blue team pods..."
-          kubectl logs -f -n {{.K8S_NAMESPACE}} \
-            -l ares.dreadnode.io/component=blue-team \
-            --tail={{.LINES}} \
-            --prefix=true \
-            --max-log-requests={{.MAX_LOG_REQUESTS}}
-        elif [ -n "{{.ROLE}}" ]; then
-          if [ "{{.ROLE}}" = "orchestrator" ]; then
-            echo "Following blue orchestrator logs..."
-            kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator --tail={{.LINES}}
-          else
-            echo "Following blue {{.ROLE}} logs..."
-            kubectl logs -f -n {{.K8S_NAMESPACE}} \
-              -l ares.dreadnode.io/component=blue-team,ares.dreadnode.io/role={{.ROLE}} \
-              --tail={{.LINES}} \
-              --prefix=true \
-              --max-log-requests={{.MAX_LOG_REQUESTS}}
-          fi
-        else
-          echo "Following blue orchestrator logs..."
-          echo "Tip: Use ALL=true to see all blue team pods, or ROLE=triage|threat-hunter|lateral-analyst"
-          echo ""
-          kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator --tail={{.LINES}}
-        fi
+        case "{{.BLUE_TRANSPORT}}" in
+          k8s)
+            if [ "{{.ALL}}" = "true" ]; then
+              echo "Following all blue team pods..."
+              kubectl logs -f -n {{.K8S_NAMESPACE}} \
+                -l ares.dreadnode.io/component=blue-team \
+                --tail={{.LINES}} \
+                --prefix=true \
+                --max-log-requests={{.MAX_LOG_REQUESTS}}
+            elif [ -n "{{.ROLE}}" ] && [ "{{.ROLE}}" != "orchestrator" ]; then
+              echo "Following blue {{.ROLE}} logs..."
+              kubectl logs -f -n {{.K8S_NAMESPACE}} \
+                -l ares.dreadnode.io/component=blue-team,ares.dreadnode.io/role={{.ROLE}} \
+                --tail={{.LINES}} \
+                --prefix=true \
+                --max-log-requests={{.MAX_LOG_REQUESTS}}
+            else
+              echo "Following blue orchestrator logs..."
+              echo "Tip: ALL=true for every blue pod, or ROLE=triage|threat-hunter|lateral-analyst"
+              echo ""
+              kubectl logs -f -n {{.K8S_NAMESPACE}} deploy/ares-blue-orchestrator --tail={{.LINES}}
+            fi
+            ;;
+          local)
+            LOGFILE=$(find "{{.LOG_DIR}}" -name 'blue-*.log' -type f 2>/dev/null | sort | tail -1)
+            if [ -z "$LOGFILE" ]; then
+              echo "No {{.LOG_DIR}}/blue-*.log found — those are written by 'task blue:once'." >&2
+              exit 1
+            fi
+            echo "Following $LOGFILE..."
+            tail -n {{.LINES}} -f "$LOGFILE"
+            ;;
+          *)
+            # On EC2 blue is not a separate process: ec2:launch runs the
+            # orchestrator with ARES_BLUE_ENABLED=1, and the unit appends both
+            # streams to /var/log/ares/orchestrator.log
+            # (.taskfiles/ec2/scripts/launch-orchestrator.sh.tmpl:102-103). So
+            # there are no per-role blue pods to select, and blue lines are
+            # interleaved with red. Filter by message text — log lines carry no
+            # module target (telemetry defaults show_target=false).
+            if [ -n "{{.ROLE}}" ]; then
+              echo "Note: ROLE is K8s-only. On EC2 blue runs inside the orchestrator process." >&2
+            fi
+            {{if eq .ALL "true"}}
+            echo "Following the whole orchestrator log (red + blue interleaved)..."
+            task :ec2:logs EC2_NAME="{{.EC2_NAME}}" ROLE=orchestrator LINES="{{.LINES}}"
+            {{else}}
+            echo "Following blue lines in the orchestrator log (ALL=true for everything)..."
+            task :ec2:logs EC2_NAME="{{.EC2_NAME}}" ROLE=orchestrator LINES="{{.LINES}}" \
+              FILTER='blue|investigation|inv-'
+            {{end}}
+            ;;
+        esac

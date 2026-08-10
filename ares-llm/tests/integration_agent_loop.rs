@@ -15,19 +15,32 @@ use ares_llm::{
 /// A mock LLM provider that returns pre-queued responses in order.
 struct MockProvider {
     responses: Mutex<VecDeque<LlmResponse>>,
+    seen_prompts: Mutex<Vec<Vec<String>>>,
 }
 
 impl MockProvider {
     fn new(responses: Vec<LlmResponse>) -> Self {
         Self {
             responses: Mutex::new(VecDeque::from(responses)),
+            seen_prompts: Mutex::new(Vec::new()),
         }
+    }
+
+    fn seen_prompts(&self) -> Vec<Vec<String>> {
+        self.seen_prompts.lock().unwrap().clone()
     }
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for MockProvider {
-    async fn chat(&self, _request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+    async fn chat(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
+        self.seen_prompts.lock().unwrap().push(
+            request
+                .messages
+                .iter()
+                .map(|m| m.content.clone().unwrap_or_default())
+                .collect(),
+        );
         let mut queue = self.responses.lock().unwrap();
         queue.pop_front().ok_or_else(|| {
             LlmError::Other(anyhow::anyhow!("MockProvider: no more queued responses"))
@@ -73,6 +86,7 @@ impl ToolDispatcher for MockDispatcher {
                 output: "default mock output".into(),
                 error: None,
                 discoveries: None,
+                failure_kind: None,
             })
         })
     }
@@ -184,6 +198,7 @@ async fn multi_turn_tool_use_then_task_complete() {
             .into(),
         error: None,
         discoveries: None,
+        failure_kind: None,
     })]));
 
     let config = default_config(10);
@@ -239,6 +254,7 @@ async fn max_steps_limit() {
                 output: "scan complete".into(),
                 error: None,
                 discoveries: None,
+                failure_kind: None,
             })
         })
         .collect();
@@ -312,6 +328,176 @@ async fn end_turn_no_tool_calls() {
     assert!(dispatcher.dispatched_calls().is_empty());
 }
 
+fn truncated_response(content: &str) -> LlmResponse {
+    LlmResponse {
+        content: content.into(),
+        tool_calls: vec![],
+        stop_reason: StopReason::MaxTokens,
+        usage: default_usage(),
+    }
+}
+
+#[tokio::test]
+async fn truncated_completion_is_retried_then_completes() {
+    let provider = MockProvider::new(vec![
+        truncated_response("Enumerating SPNs for kerberoastable accounts and the"),
+        tool_use_response(vec![ToolCall {
+            id: "call_1".into(),
+            name: "task_complete".into(),
+            arguments: json!({
+                "task_id": "task-credential-access-001",
+                "result": "Kerberoasted svc_sql in contoso.local"
+            }),
+        }]),
+    ]);
+    let dispatcher = Arc::new(MockDispatcher::new(vec![]));
+
+    let config = default_config(10);
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
+        dispatcher: dispatcher.clone(),
+        config: &config,
+        system_prompt: "You are a credential access agent.",
+        task_prompt: "Kerberoast contoso.local.",
+        role: "credential_access",
+        task_id: "task-credential-access-001",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
+    .await;
+
+    match &outcome.reason {
+        LoopEndReason::TaskComplete { task_id, result } => {
+            assert_eq!(task_id, "task-credential-access-001");
+            assert!(result.contains("svc_sql"));
+        }
+        other => panic!("Expected TaskComplete after truncation retry, got: {other:?}"),
+    }
+    assert_eq!(outcome.steps, 2);
+
+    let prompts = provider.seen_prompts();
+    assert_eq!(prompts.len(), 2);
+    let second = &prompts[1];
+    assert!(
+        second.iter().any(|m| m.contains("CUT OFF")),
+        "retry turn must carry the truncation nudge, got: {second:?}"
+    );
+    assert!(
+        second.iter().any(|m| m.contains("Enumerating SPNs")),
+        "partial content must be preserved in the retry turn, got: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn truncated_completion_with_empty_content_still_retries() {
+    let provider = MockProvider::new(vec![
+        truncated_response(""),
+        tool_use_response(vec![ToolCall {
+            id: "call_1".into(),
+            name: "task_complete".into(),
+            arguments: json!({"task_id": "task-credential-access-002", "result": "done"}),
+        }]),
+    ]);
+    let dispatcher = Arc::new(MockDispatcher::new(vec![]));
+
+    let config = default_config(10);
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
+        dispatcher: dispatcher.clone(),
+        config: &config,
+        system_prompt: "You are a credential access agent.",
+        task_prompt: "Dump secrets from dc01.contoso.local.",
+        role: "credential_access",
+        task_id: "task-credential-access-002",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
+    .await;
+
+    assert!(
+        matches!(outcome.reason, LoopEndReason::TaskComplete { .. }),
+        "Expected TaskComplete, got: {:?}",
+        outcome.reason
+    );
+
+    let prompts = provider.seen_prompts();
+    let second = &prompts[1];
+    assert!(second.iter().any(|m| m.contains("CUT OFF")));
+    assert!(
+        !second.iter().any(String::is_empty),
+        "an empty assistant turn must not be pushed, got: {second:?}"
+    );
+}
+
+#[tokio::test]
+async fn truncated_completion_ends_loop_after_retry_budget() {
+    let provider = MockProvider::new(vec![
+        truncated_response("first"),
+        truncated_response("second"),
+        truncated_response("third"),
+    ]);
+    let dispatcher = Arc::new(MockDispatcher::new(vec![]));
+
+    let config = AgentLoopConfig {
+        max_token_retries: 2,
+        ..default_config(10)
+    };
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
+        dispatcher: dispatcher.clone(),
+        config: &config,
+        system_prompt: "You are a credential access agent.",
+        task_prompt: "Kerberoast contoso.local.",
+        role: "credential_access",
+        task_id: "task-credential-access-003",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
+    .await;
+
+    assert!(
+        matches!(outcome.reason, LoopEndReason::MaxTokens),
+        "Expected MaxTokens, got: {:?}",
+        outcome.reason
+    );
+    assert_eq!(outcome.steps, 3);
+    assert_eq!(provider.seen_prompts().len(), 3);
+}
+
+#[tokio::test]
+async fn truncated_completion_terminates_immediately_when_retries_disabled() {
+    let provider = MockProvider::new(vec![truncated_response("partial")]);
+    let dispatcher = Arc::new(MockDispatcher::new(vec![]));
+
+    let config = AgentLoopConfig {
+        max_token_retries: 0,
+        ..default_config(10)
+    };
+    let outcome = run_agent_loop(RunAgentLoopParams {
+        provider: &provider,
+        dispatcher: dispatcher.clone(),
+        config: &config,
+        system_prompt: "You are a credential access agent.",
+        task_prompt: "Kerberoast contoso.local.",
+        role: "credential_access",
+        task_id: "task-credential-access-004",
+        tools: &test_tools(),
+        callback_handler: None,
+        hostname_map: None,
+    })
+    .await;
+
+    assert!(
+        matches!(outcome.reason, LoopEndReason::MaxTokens),
+        "Expected MaxTokens, got: {:?}",
+        outcome.reason
+    );
+    assert_eq!(outcome.steps, 1);
+}
+
 #[tokio::test]
 async fn tool_dispatch_error_fed_back() {
     // Turn 1: LLM requests nmap_scan
@@ -338,6 +524,7 @@ async fn tool_dispatch_error_fed_back() {
         output: "partial scan data".into(),
         error: Some("Connection timed out after 30s".into()),
         discoveries: None,
+        failure_kind: None,
     })]));
 
     let config = default_config(10);
@@ -507,6 +694,7 @@ async fn token_usage_accumulates() {
         output: "scan done".into(),
         error: None,
         discoveries: None,
+        failure_kind: None,
     })]));
 
     let config = default_config(10);

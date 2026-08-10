@@ -86,7 +86,6 @@ pub(crate) async fn blue_submit(p: BlueSubmitParams) -> Result<()> {
         let _: () = conn.expire(&env_vars_key, 3600).await?;
     }
 
-    // Push investigation request to NATS investigation queue
     let nats = NatsBroker::connect_from_env()
         .await
         .context("Connect to NATS for blue investigation submission")?;
@@ -148,7 +147,6 @@ pub(crate) async fn blue_from_operation(p: BlueFromOperationParams) -> Result<()
     // Resolve model — if not specified, the orchestrator will use its config default
     let effective_model = resolve_model(&model);
 
-    // Resolve Grafana config
     let grafana_url = grafana_url.or_else(|| std::env::var("GRAFANA_URL").ok());
     let grafana_api_key =
         grafana_api_key.or_else(|| std::env::var("GRAFANA_SERVICE_ACCOUNT_TOKEN").ok());

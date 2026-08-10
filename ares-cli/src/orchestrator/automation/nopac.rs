@@ -31,7 +31,6 @@ fn collect_nopac_work(state: &StateInner) -> Vec<NopacWork> {
             continue;
         }
 
-        // Find a credential for this domain
         let cred = match state
             .credentials
             .iter()
@@ -231,8 +230,6 @@ mod tests {
         let key2 = format!("nopac:{}:{}", domain2.to_lowercase(), "192.168.58.20");
         assert_eq!(key2, "nopac:fabrikam.local:192.168.58.20");
     }
-
-    // --- collect_nopac_work tests ---
 
     use crate::orchestrator::state::StateInner;
 

@@ -17,12 +17,8 @@ mod templates;
 #[cfg(test)]
 mod tests;
 
-// ─── Label constants ────────────────────────────────────────────────────────
-
-pub(super) const WIN_SECURITY: &str = r#"job="windows-security""#;
+pub const WIN_SECURITY: &str = r#"job="windows-security""#;
 pub(super) const WIN_SYSTEM: &str = r#"job="windows-system""#;
-
-// ─── Query builder helpers ──────────────────────────────────────────────────
 
 /// Build an optimized label selector.
 ///
@@ -30,7 +26,11 @@ pub(super) const WIN_SYSTEM: &str = r#"job="windows-system""#;
 /// to narrow stream selection, optionally adds computer regex match.
 /// The `computer` label contains the FQDN (e.g. `dc01.contoso.local`),
 /// so regex match (`=~`) is used to allow partial hostname or IP matches.
-pub(super) fn build_selector(base: &str, hostname: Option<&str>) -> String {
+///
+/// Public because correlation queries built outside the template catalog (see
+/// the blue orchestrator's baseline sweep) must scope to the same deployment;
+/// a query missing the `deployment` label silently spans other ranges' logs.
+pub fn build_selector(base: &str, hostname: Option<&str>) -> String {
     let deployment = std::env::var("ARES_DEPLOYMENT").ok();
     let mut labels = base.to_string();
     if let Some(dep) = &deployment {
@@ -64,33 +64,35 @@ fn is_regex_pattern(pattern: &str) -> bool {
     })
 }
 
-/// Build an optimized filter for tool/attack patterns.
+/// Build a filter matching ANY of `patterns` (OR) on a single log line.
 ///
-/// Uses `|=` (case-sensitive contains) for single literal patterns since Loki
-/// evaluates contains ~10x faster than regex. Falls back to `|~` (regex) when
-/// patterns contain metacharacters or when multiple patterns need alternation.
+/// A pattern list within one stage is disjunctive. LogQL has no OR-of-`|=`
+/// (chained `|=` is conjunctive — the line must contain ALL terms), so the only
+/// way to OR multiple terms is regex alternation. Only a single literal takes
+/// the fast `|=` contains path (Loki evaluates it ~10x faster than regex);
+/// everything else uses ``|~ `(?i)(…)` ``. The `(?i)` also frees templates from
+/// guessing log casing (e.g. `0x17` vs `RC4`).
+///
+/// The regex arm emits a **backtick** string. LogQL double-quoted strings take
+/// Go escape rules, so a pattern like `cmd\.exe` reaches Loki as the invalid
+/// escape `\.` and the whole query dies with `400 Bad Request: invalid char
+/// escape` — deterministically, and unretried, because 400 is correctly not
+/// retryable. That silently killed all 15 `filter_stages` templates
+/// (impacket/lateral/ADCS/delegation detection) while the plain-`patterns`
+/// ones kept working, so blue ran half-blind. Backticks are LogQL's raw
+/// string: no escape processing, regex metacharacters pass through intact.
+/// The `|=` arm needs no such care — `is_regex_pattern` routes anything
+/// containing a backslash to the regex arm.
 pub(super) fn build_pattern_filter(patterns: &[&str]) -> String {
-    if patterns.is_empty() {
-        return String::new();
+    match patterns {
+        [] => String::new(),
+        [p] if !is_regex_pattern(p) => format!(r#" |= "{}""#, p),
+        _ => format!(" |~ `(?i)({})`", patterns.join("|")),
     }
-    // Single literal pattern: use fast contains match
-    if patterns.len() == 1 && !is_regex_pattern(patterns[0]) {
-        return format!(r#" |= "{}""#, patterns[0]);
-    }
-    // 2-3 simple literals: chain |= filters (faster than regex alternation)
-    if patterns.len() <= 3 && patterns.iter().all(|p| !is_regex_pattern(p)) {
-        return patterns
-            .iter()
-            .map(|p| format!(r#" |= "{}""#, p))
-            .collect::<String>();
-    }
-    // Multiple or regex patterns: use case-insensitive regex alternation
-    format!(r#" |~ "(?i)({})""#, patterns.join("|"))
 }
-
-// ─── Re-exports ──────────────────────────────────────────────────────────────
 
 pub use catalog::list_detection_templates;
 pub use runner::{
-    get_host_activity, get_user_activity, run_detection_query, run_parallel_detections,
+    get_host_activity, get_user_activity, run_detection_query, run_detection_query_events,
+    run_parallel_detections, DetectionEvents,
 };

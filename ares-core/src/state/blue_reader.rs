@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use redis::AsyncCommands;
 
-use crate::models::{BlueTaskInfo, Evidence, SharedBlueTeamState, TimelineEvent, TriageRecord};
+use crate::models::{
+    BlueTaskInfo, Evidence, LateralMovement, SharedBlueTeamState, TimelineEvent, TriageRecord,
+};
 
 use super::keys::*;
 use super::try_deserialize;
@@ -236,9 +238,20 @@ impl BlueStateReader {
         Ok(exists)
     }
 
+    /// Read lateral-movement connections from the
+    /// `ares:blue:inv:{id}:lateral` LIST.
+    async fn get_lateral(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<Vec<LateralMovement>, redis::RedisError> {
+        let items: Vec<String> = conn.lrange(self.key(BLUE_KEY_LATERAL), 0, -1).await?;
+        Ok(items
+            .iter()
+            .filter_map(|s| serde_json::from_str(s).ok())
+            .collect())
+    }
+
     /// Load the full SharedBlueTeamState from Redis.
-    ///
-    /// This is the Rust equivalent of `BlueStateBackend.snapshot()`.
     pub async fn load_state(
         &self,
         conn: &mut impl AsyncCommands,
@@ -261,8 +274,8 @@ impl BlueStateReader {
         let triage_records = self.get_triage_records(conn).await?;
         let pending_tasks = self.get_pending_tasks(conn).await?;
         let completed_tasks = self.get_completed_tasks(conn).await?;
+        let lateral = self.get_lateral(conn).await?;
 
-        // Extract scalar meta fields
         let stage = meta
             .get("stage")
             .and_then(|v| v.as_str())
@@ -311,6 +324,7 @@ impl BlueStateReader {
             triage_records,
             pending_tasks,
             completed_tasks,
+            lateral,
         };
 
         Ok(Some(state))
@@ -759,5 +773,62 @@ mod tests {
         assert!(state.completed_tasks.is_empty());
         assert!(state.escalated);
         assert_eq!(state.escalation_reason.as_deref(), Some("confirmed threat"));
+    }
+
+    #[tokio::test]
+    async fn load_state_includes_lateral_movements() {
+        // Exercises the private get_lateral path via load_state: a lateral
+        // connection written as JSON is deserialized into state.lateral.
+        let mut conn = MockRedisConnection::new();
+        let w = make_writer();
+        let r = make_reader();
+
+        let alert = serde_json::json!({"alert_id": "a-002"});
+        w.initialize(&mut conn, &alert).await.unwrap();
+
+        let lateral = serde_json::json!({
+            "source_host": "192.168.58.10",
+            "destination_host": "192.168.58.20",
+            "user": "svc_sql",
+            "method": "wmiexec",
+            "timestamp": "2026-07-01T00:00:00Z"
+        });
+        w.add_lateral_connection(&mut conn, &lateral).await.unwrap();
+
+        let state = r.load_state(&mut conn).await.unwrap().unwrap();
+        assert_eq!(state.lateral.len(), 1);
+        assert_eq!(state.lateral[0].source_host, "192.168.58.10");
+        assert_eq!(state.lateral[0].destination_host, "192.168.58.20");
+        assert_eq!(state.lateral[0].user, "svc_sql");
+        assert_eq!(state.lateral[0].method, "wmiexec");
+    }
+
+    #[tokio::test]
+    async fn load_state_lateral_skips_malformed_entries() {
+        // get_lateral silently drops entries that don't deserialize, keeping the
+        // well-formed ones.
+        let mut conn = MockRedisConnection::new();
+        let w = make_writer();
+        let r = make_reader();
+
+        w.initialize(&mut conn, &serde_json::json!({"alert_id": "a-003"}))
+            .await
+            .unwrap();
+
+        // A non-object JSON value cannot become a LateralMovement.
+        w.add_lateral_connection(&mut conn, &serde_json::json!("not-an-object"))
+            .await
+            .unwrap();
+        w.add_lateral_connection(
+            &mut conn,
+            &serde_json::json!({"source_host": "192.168.58.10", "user": "alice"}),
+        )
+        .await
+        .unwrap();
+
+        let state = r.load_state(&mut conn).await.unwrap().unwrap();
+        assert_eq!(state.lateral.len(), 1);
+        assert_eq!(state.lateral[0].source_host, "192.168.58.10");
+        assert_eq!(state.lateral[0].user, "alice");
     }
 }

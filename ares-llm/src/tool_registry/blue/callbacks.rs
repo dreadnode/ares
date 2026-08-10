@@ -127,7 +127,7 @@ pub(super) fn escalation_triage_tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "confirm_escalation".into(),
-            description: "Confirm the escalation — keep it for human review.".into(),
+            description: "Confirm the escalation — keep it for human review. If a containment action is warranted, name it via `containment_action` and identify the affected principal/host/domain/certificate via `target`; the orchestrator records the decision as a simulated response.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -143,6 +143,21 @@ pub(super) fn escalation_triage_tool_definitions() -> Vec<ToolDefinition> {
                     "confidence": {
                         "type": "number",
                         "description": "Confidence in this decision (0.0-1.0)"
+                    },
+                    "containment_action": {
+                        "type": "string",
+                        "enum": [
+                            "disable_ad_account",
+                            "isolate_host_firewall",
+                            "revoke_krbtgt",
+                            "revoke_certificate",
+                            "escalate_to_human"
+                        ],
+                        "description": "Simulated containment action associated with this confirmation. `escalate_to_human` (the default) means no automated action is taken beyond raising the incident."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Subject of the containment action: for disable_ad_account use `user@domain`; for isolate_host_firewall use IP or hostname; for revoke_krbtgt use the AD realm; for revoke_certificate use the certificate serial. Omit for `escalate_to_human`."
                     }
                 },
                 "required": ["reasoning", "severity", "confidence"]

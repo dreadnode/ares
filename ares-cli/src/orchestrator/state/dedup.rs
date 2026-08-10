@@ -19,6 +19,8 @@ use crate::orchestrator::task_queue::TaskQueueCore;
 /// 5 attempts × 120s cooldown = ~10 min ceiling per stuck vuln.
 pub const MAX_EXPLOIT_FAILURES: u32 = 5;
 
+pub const MAX_ADCS_UNAUTH_RETRIES: u32 = 2;
+
 impl SharedState {
     /// Mark a vulnerability as exploited.
     ///
@@ -46,18 +48,47 @@ impl SharedState {
         );
 
         // Compute superseded vuln_ids from in-memory discovered_vulnerabilities.
-        let superseded: Vec<String> = {
+        let (superseded, walked_step) = {
             let state = self.inner.read().await;
             let primary = state.discovered_vulnerabilities.get(vuln_id);
-            compute_superseded(vuln_id, primary, &state.discovered_vulnerabilities)
+            let superseded: Vec<String> =
+                compute_superseded(vuln_id, primary, &state.discovered_vulnerabilities);
+            let walked_step = if state.emit_path_records || state.novelty_enabled {
+                primary.map(|v| {
+                    (
+                        state.emit_path_records,
+                        state.novelty_enabled,
+                        state.novelty_scope.clone(),
+                        v.vuln_type.clone(),
+                        v.target.clone(),
+                    )
+                })
+            } else {
+                None
+            };
+            (superseded, walked_step)
         };
+
+        let superseded_key = format!(
+            "{}:{}:{}",
+            state::KEY_PREFIX,
+            operation_id,
+            state::KEY_SUPERSEDED
+        );
 
         let mut conn = queue.connection();
         let _: () = conn.sadd(&key, vuln_id).await?;
+        let _: () = conn.srem(&superseded_key, vuln_id).await?;
         for sid in &superseded {
-            let _: () = conn.sadd(&key, sid).await?;
+            let newly_credited: i64 = conn.sadd(&key, sid).await?;
+            if newly_credited > 0 {
+                let _: () = conn.sadd(&superseded_key, sid).await?;
+            }
         }
         let _: () = conn.expire(&key, 86400).await?;
+        if !superseded.is_empty() {
+            let _: () = conn.expire(&superseded_key, 86400).await?;
+        }
 
         emit_op_state(
             self.recorder(),
@@ -70,15 +101,32 @@ impl SharedState {
         )
         .await;
 
+        if let Some((emit, novelty, scope, vuln_type, target)) = walked_step {
+            crate::orchestrator::diversity::record_step(
+                &mut conn,
+                &operation_id,
+                &scope,
+                None,
+                &vuln_type,
+                &target,
+                emit,
+                novelty,
+            )
+            .await;
+        }
+
         let mut state = self.inner.write().await;
         state.exploited_vulnerabilities.insert(vuln_id.to_string());
+        state.superseded_vulnerabilities.remove(vuln_id);
         for sid in superseded {
             tracing::info!(
                 primary = %vuln_id,
                 superseded = %sid,
-                "Marking superseded vulnerability as exploited"
+                "Crediting superseded vulnerability — goal reached by another path, technique unproven"
             );
-            state.exploited_vulnerabilities.insert(sid);
+            if state.exploited_vulnerabilities.insert(sid.clone()) {
+                state.superseded_vulnerabilities.insert(sid);
+            }
         }
         Ok(())
     }
@@ -167,6 +215,16 @@ impl SharedState {
         *count
     }
 
+    pub async fn record_adcs_unauth_retry(&self, dedup_key: &str) -> (u32, bool) {
+        let mut state = self.inner.write().await;
+        let count = state
+            .adcs_unauth_retry_counts
+            .entry(dedup_key.to_string())
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+        (*count, *count <= MAX_ADCS_UNAUTH_RETRIES)
+    }
+
     /// Returns true once `vuln_id` has accumulated `MAX_EXPLOIT_FAILURES`
     /// consecutive failures. Checked by the exploitation workflow before
     /// dispatching a vuln from the priority queue.
@@ -177,6 +235,18 @@ impl SharedState {
             .get(vuln_id)
             .map(|c| *c >= MAX_EXPLOIT_FAILURES)
             .unwrap_or(false)
+    }
+
+    /// Immediately bump `vuln_id`'s failure counter to
+    /// `MAX_EXPLOIT_FAILURES`, marking the vuln abandoned in a single call.
+    /// Used for deterministic dead-ends (e.g. a shadow-cred dispatch that
+    /// returned `INSUFF_ACCESS_RIGHTS` on `msDS-KeyCredentialLink` — no
+    /// amount of retry will grant the missing WriteProperty). Idempotent.
+    pub async fn mark_exploit_abandoned(&self, vuln_id: &str) {
+        let mut state = self.inner.write().await;
+        state
+            .exploit_failure_counts
+            .insert(vuln_id.to_string(), MAX_EXPLOIT_FAILURES);
     }
 }
 
@@ -245,7 +315,7 @@ fn compute_superseded(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_superseded, MAX_EXPLOIT_FAILURES};
+    use super::{compute_superseded, MAX_ADCS_UNAUTH_RETRIES, MAX_EXPLOIT_FAILURES};
     use crate::orchestrator::state::SharedState;
     use crate::orchestrator::task_queue::TaskQueueCore;
     use ares_core::models::VulnerabilityInfo;
@@ -394,6 +464,82 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    #[tokio::test]
+    async fn superseded_trust_vuln_is_credited_but_not_counted_as_proven() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        {
+            let mut s = state.inner.write().await;
+            for (id, v) in [
+                (
+                    "dc_secretsdump_fabrikam.local",
+                    vuln(
+                        "dc_secretsdump_fabrikam.local",
+                        "dc_secretsdump",
+                        "192.168.58.58",
+                        &[("domain", "fabrikam.local")],
+                    ),
+                ),
+                (
+                    "forest_trust_contoso.local_fabrikam.local",
+                    vuln(
+                        "forest_trust_contoso.local_fabrikam.local",
+                        "forest_trust_escalation",
+                        "192.168.58.58",
+                        &[("target_domain", "fabrikam.local")],
+                    ),
+                ),
+            ] {
+                s.discovered_vulnerabilities.insert(id.to_string(), v);
+            }
+        }
+
+        state
+            .mark_exploited(&q, "dc_secretsdump_fabrikam.local")
+            .await
+            .unwrap();
+
+        let s = state.inner.read().await;
+        assert!(s
+            .exploited_vulnerabilities
+            .contains("forest_trust_contoso.local_fabrikam.local"));
+        assert!(
+            s.superseded_vulnerabilities
+                .contains("forest_trust_contoso.local_fabrikam.local"),
+            "a trust forge credited only by a dc_secretsdump must be marked superseded"
+        );
+        assert!(
+            !s.superseded_vulnerabilities
+                .contains("dc_secretsdump_fabrikam.local"),
+            "the primary vuln is proven, not superseded"
+        );
+    }
+
+    #[tokio::test]
+    async fn directly_exploited_vuln_is_promoted_out_of_superseded() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        {
+            let mut s = state.inner.write().await;
+            s.superseded_vulnerabilities
+                .insert("forest_trust_contoso.local_fabrikam.local".to_string());
+            s.exploited_vulnerabilities
+                .insert("forest_trust_contoso.local_fabrikam.local".to_string());
+        }
+
+        state
+            .mark_exploited(&q, "forest_trust_contoso.local_fabrikam.local")
+            .await
+            .unwrap();
+
+        let s = state.inner.read().await;
+        assert!(
+            !s.superseded_vulnerabilities
+                .contains("forest_trust_contoso.local_fabrikam.local"),
+            "proving the technique later must clear the superseded marker"
+        );
+    }
+
     #[test]
     fn supersede_dc_secretsdump_covers_trust_and_child_to_parent() {
         let mut discovered = HashMap::new();
@@ -494,6 +640,89 @@ mod tests {
         assert!(members.contains("mssql_192_168_58_51"));
     }
 
+    async fn path_record(q: &TaskQueueCore<MockRedisConnection>) -> Vec<String> {
+        let mut conn = q.connection();
+        redis::AsyncCommands::lrange(&mut conn, "ares:op:op-1:path_record", 0, -1)
+            .await
+            .unwrap()
+    }
+
+    async fn state_with_mssql_pair(
+        emit: bool,
+    ) -> (SharedState, TaskQueueCore<MockRedisConnection>) {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        if emit {
+            state
+                .set_diversity_recording(true, true, "per-campaign")
+                .await;
+        }
+        {
+            let mut s = state.inner.write().await;
+            s.discovered_vulnerabilities.insert(
+                "mssql_192_168_58_51".into(),
+                vuln("mssql_192_168_58_51", "mssql_access", "192.168.58.51", &[]),
+            );
+            s.discovered_vulnerabilities.insert(
+                "mssql_impersonation_192.168.58.51".into(),
+                vuln(
+                    "mssql_impersonation_192.168.58.51",
+                    "mssql_impersonation",
+                    "192.168.58.51",
+                    &[],
+                ),
+            );
+        }
+        (state, q)
+    }
+
+    #[tokio::test]
+    async fn mark_exploited_records_walked_step_for_primary_only() {
+        let (state, q) = state_with_mssql_pair(true).await;
+
+        state
+            .mark_exploited(&q, "mssql_impersonation_192.168.58.51")
+            .await
+            .unwrap();
+
+        let steps = path_record(&q).await;
+        assert_eq!(steps.len(), 1, "superseded vuln must not be recorded");
+        assert!(steps[0].contains("mssql_impersonation"));
+        assert!(!steps[0].contains("mssql_access"));
+        assert!(steps[0].contains("192.168.58.51"));
+    }
+
+    #[tokio::test]
+    async fn mark_exploited_records_nothing_when_diversity_off() {
+        let (state, q) = state_with_mssql_pair(false).await;
+
+        state
+            .mark_exploited(&q, "mssql_impersonation_192.168.58.51")
+            .await
+            .unwrap();
+
+        assert!(path_record(&q).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mark_exploited_records_via_any_call_path() {
+        let (state, q) = state_with_mssql_pair(true).await;
+
+        state
+            .mark_exploited(&q, "mssql_192_168_58_51")
+            .await
+            .unwrap();
+        state
+            .mark_exploited(&q, "mssql_impersonation_192.168.58.51")
+            .await
+            .unwrap();
+
+        let steps = path_record(&q).await;
+        assert_eq!(steps.len(), 2);
+        assert!(steps[0].contains("mssql_access"));
+        assert!(steps[1].contains("mssql_impersonation"));
+    }
+
     #[tokio::test]
     async fn record_exploit_failure_increments_counter() {
         let state = SharedState::new("op-1".to_string());
@@ -511,6 +740,39 @@ mod tests {
         );
         // Different vuln tracked independently.
         assert_eq!(state.record_exploit_failure("other_vuln").await, 1);
+    }
+
+    #[tokio::test]
+    async fn adcs_unauth_retry_stops_clearing_dedup_at_the_cap() {
+        let state = SharedState::new("op-1".to_string());
+        let key = "192.168.58.50:cred:alice@contoso.local";
+        for attempt in 1..=MAX_ADCS_UNAUTH_RETRIES {
+            let (count, may_retry) = state.record_adcs_unauth_retry(key).await;
+            assert_eq!(count, attempt);
+            assert!(may_retry, "attempt {attempt} is still within the cap");
+        }
+        let (count, may_retry) = state.record_adcs_unauth_retry(key).await;
+        assert_eq!(count, MAX_ADCS_UNAUTH_RETRIES + 1);
+        assert!(
+            !may_retry,
+            "past the cap the CA must stay dedup-locked for this credential — \
+             clearing it is what turned the retry into a ~30s hot loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn adcs_unauth_retry_is_scoped_per_credential_key() {
+        let state = SharedState::new("op-1".to_string());
+        let exhausted = "192.168.58.50:cred:alice@contoso.local";
+        for _ in 0..=MAX_ADCS_UNAUTH_RETRIES {
+            state.record_adcs_unauth_retry(exhausted).await;
+        }
+        assert!(!state.record_adcs_unauth_retry(exhausted).await.1);
+        let (count, may_retry) = state
+            .record_adcs_unauth_retry("192.168.58.50:cred:bob@contoso.local")
+            .await;
+        assert_eq!(count, 1);
+        assert!(may_retry);
     }
 
     #[tokio::test]
@@ -533,6 +795,33 @@ mod tests {
         // Further failures don't un-abandon.
         state.record_exploit_failure("vuln_a").await;
         assert!(state.is_exploit_abandoned("vuln_a").await);
+    }
+
+    #[tokio::test]
+    async fn mark_exploit_abandoned_one_shot_bumps_to_max() {
+        let state = SharedState::new("op-1".to_string());
+        assert!(!state.is_exploit_abandoned("vuln_kc").await);
+        state.mark_exploit_abandoned("vuln_kc").await;
+        assert!(state.is_exploit_abandoned("vuln_kc").await);
+        // Idempotent — a second mark leaves the counter at MAX.
+        state.mark_exploit_abandoned("vuln_kc").await;
+        assert!(state.is_exploit_abandoned("vuln_kc").await);
+        let s = state.inner.read().await;
+        assert_eq!(
+            s.exploit_failure_counts.get("vuln_kc"),
+            Some(&MAX_EXPLOIT_FAILURES)
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_exploit_abandoned_overwrites_partial_failure_count() {
+        let state = SharedState::new("op-1".to_string());
+        // Two prior failures.
+        state.record_exploit_failure("vuln_kc").await;
+        state.record_exploit_failure("vuln_kc").await;
+        assert!(!state.is_exploit_abandoned("vuln_kc").await);
+        state.mark_exploit_abandoned("vuln_kc").await;
+        assert!(state.is_exploit_abandoned("vuln_kc").await);
     }
 
     #[tokio::test]

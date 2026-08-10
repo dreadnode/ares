@@ -1,0 +1,126 @@
+//! Operation teardown — journal every persistent mutation an operation makes
+//! against a target, then reverse it and validate the reversal.
+//!
+//! Pieces:
+//! - [`journal`]  — the durable per-op record of mutations (Redis LIST).
+//! - [`dispatcher::JournalingToolDispatcher`] — the decorator that captures
+//!   mutations at the single `ToolDispatcher` choke point (LLM + deterministic).
+//! - [`registry`] — maps each mutation to its inverse and a reversibility class.
+//! - [`engine`]   — reads the journal (LIFO), reverses it, and reports.
+//!
+//! Entry points: the in-process post-op pass that orchestrator shutdown runs
+//! (see [`auto_teardown_enabled`]), and the standalone
+//! `ares ops teardown <op-id>` subcommand, which survives a SIGKILLed op.
+//!
+//! The post-op pass is what makes the journal useful in practice. Teardown
+//! reads its plan from `ares:op:{id}:mutation_journal`, and `ec2:launch`
+//! flushes Redis — so every mutation an operation leaves behind becomes
+//! unrecoverable the moment the *next* operation starts. Reverting at
+//! shutdown is the only point where the record still exists.
+
+pub mod baseline;
+pub mod capture;
+pub mod dispatcher;
+pub mod engine;
+pub mod journal;
+pub mod registry;
+
+pub use dispatcher::JournalingToolDispatcher;
+pub use engine::{run_teardown, TeardownOptions};
+
+/// Env var that disables the post-operation teardown pass.
+pub const AUTO_TEARDOWN_ENV: &str = "ARES_AUTO_TEARDOWN";
+
+/// Redis suffix claiming the single automatic teardown pass for an operation.
+const KEY_TEARDOWN_CLAIM: &str = "teardown_claimed";
+
+/// Run the automatic teardown exactly once per operation.
+///
+/// There are two call sites on purpose: the completion monitor runs it as soon
+/// as red has drained, so the range is restored while the operator is still
+/// watching, and orchestrator shutdown runs it as a fallback for operations
+/// that end without ever reaching a completion decision (deadline, stop
+/// request, crash). Whichever fires first claims the pass; the other sees the
+/// claim and returns `None` rather than dispatching a second set of inverses
+/// against already-reverted state.
+///
+/// The claim is deliberately not cleaned up: `ares ops teardown` remains the
+/// manual escape hatch and calls [`run_teardown`] directly, unaffected.
+pub async fn run_teardown_once<C: redis::AsyncCommands>(
+    conn: &mut C,
+    operation_id: &str,
+    opts: &TeardownOptions,
+) -> anyhow::Result<Option<engine::TeardownReport>> {
+    let key = ares_core::state::build_key(operation_id, KEY_TEARDOWN_CLAIM);
+    let claimed: bool = conn.set_nx(&key, "1").await?;
+    if !claimed {
+        return Ok(None);
+    }
+    run_teardown(conn, operation_id, opts).await.map(Some)
+}
+
+/// Whether orchestrator shutdown should revert the operation's mutations.
+///
+/// On unless [`AUTO_TEARDOWN_ENV`] is explicitly falsy. Defaulting off would
+/// preserve today's behaviour, in which the pass never runs at all and the
+/// range accumulates every machine account, RBCD write, and enabled
+/// `xp_cmdshell` an operation created.
+pub fn auto_teardown_enabled() -> bool {
+    !matches!(
+        std::env::var(AUTO_TEARDOWN_ENV)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvGuard(Option<String>);
+
+    impl EnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let prev = std::env::var(AUTO_TEARDOWN_ENV).ok();
+            match value {
+                Some(v) => unsafe { std::env::set_var(AUTO_TEARDOWN_ENV, v) },
+                None => unsafe { std::env::remove_var(AUTO_TEARDOWN_ENV) },
+            }
+            Self(prev)
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(v) => unsafe { std::env::set_var(AUTO_TEARDOWN_ENV, v) },
+                None => unsafe { std::env::remove_var(AUTO_TEARDOWN_ENV) },
+            }
+        }
+    }
+
+    #[test]
+    fn teardown_is_on_when_unset() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::set(None);
+        assert!(auto_teardown_enabled());
+    }
+
+    #[test]
+    fn teardown_is_off_only_for_explicit_falsy_values() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for v in ["0", "false", "FALSE", "no", "off"] {
+            let _g = EnvGuard::set(Some(v));
+            assert!(!auto_teardown_enabled(), "{v} should disable teardown");
+        }
+        for v in ["1", "true", "yes", "on", ""] {
+            let _g = EnvGuard::set(Some(v));
+            assert!(auto_teardown_enabled(), "{v} should leave teardown on");
+        }
+    }
+}

@@ -1,0 +1,9 @@
+# Use mold for linking on x86_64 Linux (much faster than default ld).
+# The cross-rs image's pre-build in Cross.toml installs mold and drops a
+# `ld` symlink at /opt/mold-shim/ld → mold. We pass `-B/opt/mold-shim` so
+# gcc picks that up as its linker without needing gcc ≥12 (which is when
+# `-fuse-ld=mold` support landed; the cross image ships gcc 9). Host macOS
+# builds are unaffected — the config is target-scoped, and macOS builds
+# target aarch64/x86_64-apple-darwin. Devs can override in ~/.cargo/config.toml.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-B/opt/mold-shim"]

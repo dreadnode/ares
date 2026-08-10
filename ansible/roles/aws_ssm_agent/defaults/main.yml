@@ -1,9 +1,0 @@
----
-# General settings
-aws_ssm_agent_temp_dir: "/tmp/ssm_install"
-aws_ssm_agent_aws_region: "us-east-1"
-
-# OOM protection — cap SSM agent memory and lower its OOM score so the kernel
-# kills worker tool processes (netexec, hashcat, nmap) instead of SSM.
-aws_ssm_agent_oom_protect: true
-aws_ssm_agent_memory_max: "512M"

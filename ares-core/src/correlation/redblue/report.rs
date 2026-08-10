@@ -52,7 +52,6 @@ pub fn generate_report_markdown(report: &CorrelationReport) -> String {
         String::new(),
     ];
 
-    // Assessment
     let assessment = if report.detection_rate >= 0.8 {
         "EXCELLENT - Blue team is detecting most red team activities"
     } else if report.detection_rate >= 0.6 {
@@ -67,7 +66,6 @@ pub fn generate_report_markdown(report: &CorrelationReport) -> String {
     lines.push("---".to_string());
     lines.push(String::new());
 
-    // Technique coverage
     if !report.technique_coverage.is_empty() {
         lines.push("## Technique Coverage".to_string());
         lines.push(String::new());
@@ -96,7 +94,6 @@ pub fn generate_report_markdown(report: &CorrelationReport) -> String {
         lines.push(String::new());
     }
 
-    // Successful detections
     if !report.matches.is_empty() {
         lines.push("## Successful Detections".to_string());
         lines.push(String::new());
@@ -122,7 +119,6 @@ pub fn generate_report_markdown(report: &CorrelationReport) -> String {
         lines.push(String::new());
     }
 
-    // Detection gaps
     if !report.gaps.is_empty() {
         lines.push("## Detection Gaps (Undetected Activities)".to_string());
         lines.push(String::new());
@@ -146,7 +142,6 @@ pub fn generate_report_markdown(report: &CorrelationReport) -> String {
         lines.push(String::new());
     }
 
-    // False positives
     if !report.false_positives.is_empty() {
         lines.push("## False Positives (Detections without Red Activity)".to_string());
         lines.push(String::new());
@@ -167,7 +162,6 @@ pub fn generate_report_markdown(report: &CorrelationReport) -> String {
         lines.push(String::new());
     }
 
-    // Recommendations
     lines.push("## Recommendations".to_string());
     lines.push(String::new());
 

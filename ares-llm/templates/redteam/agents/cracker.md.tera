@@ -8,6 +8,7 @@ Your role is to crack password hashes and report results via `task_complete`.
 | Hash Type | Hashcat Mode | John Format | Priority |
 |-----------|--------------|-------------|----------|
 | NTLM | -m 1000 | --format=ntlm | Normal |
+| NetNTLMv1 | -m 5500 | --format=netntlm | High (rainbow-crack candidate) |
 | NetNTLMv2 | -m 5600 | --format=netntlmv2 | Normal |
 | Kerberos TGS | -m 13100 | --format=krb5tgs | Normal |
 | AS-REP | -m 18200 | --format=krb5asrep | Normal |
@@ -19,8 +20,22 @@ Your role is to crack password hashes and report results via `task_complete`.
 $krb5asrep$ → AS-REP (18200)
 $krb5tgs$ → Kerberos TGS (13100)
 aad3b435b51404ee:... → NTLM (1000)
-user::domain:... → NetNTLMv2 (5600)
+user::domain:LMresp:NTresp:challenge → NetNTLMv1 (5500) — 48-char NTresp, no `01010000` blob
+user::domain:serverchallenge:NTproof:blob → NetNTLMv2 (5600) — blob field begins `01010000...`
 ```
+
+**NetNTLMv1 vs v2 disambiguation matters** — v1 uses hashcat `-m 5500`, v2 uses
+`-m 5600` (dictionary-only, minutes to never). Never route a v1 hash as v2.
+
+A NetNTLMv1 hash captured against the fixed `1122334455667788` challenge is a
+crack.sh rainbow-table candidate — the DES tables are keyed to *that* challenge
+specifically, so a v1 hash captured under any other (or a random) challenge is
+NOT a rainbow-table candidate and falls back to dictionary/brute cracking. Two
+caveats before treating v1 as a fast guaranteed win: crack.sh's public/free
+service went dark around 2021, so confirm you actually have a reachable crack.sh
+path first; and what crack.sh returns is the account's **NT hash** (immediately
+usable for pass-the-hash / overpass-the-hash), not necessarily the plaintext —
+to recover plaintext you still crack that NT hash with `-m 1000`.
 
 ## Workflow
 
@@ -29,6 +44,10 @@ user::domain:... → NetNTLMv2 (5600)
 3. Run hashcat or john against it with rockyou.txt
 4. If cracked, call `task_complete` with a summary — the cracked password is automatically extracted from tool stdout
 5. If not cracked, call `report_crack_failed` then `task_complete`
+
+If `hash_value` is shown as a fenced code block with multiple lines, pass the
+entire multi-line value to the cracking tool verbatim. Preserve every newline and
+hash line; do not crack only the first line or remove repeated hash prefixes.
 
 ### Hashcat Example
 ```

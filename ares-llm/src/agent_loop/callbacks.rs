@@ -139,15 +139,13 @@ pub(super) fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult>
             )))
         }
         "complete_operation" => {
-            let summary = call.arguments["summary"]
-                .as_str()
-                .unwrap_or("Operation completed")
-                .to_string();
-            info!("Operation marked complete: {summary}");
-            Ok(CallbackResult::TaskComplete {
-                task_id: "operation".to_string(),
-                result: summary,
-            })
+            warn!("complete_operation called by a non-orchestrator role — refusing");
+            Ok(CallbackResult::Continue(
+                "You cannot end the operation. Only the orchestrator decides when an \
+                 operation is complete. Report what you found with task_complete and \
+                 let the orchestrator judge overall progress."
+                    .to_string(),
+            ))
         }
         // record_credential is deprecated — credentials are extracted automatically
         // from tool output via regex parsing. This handler exists only as a safety net.
@@ -220,14 +218,14 @@ pub(super) fn handle_builtin_callback(call: &ToolCall) -> Result<CallbackResult>
 pub(super) async fn handle_callback(
     call: &ToolCall,
     custom: Option<&dyn CallbackHandler>,
+    role: &str,
 ) -> Result<CallbackResult> {
     // Try custom handler first (orchestrator state queries, dispatch tools)
     if let Some(handler) = custom {
-        if let Some(result) = handler.handle_callback(call).await {
+        if let Some(result) = handler.handle_callback(call, role).await {
             return result;
         }
     }
-    // Fall back to built-in handlers
     handle_builtin_callback(call)
 }
 
@@ -253,6 +251,20 @@ mod tests {
                 assert!(msg.contains("task payload"));
             }
             other => panic!("Expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn complete_operation_cannot_end_a_worker_task() {
+        let call = make_call(
+            "complete_operation",
+            serde_json::json!({"summary": "domain owned"}),
+        );
+        match handle_builtin_callback(&call).unwrap() {
+            CallbackResult::Continue(msg) => {
+                assert!(msg.contains("cannot end the operation"));
+            }
+            other => panic!("a worker must not end its task via complete_operation, got {other:?}"),
         }
     }
 
@@ -492,22 +504,6 @@ mod tests {
                 assert!(msg.contains("Obtained DA via AS-REP roasting"));
             }
             other => panic!("Expected Continue, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn complete_operation() {
-        let call = make_call(
-            "complete_operation",
-            serde_json::json!({"summary": "Achieved domain admin across all forests"}),
-        );
-        let result = handle_builtin_callback(&call).unwrap();
-        match result {
-            CallbackResult::TaskComplete { task_id, result } => {
-                assert_eq!(task_id, "operation");
-                assert!(result.contains("domain admin"));
-            }
-            other => panic!("Expected TaskComplete, got {other:?}"),
         }
     }
 }

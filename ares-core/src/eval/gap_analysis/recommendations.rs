@@ -219,7 +219,6 @@ pub fn recommend_for_technique(tech: &ExpectedTechnique) -> Option<DetectionReco
         }
     }
 
-    // Generic recommendation for unknown techniques
     Some(DetectionRecommendation {
         category: "rule".to_string(),
         priority: if tech.required { "high" } else { "medium" }.to_string(),
@@ -264,8 +263,6 @@ mod tests {
             parent_id: None,
         }
     }
-
-    // ── recommend_for_ioc ──────────────────────────────────────────
 
     #[test]
     fn ioc_ip_recommendation() {
@@ -335,8 +332,6 @@ mod tests {
         let rec = recommend_for_ioc(&ioc).unwrap();
         assert_eq!(rec.techniques, vec!["T1046"]);
     }
-
-    // ── recommend_for_technique ────────────────────────────────────
 
     #[test]
     fn technique_t1003_known() {

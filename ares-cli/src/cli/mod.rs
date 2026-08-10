@@ -5,12 +5,16 @@ pub(crate) mod history;
 pub(crate) mod ops;
 
 #[cfg(feature = "blue")]
+pub(crate) mod benchmark;
+#[cfg(feature = "blue")]
 pub(crate) mod blue;
 
 pub(crate) use config::ConfigCommands;
 pub(crate) use history::HistoryCommands;
 pub(crate) use ops::{OpsCommands, SessionsCommands};
 
+#[cfg(feature = "blue")]
+pub(crate) use benchmark::BenchmarkCommands;
 #[cfg(feature = "blue")]
 pub(crate) use blue::BlueCommands;
 
@@ -68,6 +72,11 @@ pub(crate) enum Commands {
     #[cfg(feature = "blue")]
     #[command(subcommand)]
     Blue(BlueCommands),
+
+    /// Benchmark replay system for blue team evaluation
+    #[cfg(feature = "blue")]
+    #[command(subcommand)]
+    Benchmark(BenchmarkCommands),
 
     /// Historical operation queries (requires Postgres)
     #[command(subcommand)]

@@ -4,12 +4,69 @@
 # Reference: https://www.netexec.wiki/getting-started/installation/installation-on-unix
 
 - name: Install pipx via apt (Debian/Ubuntu)
-  ansible.builtin.apt:
-    name:
-      - pipx
-    state: present
   become: true
   when: ansible_facts['os_family'] == 'Debian'
+  block:
+    - name: Refresh apt cache before pipx install
+      ansible.builtin.apt:
+        update_cache: true
+      # A cache refresh is not a meaningful state change; force it every run
+      # (to dodge stale Kali-rolling indexes before the pipx apt install) but
+      # don't report "changed", which would otherwise break idempotence.
+      changed_when: false
+
+    - name: Install pipx via apt
+      ansible.builtin.apt:
+        name:
+          - pipx
+        state: present
+  rescue:
+    # Kali rolling mirrors occasionally serve a Packages index that references
+    # .deb files already pruned from the pool, causing 404s on dependency
+    # downloads. Refresh once more and retry with --fix-missing to skip
+    # any still-stale references.
+    - name: Retry apt update after mirror miss
+      ansible.builtin.command: apt-get update  # noqa: command-instead-of-module
+      changed_when: true
+
+    - name: Retry pipx install with --fix-missing
+      ansible.builtin.command: apt-get install -y --fix-missing --no-install-recommends pipx  # noqa: command-instead-of-module
+      changed_when: true
+
+# Ubuntu 24.04's apt ships pipx 1.4.3, which predates the `--global` flag
+# (added in pipx 1.5.0). Upgrade via pip so subsequent `pipx install --global`
+# calls don't fail with "unrecognized arguments: --global".
+- name: Check pipx version after apt install
+  ansible.builtin.command: pipx --version
+  register: base_pipx_apt_version
+  changed_when: false
+  failed_when: false
+
+- name: Check whether pip supports --break-system-packages
+  ansible.builtin.command: python3 -m pip install --help
+  register: base_pipx_pip_help
+  changed_when: false
+  failed_when: false
+  when:
+    - base_pipx_apt_version.rc == 0
+    - base_pipx_apt_version.stdout is version('1.5.0', '<')
+
+# `--ignore-installed` is required because apt-installed pipx has no pip
+# RECORD file ("Cannot uninstall ... installed by debian"); pip's normal
+# upgrade path tries to uninstall first and fails.
+- name: Upgrade pipx to a version supporting --global (>= 1.5.0)
+  become: true
+  ansible.builtin.pip:
+    name: 'pipx>=1.5.0'
+    state: latest
+    extra_args: >-
+      --ignore-installed
+      {{ '--break-system-packages'
+         if (base_pipx_pip_help.stdout | default('')) is search('--break-system-packages')
+         else '' }}
+  when:
+    - base_pipx_apt_version.rc == 0
+    - base_pipx_apt_version.stdout is version('1.5.0', '<')
 
 - name: Add pipx bin to system PATH via profile.d
   ansible.builtin.copy:

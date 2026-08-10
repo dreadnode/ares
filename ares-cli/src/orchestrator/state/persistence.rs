@@ -28,7 +28,6 @@ impl SharedState {
 
         let reader = RedisStateReader::new(operation_id.clone());
 
-        // Load collections
         let loaded = reader
             .load_state(&mut conn)
             .await
@@ -62,7 +61,6 @@ impl SharedState {
             );
         }
 
-        // Load dedup sets
         let mut dedup_sets: HashMap<String, HashSet<String>> = HashMap::new();
         for set_name in ALL_DEDUP_SETS {
             let key = format!(
@@ -79,7 +77,6 @@ impl SharedState {
             dedup_sets.insert(set_name.to_string(), members);
         }
 
-        // Load MSSQL enum dispatched
         let mssql_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -88,7 +85,6 @@ impl SharedState {
         );
         let mssql_dispatched: HashSet<String> = conn.smembers(&mssql_key).await.unwrap_or_default();
 
-        // Load domain SIDs
         let domain_sids_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -98,7 +94,6 @@ impl SharedState {
         let domain_sids: HashMap<String, String> =
             conn.hgetall(&domain_sids_key).await.unwrap_or_default();
 
-        // Load RID-500 admin account names
         let admin_names_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -108,7 +103,6 @@ impl SharedState {
         let admin_names: HashMap<String, String> =
             conn.hgetall(&admin_names_key).await.unwrap_or_default();
 
-        // Load trusted domains
         let trusted_domains_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -141,7 +135,6 @@ impl SharedState {
             }
         }
 
-        // Load ACL chains
         let acl_chains_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -157,7 +150,6 @@ impl SharedState {
             .filter_map(|s| serde_json::from_str(s).ok())
             .collect();
 
-        // Load pending tasks from Redis HASH
         let pending_tasks_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -173,7 +165,6 @@ impl SharedState {
             }
         }
 
-        // Load completed tasks from Redis HASH
         let completed_tasks_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -190,7 +181,6 @@ impl SharedState {
             }
         }
 
-        // Load dispatched ACL steps from dedup set
         let acl_dedup_key = format!(
             "{}:{}:{}:{}",
             state::KEY_PREFIX,
@@ -201,7 +191,6 @@ impl SharedState {
         let dispatched_acl_steps: HashSet<String> =
             conn.smembers(&acl_dedup_key).await.unwrap_or_default();
 
-        // Load forged Kerberos tickets
         let kerberos_tickets_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -217,7 +206,6 @@ impl SharedState {
             .filter_map(|s| serde_json::from_str(&s).ok())
             .collect();
 
-        // Apply to state
         let mut state = self.inner.write().await;
         state.target = loaded.target;
         state.target_ips = loaded.target_ips;
@@ -235,7 +223,6 @@ impl SharedState {
         state.admin_names = admin_names;
         state.trusted_domains = trusted_domains;
         state.candidate_domains = candidate_domains;
-        // Rebuild dominated_domains from krbtgt hashes
         state.dominated_domains = state
             .hashes
             .iter()
@@ -337,7 +324,6 @@ impl SharedState {
         let meta = reader.get_meta(&mut conn).await.unwrap_or_default();
         let dc_map = reader.get_dc_map(&mut conn).await.unwrap_or_default();
 
-        // Load domain SIDs
         let domain_sids_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -347,7 +333,6 @@ impl SharedState {
         let domain_sids: HashMap<String, String> =
             conn.hgetall(&domain_sids_key).await.unwrap_or_default();
 
-        // Load RID-500 admin account names
         let admin_names_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -357,7 +342,6 @@ impl SharedState {
         let admin_names: HashMap<String, String> =
             conn.hgetall(&admin_names_key).await.unwrap_or_default();
 
-        // Refresh ACL chains
         let acl_chains_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -373,7 +357,6 @@ impl SharedState {
             .filter_map(|s| serde_json::from_str(s).ok())
             .collect();
 
-        // Refresh trusted domains
         let trusted_domains_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -406,7 +389,6 @@ impl SharedState {
             }
         }
 
-        // Refresh Kerberos tickets
         let kerberos_tickets_key = format!(
             "{}:{}:{}",
             state::KEY_PREFIX,
@@ -439,7 +421,6 @@ impl SharedState {
         state.candidate_domains = candidate_domains;
         state.acl_chains = acl_chains;
         state.kerberos_tickets = kerberos_tickets;
-        // Rebuild dominated_domains from refreshed hashes
         state.dominated_domains = state
             .hashes
             .iter()
@@ -545,7 +526,6 @@ mod tests {
         };
         state.publish_credential(&q, cred).await.unwrap();
 
-        // Now create a fresh state and load from the same Redis
         let state2 = SharedState::new("op-1".to_string());
         state2.load_from_redis(&q).await.unwrap();
 
@@ -564,13 +544,11 @@ mod tests {
 
         seed_meta(&q, "op-1").await;
 
-        // Persist a dedup entry
         state
             .persist_dedup(&q, "crack_requests", "hash123")
             .await
             .unwrap();
 
-        // Load into fresh state
         let state2 = SharedState::new("op-1".to_string());
         state2.load_from_redis(&q).await.unwrap();
 
@@ -660,7 +638,6 @@ mod tests {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
 
-        // Seed a host via publishing
         let host = ares_core::models::Host {
             ip: "192.168.58.5".to_string(),
             hostname: "srv01.contoso.local".to_string(),
@@ -676,7 +653,6 @@ mod tests {
         let state2 = SharedState::new("op-1".to_string());
         assert!(state2.inner.read().await.hosts.is_empty());
 
-        // Refresh should pull data from Redis
         state2.refresh_from_redis(&q).await.unwrap();
 
         let s = state2.inner.read().await;
@@ -691,14 +667,12 @@ mod tests {
 
         seed_meta(&q, "op-1").await;
 
-        // Set milestones
         state.set_golden_ticket(&q, "contoso.local").await.unwrap();
         state
             .set_domain_admin(&q, Some("attack chain".to_string()))
             .await
             .unwrap();
 
-        // Load into fresh state
         let state2 = SharedState::new("op-1".to_string());
         state2.load_from_redis(&q).await.unwrap();
 

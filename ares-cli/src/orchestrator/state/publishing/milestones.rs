@@ -31,10 +31,7 @@ impl SharedState {
                 return Ok(());
             }
         }
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let reader = RedisStateReader::new(operation_id);
         let mut conn = queue.connection();
         reader
@@ -84,6 +81,62 @@ impl SharedState {
         };
         let _ = self.publish_vulnerability(queue, vuln).await;
         let _ = self.mark_exploited(queue, &vuln_id).await;
+
+        // Emit a timeline event tagged with T1558.001 so the blue-team alert's
+        // `techniques_used` includes Golden Ticket. This function is the sole
+        // emitter: it is reached only from the evidence-gated confirmation in
+        // `result_processing/admin_checks.rs`, which requires both a ccache
+        // marker in tool output and a krbtgt hash for the domain.
+        let event_id = format!("evt-gt-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let techniques = vec!["T1558.001".to_string()];
+        let event = serde_json::json!({
+            "id": event_id,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "source": "golden_ticket",
+            "description": format!("Golden ticket forged for domain {domain}"),
+            "mitre_techniques": techniques,
+        });
+        let _ = self
+            .persist_timeline_event(queue, &event, &techniques)
+            .await;
+
+        Ok(())
+    }
+
+    /// Mark an ADCS ESC vuln exploited AND emit a T1649 timeline event.
+    ///
+    /// The deterministic ADCS chains (`certipy_esc1_full_chain`,
+    /// `certipy_esc3_full_chain`, `certipy_esc4_full_chain`) run through
+    /// `dispatch_tool` with `esc{N}_chain_*` task_ids that do NOT match the
+    /// `exploit_*` prefix gate in `result_processing::mod`, so the standard
+    /// `create_exploitation_timeline_event` path never fires. Callers used
+    /// to `mark_exploited` inline to fix the scoreboard, but that left the
+    /// blue-team alert's `techniques_used` list missing T1649 (Steal or
+    /// Forge Authentication Certificates) even after a fully successful
+    /// ESC1→DA chain. This helper puts both actions in one call so no
+    /// future site forgets one.
+    pub async fn mark_adcs_esc_exploited(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        vuln_id: &str,
+        esc_label: &str,
+    ) -> Result<()> {
+        self.mark_exploited(queue, vuln_id).await?;
+        let event_id = format!(
+            "evt-adcs-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        let techniques = vec!["T1649".to_string()];
+        let event = serde_json::json!({
+            "id": event_id,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "source": "adcs_exploitation",
+            "description": format!("ADCS {esc_label} chain succeeded ({vuln_id})"),
+            "mitre_techniques": techniques,
+        });
+        let _ = self
+            .persist_timeline_event(queue, &event, &techniques)
+            .await;
         Ok(())
     }
 
@@ -93,10 +146,7 @@ impl SharedState {
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         path: Option<String>,
     ) -> Result<()> {
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let reader = RedisStateReader::new(operation_id);
         let mut conn = queue.connection();
         reader
@@ -138,7 +188,6 @@ impl SharedState {
                             break;
                         }
                         d += 1;
-                        // Check credentials then hashes for the parent
                         if let Some(c) = state.credentials.iter().find(|c| c.id == *pid) {
                             current_id = c.parent_id.clone();
                         } else if let Some(h2) = state.hashes.iter().find(|h2| h2.id == *pid) {

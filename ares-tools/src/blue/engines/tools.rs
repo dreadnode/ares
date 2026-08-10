@@ -21,13 +21,11 @@ pub async fn load_investigation_evidence(
     let client = redis::Client::open(url.as_str())?;
     let mut conn = client.get_multiplexed_async_connection().await?;
 
-    // Load techniques
     let tech_key = format!("ares:blue:inv:{investigation_id}:techniques");
     let techniques: HashSet<String> = redis::AsyncCommands::smembers(&mut conn, &tech_key)
         .await
         .unwrap_or_default();
 
-    // Load evidence
     let evidence_key = format!("ares:blue:inv:{investigation_id}:evidence");
     let evidence_map: HashMap<String, String> =
         redis::AsyncCommands::hgetall(&mut conn, &evidence_key)

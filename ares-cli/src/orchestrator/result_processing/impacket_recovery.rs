@@ -24,6 +24,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
+use crate::orchestrator::automation::is_cross_forest;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::DEDUP_SECRETSDUMP;
 
@@ -179,6 +180,31 @@ fn nt_half(hash: &str) -> String {
     hash.to_string()
 }
 
+/// Resolve the realm of the DC at `target_ip` from operation state. Matches the
+/// IP against the DC map first (`domain → dc_ip`), then falls back to a host
+/// whose FQDN hostname yields a dotted suffix. Returns `None` when the target's
+/// realm can't be determined — the caller then proceeds with normal recovery
+/// rather than skipping on a guess.
+async fn resolve_target_realm(dispatcher: &Arc<Dispatcher>, target_ip: &str) -> Option<String> {
+    let state = dispatcher.state.read().await;
+    for (domain, ip) in state.all_domains_with_dcs() {
+        if ip == target_ip && !domain.is_empty() {
+            return Some(domain);
+        }
+    }
+    for h in &state.hosts {
+        if h.ip == target_ip && !h.hostname.is_empty() {
+            if let Some((_, suffix)) = h.hostname.split_once('.') {
+                let s = suffix.trim().to_lowercase();
+                if s.contains('.') {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Top-level entry point. Called by `process_completed_task` immediately after
 /// a failed credential_access task is logged. Classifies, gates on
 /// known-good-credential, then re-dispatches with corrected arguments.
@@ -320,6 +346,34 @@ async fn recover_realm_mismatch(
             "Impacket recovery skipped: missing one of target_ip/username/cred_domain/hash_value"
         );
         return false;
+    }
+
+    // Cross-forest guard: KDC_ERR_WRONG_REALM against a DC in a *different
+    // forest* is not a `DOMAIN/user@host` syntax slip — it means native
+    // home-realm creds are being presented to a KDC in a disjoint namespace,
+    // which no realm string can fix. Re-dispatching secretsdump with the
+    // credential's native realm just re-hits the same error. The working path
+    // is the inter-realm forge (`auto_trust_follow`); mark this attempt
+    // processed and defer to that machinery instead of burning a retry.
+    if let Some(target_realm) = resolve_target_realm(dispatcher, target_ip).await {
+        if is_cross_forest(cred_domain, &target_realm) {
+            info!(
+                task_id = %task_id,
+                target_ip = %target_ip,
+                cred_domain = %cred_domain,
+                target_realm = %target_realm,
+                "Impacket recovery skipped: cross-forest target — native-cred re-dispatch is doomed, deferring to inter-realm forge"
+            );
+            {
+                let mut state = dispatcher.state.write().await;
+                state.mark_processed(DEDUP_SECRETSDUMP, recovery_key.to_string());
+            }
+            let _ = dispatcher
+                .state
+                .persist_dedup(&dispatcher.queue, DEDUP_SECRETSDUMP, recovery_key)
+                .await;
+            return false;
+        }
     }
 
     info!(

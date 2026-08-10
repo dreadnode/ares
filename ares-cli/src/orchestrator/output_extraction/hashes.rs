@@ -5,8 +5,11 @@ use ares_core::models::{Credential, Hash};
 
 use super::{is_valid_credential, make_credential};
 
+// `\*?`: the `*` after the etype is present only in impacket's RC4 layout
+// (`$krb5tgs$23$*user$…`); AES tickets (etype 17/18) omit it
+// (`$krb5tgs$17$user$…`). Requiring it drops every AES kerberoast hash.
 static RE_TGS_HASH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+)").unwrap()
+    Regex::new(r"(\$krb5tgs\$\d+\$\*?([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+)").unwrap()
 });
 
 static RE_ASREP_HASH: LazyLock<Regex> =
@@ -29,6 +32,32 @@ static RE_NTLM_PARTIAL: LazyLock<Regex> =
 static RE_NTLM_CONTINUATION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-fA-F0-9]+:::$").unwrap());
 
+// Shadow Credentials / certipy auth — `Got hash for 'user@REALM': lm:nt`
+// Emitted by `certipy shadow auto`, `certipy auth`, and the pywhisker→gettgtpkinit
+// chain. Format is stable across recent certipy versions; principal may be
+// quoted or unquoted. Hash half is `lm:nt` or just `nt`.
+static RE_CERTIPY_GOT_HASH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"Got hash for ['"]?([^@'"\s:]+)@([^'"\s:]+)['"]?:\s*([a-fA-F0-9]{32}):([a-fA-F0-9]{32})"#,
+    )
+    .unwrap()
+});
+
+// Alternate shadow-creds NTLM extraction line shapes the orchestrator and
+// LLM-driven summaries surface. None of these are matched by the secretsdump
+// NTDS regexes above, so they need their own pass or the credential never
+// lands in Redis.
+//   `Retrieved NTLM for fabrikam.local\bob: 739120ebc...`
+//   `Retrieved NTLM hash for fabrikam.local\user: aad3...:nt...`
+//   `Retrieved NT hash for fabrikam.local\user: nt...`
+//   `NT hash: nt...` lines preceded by a `Got TGT for user@domain` context line.
+static RE_RETRIEVED_NTLM_FOR: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"Retrieved\s+(?:NTLM(?:\s+hash)?|NT\s+hash)\s+for\s+([^\\:\s]+)\\([^\s:]+):\s*([a-fA-F0-9]{32}(?::[a-fA-F0-9]{32})?)",
+    )
+    .unwrap()
+});
+
 // AES256 trust/account key from secretsdump:
 //   DOMAIN\\user:aes256-cts-hmac-sha1-96:<hex>
 //   contoso.local/user:aes256-cts-hmac-sha1-96:<hex>
@@ -49,6 +78,14 @@ static RE_MACHINE_ACCT_DOMAIN: LazyLock<Regex> = LazyLock::new(|| {
         r"(?m)^([A-Za-z0-9_-]+)\\[A-Za-z0-9_.-]+\$:(?:aes256-cts-hmac-sha1-96|aes128-cts-hmac-sha1-96|plain_password_hex|des-cbc-md5|aad3b435b51404eeaad3b435b51404ee:[a-fA-F0-9]{32}:::)",
     )
     .unwrap()
+});
+
+// NTLM from a RID-less LSA `$MACHINE.ACC` row: `DOMAIN\HOST$:LM:NT:::`.
+// `RE_NTLM_DOMAIN`/`RE_NTLM_PLAIN` both require a numeric RID (`:\d+:`), so the
+// dumped host's own machine account — the key that unlocks gMSA reads / RBCD on
+// member servers — is otherwise never emitted by this fallback.
+static RE_NTLM_MACHINE_ACCT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([^\\:\s]+)\\([A-Za-z0-9_.-]+\$):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::").unwrap()
 });
 
 pub fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
@@ -137,7 +174,71 @@ pub fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
     };
 
     for line in &unwrapped {
-        // Priority: TGS → AS-REP → NTLM (first match wins)
+        // Priority: shadow-creds → TGS → AS-REP → NTLM (first match wins)
+
+        // Shadow credentials / certipy auth: `Got hash for 'user@REALM': lm:nt`
+        if let Some(caps) = RE_CERTIPY_GOT_HASH.captures(line) {
+            let username = caps.get(1).unwrap().as_str();
+            let domain = caps.get(2).unwrap().as_str();
+            let lm = caps.get(3).unwrap().as_str();
+            let nt = caps.get(4).unwrap().as_str();
+            let hash_value = format!("{lm}:{nt}");
+            let key = format!("ntlm:{}@{}", username.to_lowercase(), domain.to_lowercase());
+            if seen.insert(key) {
+                hashes.push(Hash {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    username: username.to_string(),
+                    hash_value,
+                    hash_type: "ntlm".to_string(),
+                    domain: domain.to_string(),
+                    cracked_password: None,
+                    source: "output_extraction:shadow_credentials".to_string(),
+                    discovered_at: Some(chrono::Utc::now()),
+                    parent_id: None,
+                    attack_step: 0,
+                    aes_key: aes_by_user.get(&username.to_lowercase()).cloned(),
+                    is_previous: false,
+                    source_host: None,
+                    is_trust_key: false,
+                    trust_pair_label: None,
+                });
+            }
+            continue;
+        }
+
+        // LLM/orchestrator summary: `Retrieved NTLM for DOMAIN\user: <hash>`
+        if let Some(caps) = RE_RETRIEVED_NTLM_FOR.captures(line) {
+            let domain = caps.get(1).unwrap().as_str();
+            let username = caps.get(2).unwrap().as_str();
+            let raw = caps.get(3).unwrap().as_str();
+            // Normalise to lm:nt — fill empty LM half when only NT was emitted.
+            let hash_value = if raw.contains(':') {
+                raw.to_string()
+            } else {
+                format!("aad3b435b51404eeaad3b435b51404ee:{raw}")
+            };
+            let key = format!("ntlm:{}@{}", username.to_lowercase(), domain.to_lowercase());
+            if seen.insert(key) {
+                hashes.push(Hash {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    username: username.to_string(),
+                    hash_value,
+                    hash_type: "ntlm".to_string(),
+                    domain: domain.to_string(),
+                    cracked_password: None,
+                    source: "output_extraction:shadow_credentials".to_string(),
+                    discovered_at: Some(chrono::Utc::now()),
+                    parent_id: None,
+                    attack_step: 0,
+                    aes_key: aes_by_user.get(&username.to_lowercase()).cloned(),
+                    is_previous: false,
+                    source_host: None,
+                    is_trust_key: false,
+                    trust_pair_label: None,
+                });
+            }
+            continue;
+        }
 
         // TGS (Kerberoast)
         if let Some(caps) = RE_TGS_HASH.captures(line) {
@@ -195,6 +296,41 @@ pub fn extract_hashes(output: &str, default_domain: &str) -> Vec<Hash> {
                     is_trust_key: false,
                     trust_pair_label: None,
                 });
+            }
+            continue;
+        }
+
+        // NTLM machine account from a RID-less `$MACHINE.ACC` row
+        // (`DOMAIN\HOST$:LM:NT:::`). Attribute to the row's own prefix exactly
+        // as the domain-prefixed NTLM case does; it's the host's own account,
+        // never trust material.
+        if let Some(caps) = RE_NTLM_MACHINE_ACCT.captures(line) {
+            let domain = caps.get(1).unwrap().as_str();
+            let username = caps.get(2).unwrap().as_str();
+            let lm = caps.get(3).unwrap().as_str();
+            let nt = caps.get(4).unwrap().as_str();
+            if nt != "31d6cfe0d16ae931b73c59d7e0c089c0" {
+                let hash_value = format!("{lm}:{nt}");
+                let key = format!("ntlm:{}@{}", username.to_lowercase(), domain.to_lowercase());
+                if seen.insert(key) {
+                    hashes.push(Hash {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        username: username.to_string(),
+                        hash_value,
+                        hash_type: "ntlm".to_string(),
+                        domain: domain.to_string(),
+                        cracked_password: None,
+                        source: "output_extraction".to_string(),
+                        discovered_at: Some(chrono::Utc::now()),
+                        parent_id: None,
+                        attack_step: 0,
+                        aes_key: aes_by_user.get(&username.to_lowercase()).cloned(),
+                        is_previous: false,
+                        source_host: None,
+                        is_trust_key: false,
+                        trust_pair_label: None,
+                    });
+                }
             }
             continue;
         }
@@ -318,9 +454,16 @@ fn is_well_known_local_sam(username: &str, rid: &str, has_domain_dump_evidence: 
     false
 }
 
-/// Hashcat cracked TGS: $krb5tgs$23$*user$DOMAIN$spn*$hash:plaintext
+/// Hashcat cracked TGS line, in the format hashcat itself *emits* (outfile /
+/// `--show`) — which differs by mode:
+///   RC4 (13100): `$krb5tgs$23$*user$realm$spn*$checksum$edata:plaintext`
+///   AES (17/18): `$krb5tgs$17$user$realm$checksum$edata:plaintext`  (no spn, no stars)
+/// hashcat normalizes AES tickets and strips the SPN in its output, so the
+/// whole `spn*$` segment must be optional, not just its leading star. Verified
+/// against hashcat's own example-hash cracked output for -m 19600 and -m 13100.
 static RE_CRACKED_TGS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^*]+\*\$[a-fA-F0-9$]+:(.+)$").unwrap()
+    Regex::new(r"\$krb5tgs\$\d+\$\*?([^$*]+)\$([^$*]+)\$(?:[^*:]+\*\$)?[a-fA-F0-9$]+:(.+)$")
+        .unwrap()
 });
 
 /// Cracked AS-REP: $krb5asrep$23$user@DOMAIN:hash:plaintext (hashcat)
@@ -339,9 +482,10 @@ static RE_JOHN_SHOW: LazyLock<Regex> = LazyLock::new(|| {
 /// John --show unknown user: ?:plaintext (john can't determine username from TGS hashes)
 static RE_JOHN_UNKNOWN_USER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\?:(.+)$").unwrap());
 
-/// Extract username/domain from a TGS hash in the output text.
+/// Extract username/domain from a TGS hash in the output text. `\*?` tolerates
+/// both RC4 (`$krb5tgs$23$*user…`) and AES (`$krb5tgs$17$user…`) layouts.
 static RE_TGS_HASH_USER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)").unwrap());
+    LazyLock::new(|| Regex::new(r"\$krb5tgs\$\d+\$\*?([^$*]+)\$([^$*]+)").unwrap());
 
 pub fn extract_cracked_passwords(output: &str, default_domain: &str) -> Vec<Credential> {
     let mut credentials = Vec::new();
@@ -507,12 +651,57 @@ WDAGUtilityAccount:504:aad3b435b51404eeaad3b435b51404ee:1234567890abcdef12345678
     }
 
     #[test]
+    fn extract_hashes_ridless_machine_account() {
+        // RID-less LSA `$MACHINE.ACC` row: `DOMAIN\HOST$:LM:NT:::`. The domain
+        // and plain NTLM regexes both require a numeric RID, so this dedicated
+        // pass is what captures the dumped host's own machine account (the key
+        // that unlocks gMSA reads / RBCD on member servers).
+        let output =
+            "CONTOSO\\WEB01$:aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890:::";
+        let hashes = extract_hashes(output, "CONTOSO.LOCAL");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].username, "WEB01$");
+        assert_eq!(hashes[0].domain, "CONTOSO");
+        assert_eq!(
+            hashes[0].hash_value,
+            "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890"
+        );
+        assert!(!hashes[0].is_trust_key);
+    }
+
+    #[test]
     fn extract_hashes_tgs_kerberoast() {
         let output = "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$MSSQLSvc/db01*$aabb$ccdd";
         let hashes = extract_hashes(output, "CONTOSO.LOCAL");
         assert_eq!(hashes.len(), 1);
         assert_eq!(hashes[0].hash_type, "kerberoast");
         assert_eq!(hashes[0].username, "svc_sql");
+    }
+
+    #[test]
+    fn extract_hashes_tgs_kerberoast_aes() {
+        // AES128 (etype 17) kerberoast from impacket. The real layout has NO `*`
+        // before the user and `$*spn*$` around the SPN (impacket format string
+        // `$krb5tgs$%d$%s$%s$*%s*$%s$%s`). Must be extracted so AES-capable SPN
+        // accounts reach the cracker.
+        let output = "$krb5tgs$17$svc_sql$CONTOSO.LOCAL$*MSSQLSvc/db01*$aabb$ccdd";
+        let hashes = extract_hashes(output, "CONTOSO.LOCAL");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].hash_type, "kerberoast");
+        assert_eq!(hashes[0].username, "svc_sql");
+        assert_eq!(hashes[0].domain, "CONTOSO.LOCAL");
+    }
+
+    #[test]
+    fn extract_cracked_passwords_hashcat_tgs_aes() {
+        // Cracked AES kerberoast line as hashcat EMITS it for -m 19600/19700:
+        // the SPN is stripped/normalized away, leaving `$krb5tgs$17$user$realm$
+        // checksum$edata:plaintext` — no `*` anywhere. (Captured live on the T4.)
+        let output = "$krb5tgs$17$svc_sql$CONTOSO.LOCAL$aabb0000000000000000aabb$ccdd1234567890abcdef:Summer2024!";
+        let creds = extract_cracked_passwords(output, "CONTOSO.LOCAL");
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].username, "svc_sql");
+        assert_eq!(creds[0].password, "Summer2024!");
     }
 
     #[test]
@@ -629,6 +818,25 @@ FABRIKAM\\CONTOSO$:aes256-cts-hmac-sha1-96:4444444444444444444444444444444444444
         assert_eq!(creds[0].username, "svc_sql");
         assert_eq!(creds[0].password, "Summer2024!");
         assert_eq!(creds[0].source, "cracked:hashcat");
+    }
+
+    #[test]
+    fn extract_cracked_passwords_batch_distinct_accounts() {
+        // Batch crack: one hashcat run over several same-mode tickets emits a
+        // cracked line per account. Each must attribute to its own principal
+        // (the SPN account is embedded in the `$krb5tgs$` line), so a batched
+        // crack recovers every crackable ticket, not just the first.
+        let output = "\
+$krb5tgs$18$svc_web$CONTOSO.LOCAL$aabb0000000000000000aabb$ccdd:WebPass1\n\
+$krb5tgs$18$svc_sql$CONTOSO.LOCAL$eeff0000000000000000eeff$1122:SqlPass2";
+        let creds = extract_cracked_passwords(output, "CONTOSO.LOCAL");
+        assert_eq!(creds.len(), 2, "both cracked accounts must be extracted");
+        let by_user: std::collections::HashMap<_, _> = creds
+            .iter()
+            .map(|c| (c.username.as_str(), c.password.as_str()))
+            .collect();
+        assert_eq!(by_user.get("svc_web"), Some(&"WebPass1"));
+        assert_eq!(by_user.get("svc_sql"), Some(&"SqlPass2"));
     }
 
     #[test]
@@ -774,6 +982,39 @@ krbtgt:502:aad3b435b51404eeaad3b435b51404ee:8c6d94541dbc90f085e86828428d2cbf:::"
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0].username, "jdoe");
         assert_eq!(creds[0].password, "P@ssw0rd!");
+    }
+
+    #[test]
+    fn shadow_creds_ntlm_hash_extracted_and_published() {
+        // certipy shadow auto / certipy auth typical success line:
+        //   [*] Got hash for 'bob@fabrikam.local': aad3b435b51404eeaad3b435b51404ee:739120ebc4dd940310bc4bb5c9d37021
+        let output = "[*] Targeting user 'bob'\n[*] Generating certificate\n[*] Saved credential cache to 'bob.ccache'\n[*] Got hash for 'bob@fabrikam.local': aad3b435b51404eeaad3b435b51404ee:739120ebc4dd940310bc4bb5c9d37021";
+        let hashes = extract_hashes(output, "fabrikam.local");
+        assert_eq!(hashes.len(), 1, "expected exactly one shadow-cred hash");
+        assert_eq!(hashes[0].username, "bob");
+        assert_eq!(hashes[0].domain, "fabrikam.local");
+        assert_eq!(hashes[0].hash_type, "ntlm");
+        assert_eq!(
+            hashes[0].hash_value,
+            "aad3b435b51404eeaad3b435b51404ee:739120ebc4dd940310bc4bb5c9d37021"
+        );
+        assert_eq!(hashes[0].source, "output_extraction:shadow_credentials");
+    }
+
+    #[test]
+    fn shadow_creds_retrieved_ntlm_for_short_form_extracted() {
+        // Orchestrator/LLM summary lines like the op2 evidence:
+        //   "Retrieved NTLM for fabrikam.local\bob: 739120ebc4dd940310bc4bb5c9d37021"
+        // Only NT half present — LM should be filled with the empty-LM sentinel.
+        let output = "Shadow credentials succeeded against fabrikam.local DC 192.168.58.20. Retrieved NTLM for fabrikam.local\\bob: 739120ebc4dd940310bc4bb5c9d37021. Certipy restored original KeyCredentialLink.";
+        let hashes = extract_hashes(output, "fabrikam.local");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].username, "bob");
+        assert_eq!(hashes[0].domain, "fabrikam.local");
+        assert_eq!(
+            hashes[0].hash_value,
+            "aad3b435b51404eeaad3b435b51404ee:739120ebc4dd940310bc4bb5c9d37021"
+        );
     }
 
     #[test]

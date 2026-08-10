@@ -7,15 +7,15 @@ use super::evaluate::{
     evaluate, get_found_iocs, get_found_techniques, get_missed_iocs, get_missed_techniques,
 };
 use super::scoring::{
-    build_found_values, ioc_matches, score_evidence_quality, score_investigation_overall,
-    score_ioc_detection, score_pyramid_elevation, score_stage_progress, score_technique_coverage,
-    timeline_event_matches,
+    build_found_values, ioc_matches, score_investigation_overall, score_ioc_detection,
+    score_technique_coverage, timeline_event_matches,
 };
 use super::types::{EvidenceItem, InvestigationSnapshot};
 
 fn make_gt() -> EvaluationGroundTruth {
     EvaluationGroundTruth {
         operation_id: "op-1".to_string(),
+        host_aliases: vec![],
         target_ip: "192.168.58.10".to_string(),
         expected_iocs: vec![
             ExpectedIOC {
@@ -77,6 +77,7 @@ fn make_snapshot() -> InvestigationSnapshot {
                 pyramid_level: 2,
                 confidence: 0.9,
                 validated: true,
+                mitre_techniques: vec![],
             },
             EvidenceItem {
                 evidence_type: "user".to_string(),
@@ -84,6 +85,7 @@ fn make_snapshot() -> InvestigationSnapshot {
                 pyramid_level: 4,
                 confidence: 0.8,
                 validated: true,
+                mitre_techniques: vec![],
             },
             EvidenceItem {
                 evidence_type: "tool".to_string(),
@@ -91,6 +93,7 @@ fn make_snapshot() -> InvestigationSnapshot {
                 pyramid_level: 6,
                 confidence: 0.7,
                 validated: false,
+                mitre_techniques: vec![],
             },
         ],
         queried_hosts: HashSet::new(),
@@ -99,18 +102,6 @@ fn make_snapshot() -> InvestigationSnapshot {
         timeline: vec![],
         highest_pyramid_level: 6,
     }
-}
-
-#[test]
-fn stage_progress() {
-    let mut snap = InvestigationSnapshot::default();
-    assert_eq!(score_stage_progress(&snap), 0.0);
-
-    snap.stage = Some("triage".to_string());
-    assert_eq!(score_stage_progress(&snap), 0.25);
-
-    snap.stage = Some("synthesis".to_string());
-    assert_eq!(score_stage_progress(&snap), 1.0);
 }
 
 #[test]
@@ -144,6 +135,7 @@ fn ioc_user_domain_prefix() {
             pyramid_level: 4,
             confidence: 0.9,
             validated: true,
+            mitre_techniques: vec![],
         }],
         ..Default::default()
     };
@@ -184,27 +176,6 @@ fn technique_coverage_partial() {
         (score - 0.6).abs() < 0.01,
         "Partial coverage, expected ~0.6 got {score}"
     );
-}
-
-#[test]
-fn pyramid_elevation() {
-    let snap = make_snapshot();
-    let score = score_pyramid_elevation(&snap);
-    // highest_level=6/6 * 0.7 = 0.7
-    // 1 TTP out of 3 evidence = 0.333 * 0.3 = 0.1
-    // Total ≈ 0.8
-    assert!(score > 0.7, "High pyramid, expected >0.7 got {score}");
-}
-
-#[test]
-fn evidence_quality() {
-    let snap = make_snapshot();
-    let score = score_evidence_quality(&snap);
-    // avg_confidence = (0.9+0.8+0.7)/3 = 0.8 * 0.4 = 0.32
-    // validated = 2/3 = 0.667 * 0.3 = 0.2
-    // ttp = 1/3 = 0.333 * 0.3 = 0.1
-    // Total ≈ 0.62
-    assert!(score > 0.5, "Good quality, expected >0.5 got {score}");
 }
 
 #[test]

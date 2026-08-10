@@ -13,6 +13,15 @@ use super::mitre::get_technique_display;
 use super::templates::{REDTEAM_COMPREHENSIVE_TEMPLATE, REDTEAM_SUMMARY_TEMPLATE};
 use super::util::{format_duration_chrono, timeline_event_from_json};
 
+/// Count of vulnerabilities whose own exploitation was proven, excluding those
+/// credited solely because another path reached the same goal.
+pub(crate) fn proven_exploited_count(state: &SharedRedTeamState) -> usize {
+    state
+        .exploited_vulnerabilities
+        .difference(&state.superseded_vulnerabilities)
+        .count()
+}
+
 /// Generates markdown reports from red team operation state using Tera templates.
 pub struct RedTeamReportGenerator {
     tera: Tera,
@@ -54,7 +63,6 @@ impl RedTeamReportGenerator {
 
         let executive_summary = generate_executive_summary(state, &unique_users, &unique_creds);
 
-        // Collect all MITRE techniques
         let mut all_techniques: HashSet<String> = techniques.iter().cloned().collect();
         for event in timeline_events {
             if let Some(arr) = event.get("mitre_techniques").and_then(|v| v.as_array()) {
@@ -71,15 +79,20 @@ impl RedTeamReportGenerator {
             .collect();
         techniques_enriched.sort();
 
-        // Build vulnerability context
         let mut discovered_vulns: Vec<VulnCtx> = state
             .discovered_vulnerabilities
             .iter()
-            .map(|(id, v)| build_vuln_ctx(id, v, &state.exploited_vulnerabilities))
+            .map(|(id, v)| {
+                build_vuln_ctx(
+                    id,
+                    v,
+                    &state.exploited_vulnerabilities,
+                    &state.superseded_vulnerabilities,
+                )
+            })
             .collect();
         discovered_vulns.sort_by_key(|v| v.priority);
 
-        // Build timeline context
         let timeline: Vec<TimelineEventCtx> = timeline_events
             .iter()
             .map(timeline_event_from_json)
@@ -161,7 +174,7 @@ impl RedTeamReportGenerator {
             "vulnerability_count",
             &state.discovered_vulnerabilities.len(),
         );
-        ctx.insert("exploited_count", &state.exploited_vulnerabilities.len());
+        ctx.insert("exploited_count", &proven_exploited_count(state));
         ctx.insert("share_count", &state.all_shares.len());
         ctx.insert("hosts", &hosts);
         ctx.insert("users", &users);
@@ -194,7 +207,6 @@ impl RedTeamReportGenerator {
             .filter(|h| h.is_dc || h.detect_dc())
             .count();
 
-        // Collect all MITRE techniques
         let mut all_techniques: HashSet<String> = techniques.iter().cloned().collect();
         for event in timeline_events {
             if let Some(arr) = event.get("mitre_techniques").and_then(|v| v.as_array()) {
@@ -211,21 +223,25 @@ impl RedTeamReportGenerator {
             .collect();
         techniques_enriched.sort();
 
-        // Vulnerability context
         let mut discovered_vulns: Vec<VulnCtx> = state
             .discovered_vulnerabilities
             .iter()
-            .map(|(id, v)| build_vuln_ctx(id, v, &state.exploited_vulnerabilities))
+            .map(|(id, v)| {
+                build_vuln_ctx(
+                    id,
+                    v,
+                    &state.exploited_vulnerabilities,
+                    &state.superseded_vulnerabilities,
+                )
+            })
             .collect();
         discovered_vulns.sort_by_key(|v| v.priority);
 
-        // Timeline
         let timeline: Vec<TimelineEventCtx> = timeline_events
             .iter()
             .map(timeline_event_from_json)
             .collect();
 
-        // Domains sorted, deduped, lowercased
         let mut domains: Vec<String> = state
             .all_domains
             .iter()
@@ -351,7 +367,6 @@ impl RedTeamReportGenerator {
                 "Not Generated"
             },
         );
-        // Build the credential chain to DA from parent_id lineage
         let da_chain = state.build_domain_admin_chain();
         let da_path_from_chain = SharedRedTeamState::format_attack_chain(&da_chain);
         // Use the chain-derived path if the explicit path isn't set
@@ -373,6 +388,28 @@ impl RedTeamReportGenerator {
             })
             .collect();
         ctx.insert("domain_admin_chain", &chain_ctx);
+        let compromised_domains = state.compromised_domains();
+        let domain_chains: Vec<DomainChainCtx> = state
+            .build_domain_admin_chains()
+            .into_iter()
+            .map(|(domain, steps)| DomainChainCtx {
+                domain,
+                steps: steps
+                    .iter()
+                    .map(|step| ChainStepCtx {
+                        step_number: step.step_number,
+                        item_type: step.item_type.clone(),
+                        username: step.username.clone(),
+                        domain: step.domain.clone(),
+                        source: step.source.clone(),
+                        hash_type: step.hash_type.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        ctx.insert("domain_admin_chains", &domain_chains);
+        ctx.insert("domains_compromised", &compromised_domains.len());
+        ctx.insert("compromised_domains", &compromised_domains);
         ctx.insert("domains", &domains);
         ctx.insert("dc_count", &dc_count);
         ctx.insert("hosts", &hosts);
@@ -388,9 +425,10 @@ impl RedTeamReportGenerator {
             "vulnerabilities_found",
             &state.discovered_vulnerabilities.len(),
         );
+        ctx.insert("vulnerabilities_exploited", &proven_exploited_count(state));
         ctx.insert(
-            "vulnerabilities_exploited",
-            &state.exploited_vulnerabilities.len(),
+            "vulnerabilities_superseded",
+            &state.superseded_vulnerabilities.len(),
         );
         ctx.insert(
             "generated_at",
@@ -407,10 +445,6 @@ impl Default for RedTeamReportGenerator {
     }
 }
 
-// ============================================================================
-// Executive summary generation
-// ============================================================================
-
 pub(crate) fn generate_executive_summary(
     state: &SharedRedTeamState,
     unique_users: &[User],
@@ -420,11 +454,10 @@ pub(crate) fn generate_executive_summary(
     let credential_count = unique_creds.len();
     let admin_count = unique_creds.iter().filter(|c| c.is_admin).count();
     let vulnerability_count = state.discovered_vulnerabilities.len();
-    let exploited_count = state.exploited_vulnerabilities.len();
+    let exploited_count = proven_exploited_count(state);
 
     let mut summary_parts = Vec::new();
 
-    // Operation overview
     let target_ips = if !state.target_ips.is_empty() {
         state.target_ips.clone()
     } else if let Some(ref t) = state.target {
@@ -454,7 +487,6 @@ pub(crate) fn generate_executive_summary(
         state.operation_id
     ));
 
-    // Key achievements
     let mut achievements = Vec::new();
     if state.has_domain_admin {
         achievements.push("\u{2713} **Domain Administrator access achieved**".to_string());
@@ -480,7 +512,6 @@ pub(crate) fn generate_executive_summary(
         ));
     }
 
-    // Discovery statistics
     summary_parts.push(format!(
         "\n\n**Discovery Statistics:**\n\
          - Hosts Discovered: {host_count}\n\
@@ -494,7 +525,6 @@ pub(crate) fn generate_executive_summary(
         state.all_hashes.len(),
     ));
 
-    // Attack path
     if state.has_domain_admin || state.has_golden_ticket {
         if let Some(ref path) = state.domain_admin_path {
             summary_parts.push(format!("\n\n**Attack Path:**\n{path}"));
@@ -506,7 +536,6 @@ pub(crate) fn generate_executive_summary(
         }
     }
 
-    // Security posture
     let (posture, assessment) = if state.has_domain_admin || state.has_golden_ticket {
         (
             "**CRITICAL**",
@@ -556,6 +585,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: String::new(),
+            member_of: Vec::new(),
         }
     }
 
@@ -683,6 +713,51 @@ mod tests {
     #[test]
     fn report_generator_default_succeeds() {
         let _gen = RedTeamReportGenerator::default();
+    }
+
+    #[test]
+    fn comprehensive_report_names_every_compromised_domain() {
+        // A 3-of-3 forest compromise used to render as a single domain: the
+        // executive summary walked only the first krbtgt hash found.
+        let mut state = empty_state();
+        state.has_domain_admin = true;
+        state.all_hashes = ["contoso.local", "child.contoso.local", "fabrikam.local"]
+            .iter()
+            .enumerate()
+            .map(|(i, domain)| crate::models::Hash {
+                id: format!("h{i}"),
+                username: "krbtgt".into(),
+                hash_value: format!("deadbeef{i}"),
+                hash_type: "ntlm".into(),
+                domain: (*domain).into(),
+                source: "secretsdump".into(),
+                cracked_password: None,
+                discovered_at: None,
+                parent_id: None,
+                attack_step: 0,
+                aes_key: None,
+                is_previous: false,
+                source_host: None,
+                is_trust_key: false,
+                trust_pair_label: None,
+            })
+            .collect();
+
+        let gen = RedTeamReportGenerator::new().expect("template init");
+        let report = gen
+            .generate_comprehensive(&state, &[], &[])
+            .expect("render");
+
+        assert!(
+            report.contains("| Domains Compromised (krbtgt) | 3 |"),
+            "metrics table must report 3 compromised domains:\n{report}"
+        );
+        for domain in ["contoso.local", "child.contoso.local", "fabrikam.local"] {
+            assert!(
+                report.contains(&format!("Credential Chain to Domain Admin — {domain}")),
+                "missing per-domain credential chain for {domain}"
+            );
+        }
     }
 
     #[test]
