@@ -8,6 +8,16 @@ on:
       - 'warpgate-templates/**'
       - 'ansible/**'
       - '.github/workflows/build-and-push-templates.yaml'
+      # Template images bake the Rust `ares` binary from these crates;
+      # rebuild when their source changes too.
+      - 'ares-cli/**'
+      - 'ares-core/**'
+      - 'ares-llm/**'
+      - 'ares-tools/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  schedule:
+    - cron: '0 9 * * 1'
   workflow_dispatch:
     inputs:
       template_filter:
@@ -30,7 +40,7 @@ env:
   PYTHON_VERSION: 3.13.7
   TASK_VERSION: 3.45.5
   TASK_X_REMOTE_TASKFILES: 1
-  WARPGATE_VERSION: "v4.9.1"
+  WARPGATE_VERSION: "v4.10.0"
 
 jobs:
   discover-templates:
@@ -54,7 +64,7 @@ jobs:
       has_gpu_dependent_templates: ${{ steps.discover.outputs.has_gpu_dependent_templates }}
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup XDG directories
         run: |
@@ -445,7 +455,7 @@ jobs:
       max-parallel: 20
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ github.token }}
 
@@ -471,7 +481,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Setup Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -638,7 +648,7 @@ jobs:
           cat ~/.config/warpgate/config.yaml
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: ./.github/actions/setup-buildx
 
       - name: Register templates with Warpgate
         run: |
@@ -699,7 +709,7 @@ jobs:
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
-            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max,ignore-error=true
 
           # Check if the specific digest file exists
           DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
@@ -733,7 +743,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup XDG directories
         run: |
@@ -879,9 +889,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
-        with:
-          driver: docker-container
+        uses: ./.github/actions/setup-buildx
 
       - name: Ensure required digests exist
         run: |
@@ -936,7 +944,7 @@ jobs:
       max-parallel: 20
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ github.token }}
 
@@ -962,7 +970,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Setup Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -1129,7 +1137,7 @@ jobs:
           cat ~/.config/warpgate/config.yaml
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: ./.github/actions/setup-buildx
 
       - name: Register templates with Warpgate
         run: |
@@ -1190,7 +1198,7 @@ jobs:
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
-            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max,ignore-error=true
 
           # Check if the specific digest file exists
           DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
@@ -1228,7 +1236,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup XDG directories
         run: |
@@ -1374,9 +1382,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
-        with:
-          driver: docker-container
+        uses: ./.github/actions/setup-buildx
 
       - name: Ensure required digests exist
         run: |
@@ -1426,7 +1432,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ github.token }}
 
@@ -1445,7 +1451,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Setup Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -1481,8 +1487,36 @@ jobs:
 
       - name: Free up disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          df -h
+          echo "Disk space before cleanup:"
+          df -h /
+          # The GPU image (CUDA runtime + llvm-18 + hashcat) is ~12GB uncompressed
+          # and the build triple-counts disk: BuildKit cache + exported tarball +
+          # reload into the Docker daemon. The default ~30GB free is not enough and
+          # the load step fails with "no space left on device". Strip the large
+          # preinstalled toolchains we never use in a container build to reclaim ~25GB.
+          # Keep /opt/hostedtoolcache/Python — Setup Python populates it.
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /usr/share/miniconda \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            /usr/local/share/powershell \
+            /usr/local/lib/android \
+            /usr/local/lib/node_modules \
+            /opt/microsoft \
+            /opt/google \
+            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/node \
+            /opt/hostedtoolcache/Ruby \
+            /opt/hostedtoolcache/PyPy || true
+          # Drop preinstalled Docker images to reclaim /var/lib/docker space.
+          docker image prune -af || true
+          sudo apt-get clean || true
+          echo "Disk space after cleanup:"
+          df -h /
 
       - name: Add swap space
         run: |
@@ -1562,7 +1596,7 @@ jobs:
           EOF
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: ./.github/actions/setup-buildx
 
       - name: Register templates with Warpgate
         run: |
@@ -1595,7 +1629,7 @@ jobs:
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
-            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max,ignore-error=true
           DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
           if [ -f "$DIGEST_FILE" ]; then
             cat "$DIGEST_FILE"
@@ -1624,7 +1658,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup XDG directories
         run: |
@@ -1713,9 +1747,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
-        with:
-          driver: docker-container
+        uses: ./.github/actions/setup-buildx
 
       - name: Ensure required digests exist
         run: |
@@ -1764,7 +1796,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ github.token }}
 
@@ -1780,7 +1812,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Setup Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -1816,8 +1848,36 @@ jobs:
 
       - name: Free up disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          df -h
+          echo "Disk space before cleanup:"
+          df -h /
+          # The GPU image (CUDA runtime + llvm-18 + hashcat) is ~12GB uncompressed
+          # and the build triple-counts disk: BuildKit cache + exported tarball +
+          # reload into the Docker daemon. The default ~30GB free is not enough and
+          # the load step fails with "no space left on device". Strip the large
+          # preinstalled toolchains we never use in a container build to reclaim ~25GB.
+          # Keep /opt/hostedtoolcache/Python — Setup Python populates it.
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /usr/share/miniconda \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/local/share/boost \
+            /usr/local/share/powershell \
+            /usr/local/lib/android \
+            /usr/local/lib/node_modules \
+            /opt/microsoft \
+            /opt/google \
+            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache/go \
+            /opt/hostedtoolcache/node \
+            /opt/hostedtoolcache/Ruby \
+            /opt/hostedtoolcache/PyPy || true
+          # Drop preinstalled Docker images to reclaim /var/lib/docker space.
+          docker image prune -af || true
+          sudo apt-get clean || true
+          echo "Disk space after cleanup:"
+          df -h /
 
       - name: Add swap space
         run: |
@@ -1897,7 +1957,7 @@ jobs:
           EOF
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: ./.github/actions/setup-buildx
 
       - name: Register templates with Warpgate
         run: |
@@ -1930,7 +1990,7 @@ jobs:
             --digest-dir "$GITHUB_WORKSPACE" \
             --verbose \
             --cache-from type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }} \
-            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max
+            --cache-to type=registry,ref=ghcr.io/${{ matrix.namespace }}/${{ matrix.name }}:buildcache-${{ matrix.architecture.arch }},mode=max,ignore-error=true
           DIGEST_FILE="$GITHUB_WORKSPACE/digest-${{ matrix.name }}-${{ matrix.architecture.arch }}.txt"
           if [ -f "$DIGEST_FILE" ]; then
             cat "$DIGEST_FILE"
@@ -1963,7 +2023,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout git repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup XDG directories
         run: |
@@ -2052,9 +2112,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
-        with:
-          driver: docker-container
+        uses: ./.github/actions/setup-buildx
 
       - name: Ensure required digests exist
         run: |
@@ -2163,4 +2221,39 @@ jobs:
             echo "All builds were skipped (likely a PR)"
           else
             echo "All image builds and manifest merges completed successfully"
+          fi
+
+  report-failure:
+    name: Report Build Failure
+    runs-on: ubuntu-24.04
+    needs: [build-summary]
+    if: failure() && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: "CI: template builds failing on main"
+        run: |
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            echo "Updating existing issue #$existing"
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" \
+              --body "Still failing on \`${GITHUB_SHA:0:7}\` (${GITHUB_EVENT_NAME}): $RUN_URL"
+          else
+            echo "Opening new issue"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+              --body "$(printf '%s\n' \
+                "\`Build and Push Templates\` failed on \`main\`." \
+                "" \
+                "Run: $RUN_URL" \
+                "Commit: \`${GITHUB_SHA:0:7}\`" \
+                "Trigger: \`${GITHUB_EVENT_NAME}\`" \
+                "" \
+                "This issue is updated on each subsequent failure. Close it once the build is green.")"
           fi
