@@ -187,6 +187,14 @@ impl DeferredTask {
     /// successfully dispatched. That is the whole 19,453-collected /
     /// 1-acted-on gap.
     ///
+    /// A `crack` payload carries none of those fields — no technique, no
+    /// target_ip, no credential, no finding — so before `finding_key` learned
+    /// to identify hashes, every crack task in an op hashed to the same
+    /// signature. The second hash to be deferred collapsed onto the first and
+    /// `enqueue` returned `-3` → `Ok(true)`, so the caller was told the work
+    /// was queued while a *different* hash sat in the ZSET. Same shape as the
+    /// ACL gap above, applied to the crack queue.
+    ///
     /// Priority stays out of the hash: a higher-priority duplicate isn't
     /// useful — the existing copy will run and produce the same outcome.
     pub fn signature(&self) -> String {
@@ -234,7 +242,22 @@ impl DeferredTask {
     /// Looks at the payload root first, then at a nested `step` object —
     /// `auto_acl_chain_follow` wraps the whole edge under `step`, so a
     /// root-only lookup would leave every chain step signature-identical.
+    /// What finding this task is about, used as the discriminating component of
+    /// [`Self::signature`].
+    ///
+    /// For a `crack` task the finding *is* the hash, so this reuses the same
+    /// dedup key the in-flight guard reserves on. Deriving both from
+    /// `crack_dedup_key_from_payload` keeps queue-identity and run-identity
+    /// from drifting apart: two tasks that collapse here are exactly the two
+    /// that would have contended for one reservation.
     fn finding_key(&self) -> String {
+        if self.task_type == "crack" {
+            if let Some(key) =
+                crate::orchestrator::automation::crack_dedup_key_from_payload(&self.payload)
+            {
+                return format!("crack|{key}");
+            }
+        }
         let step = self.payload.get("step");
         let field = |name: &str| -> String {
             self.payload
@@ -1819,6 +1842,72 @@ mod tests {
             }),
             source_agent: "orchestrator".into(),
         }
+    }
+
+    fn make_crack_task(username: &str, domain: &str, hash_value: &str) -> DeferredTask {
+        DeferredTask {
+            priority: 5,
+            enqueue_time: 1000.0,
+            task_type: "crack".into(),
+            target_role: "cracker".into(),
+            payload: serde_json::json!({
+                "hash_type": "Kerberoast",
+                "hash_value": hash_value,
+                "username": username,
+                "domain": domain,
+                "known_usernames": ["alice", "bob"],
+                "known_passwords": ["P@ssw0rd!"],
+            }),
+            source_agent: "orchestrator".into(),
+        }
+    }
+
+    #[test]
+    fn signature_differs_across_crack_tasks_for_different_hashes() {
+        let tasks = [
+            make_crack_task("svc_sql", "contoso.local", "$krb5tgs$23$*svc_sql*$aaaa1111"),
+            make_crack_task("svc_web", "contoso.local", "$krb5tgs$23$*svc_web*$bbbb2222"),
+            make_crack_task("alice", "fabrikam.local", "$krb5asrep$23$alice*$cccc3333"),
+        ];
+        let sigs: std::collections::HashSet<String> =
+            tasks.iter().map(DeferredTask::signature).collect();
+        assert_eq!(
+            sigs.len(),
+            tasks.len(),
+            "crack payloads carry no technique/target_ip/credential/finding, so without hash \
+             identity every crack task collapses onto the first and enqueue reports the \
+             dropped ones as successfully queued"
+        );
+    }
+
+    #[test]
+    fn signature_still_collapses_a_genuinely_duplicate_crack_task() {
+        let a = make_crack_task("svc_sql", "contoso.local", "$krb5tgs$23$*svc_sql*$aaaa1111");
+        let b = make_crack_task("SVC_SQL", "CONTOSO.LOCAL", "$krb5tgs$23$*svc_sql*$aaaa1111");
+        assert_eq!(a.signature(), b.signature());
+    }
+
+    #[test]
+    fn crack_signature_tracks_the_inflight_reservation_key() {
+        let task = make_crack_task("svc_sql", "contoso.local", "$krb5tgs$23$*svc_sql*$aaaa1111");
+        let reservation_key =
+            crate::orchestrator::automation::crack_dedup_key_from_payload(&task.payload)
+                .expect("crack payload yields a dedup key");
+        assert_eq!(task.finding_key(), format!("crack|{reservation_key}"));
+    }
+
+    #[test]
+    fn hash_identity_applies_only_to_crack_tasks() {
+        let mut a = make_crack_task("svc_sql", "contoso.local", "aaaa1111");
+        let mut b = make_crack_task("svc_sql", "contoso.local", "bbbb2222");
+        a.task_type = "recon".into();
+        b.task_type = "recon".into();
+        assert_eq!(
+            a.signature(),
+            b.signature(),
+            "only crack tasks route hash identity into the signature; other task types keep \
+             their existing hashed tuple so their signatures do not churn"
+        );
     }
 
     #[test]
