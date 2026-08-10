@@ -423,12 +423,26 @@ security: {}
         assert!(cfg.grafana.is_none());
 
         let with_grafana = format!(
-            "{}\ngrafana:\n  enabled: true\n  base_url: http://grafana\n",
+            "{}\ngrafana:\n  enabled: true\n  dashboard_uid: ares-redteam\n",
             MINIMAL_YAML
         );
         let f2 = write_temp_yaml(&with_grafana);
         let cfg2 = AresConfig::load(f2.path()).unwrap();
-        assert!(cfg2.grafana.is_some());
-        assert!(cfg2.grafana.unwrap().enabled);
+        let grafana = cfg2.grafana.expect("grafana section should parse");
+        assert!(grafana.enabled);
+        assert_eq!(grafana.dashboard_uid, "ares-redteam");
+    }
+
+    #[test]
+    fn grafana_ignores_legacy_credential_keys() {
+        let legacy = format!(
+            "{}\ngrafana:\n  enabled: true\n  base_url: \"${{GRAFANA_URL}}\"\n  api_key: \"${{GRAFANA_SERVICE_ACCOUNT_TOKEN}}\"\n  dashboard_uid: ares-redteam\n",
+            MINIMAL_YAML
+        );
+        let f = write_temp_yaml(&legacy);
+        let cfg = AresConfig::load(f.path()).expect("legacy keys must not break loading");
+        let grafana = cfg.grafana.expect("grafana section should parse");
+        assert!(grafana.enabled);
+        assert_eq!(grafana.dashboard_uid, "ares-redteam");
     }
 }

@@ -328,10 +328,6 @@ pub struct GrafanaConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
-    pub base_url: String,
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default)]
     pub dashboard_uid: String,
 }
 

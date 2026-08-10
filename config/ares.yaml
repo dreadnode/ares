@@ -303,8 +303,6 @@ security:
 # Grafana integration (for alerting)
 grafana:
   enabled: true
-  base_url: "${GRAFANA_URL}"
-  api_key: "${GRAFANA_SERVICE_ACCOUNT_TOKEN}"
   dashboard_uid: "ares-redteam"
 
 # Benchmark snapshot storage (BENCHMARK_* / LOKI_S3_*) is deliberately NOT a

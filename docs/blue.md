@@ -543,11 +543,6 @@ There is no `blue_team:` section in `config/ares.yaml`. What blue reads from
 the config file is the backend wiring it needs to reach observability data:
 
 ```yaml
-grafana:
-  enabled: true
-  base_url: "${GRAFANA_URL}"
-  api_key: "${GRAFANA_SERVICE_ACCOUNT_TOKEN}"
-
 observability:
   loki_url: ""
   prometheus_url: "http://localhost:9090"
