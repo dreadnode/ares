@@ -373,15 +373,34 @@ if [[ "$BLUE" == "1" && -n "${OP_ID}" ]]; then
 	# Blue investigations live in the box's Redis; source /etc/ares/env so the
 	# CLI resolves box-local Redis, then print the per-op aggregate.
 	blue_active() {
-		local out
+		local out n done_at
 		out=$(task ec2:exec EC2_NAME="${EC2_NAME}" \
-			CMD="set -a; . /etc/ares/env 2>/dev/null; set +a; /usr/local/bin/ares blue operation-status ${OP_ID} 2>&1" \
+			CMD="set -a; . /etc/ares/env 2>/dev/null; set +a; /usr/local/bin/ares blue operation-status ${OP_ID} 2>&1; echo '---COMPLETED_AT---'; redis-cli HGET 'ares:op:${OP_ID}:meta' completed_at" \
 			2>/dev/null) || return 1
-		awk '/^ *(Running|Submitted):/ {gsub(/[^0-9]/, "", $2); n += $2} END {print n + 0}' <<<"$out"
+		n=$(awk '/^ *(Running|Submitted):/ {gsub(/[^0-9]/, "", $2); n += $2} END {print n + 0}' <<<"$out")
+		# The terminal investigation — the only one built from complete loot and
+		# the full attack window — is submitted by orchestrator completion AFTER
+		# the red drain and teardown, minutes after `ops status` starts reporting
+		# "completed" off red_completed_at. So Running+Submitted legitimately
+		# reads 0 before it exists, and consolidating on that alone drops it from
+		# the scorecard (op-20260810-030156: report 03:21:39, terminal inv
+		# 03:22:38 — "Investigations | 1" is that exclusion). `completed_at` is
+		# written by finalize_operation, which runs only after the blue drain, so
+		# an unset value means blue is still outstanding no matter what the
+		# counts say. red_blocked_on_blue is unusable here: it is written once at
+		# red completion and never cleared.
+		if [[ "$n" -eq 0 ]]; then
+			done_at=$(sed -n '/---COMPLETED_AT---/,$p' <<<"$out" | tail -n +2 | tr -d '[:space:]')
+			if [[ -z "$done_at" || "$done_at" == "null" ]]; then
+				n=1
+			fi
+		fi
+		echo "$n"
 	}
 	# Red reaching a terminal state does not mean blue has. `blue submit` only
 	# enqueues, so consolidating here captures half-written investigations and
-	# under-reports coverage. Wait for Running+Submitted to reach 0.
+	# under-reports coverage. Wait for Running+Submitted to reach 0 AND the op to
+	# be finalized.
 	# A red-op shutdown that outruns its blue drain leaves the investigation
 	# stuck at in_progress forever, so Running never reaches 0 and a plain
 	# wait-for-zero would always burn the full timeout. Treat an unchanging

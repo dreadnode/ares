@@ -87,12 +87,7 @@ impl BlueCallbackHandler {
         op_state_recorder: OpStateRecorder,
     ) -> Self {
         // Extract deployment from alert labels or fall back to env var
-        let deployment = alert
-            .get("labels")
-            .and_then(|l| l.get("deployment"))
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| std::env::var("ARES_DEPLOYMENT").ok());
+        let deployment = super::investigation::resolve_deployment(&alert);
 
         // Correlate blue lifecycle spans with the red operation so the demo
         // dashboard's per-op filter picks them up. Empty string when the

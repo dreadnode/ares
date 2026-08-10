@@ -76,6 +76,24 @@ impl Investigation {
     }
 }
 
+/// Resolve the Loki `deployment` label for an investigation's LogQL.
+///
+/// The alert label wins, then `ARES_DEPLOYMENT`. Both are treated as absent
+/// when empty: `completion.rs` builds the label from `Target.environment` via
+/// `unwrap_or_default()`, so an unset target environment yields `Some("")`,
+/// which is not `None` and would otherwise suppress the env fallback and pin
+/// every composed query to `deployment=""` — matching nothing.
+pub(super) fn resolve_deployment(alert: &serde_json::Value) -> Option<String> {
+    alert
+        .get("labels")
+        .and_then(|l| l.get("deployment"))
+        .and_then(|v| v.as_str())
+        .filter(|d| !d.is_empty())
+        .map(String::from)
+        .or_else(|| std::env::var("ARES_DEPLOYMENT").ok())
+        .filter(|d| !d.is_empty())
+}
+
 /// Run a complete investigation workflow driven by the orchestrator LLM.
 ///
 /// The orchestrator agent coordinates triage, threat hunting, and lateral
@@ -167,13 +185,7 @@ pub async fn run_investigation(
         .map(|t| t.name.clone())
         .collect();
 
-    let deployment = investigation
-        .alert
-        .get("labels")
-        .and_then(|l| l.get("deployment"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| std::env::var("ARES_DEPLOYMENT").ok());
+    let deployment = resolve_deployment(&investigation.alert);
 
     let system_prompt = ares_llm::prompt::blue::build_blue_system_prompt(
         role.as_str(),
@@ -247,9 +259,19 @@ pub async fn run_investigation(
     let sweep_refresh =
         super::sweep::spawn_sweep_refresh(investigation.investigation_id.clone(), attack_start);
 
+    let blue_dispatcher: Arc<dyn ToolDispatcher> = Arc::new(super::sub_agent::BlueToolDispatcher {
+        inner: Arc::clone(&dispatcher),
+        investigation_id: investigation.investigation_id.clone(),
+    });
+    info!(
+        investigation_id = %investigation.investigation_id,
+        deployment = deployment.as_deref().unwrap_or("<unset>"),
+        "Blue orchestrator tools routed in-process via BlueToolDispatcher"
+    );
+
     let outcome = run_agent_loop(RunAgentLoopParams {
         provider: provider.as_ref(),
-        dispatcher,
+        dispatcher: blue_dispatcher,
         config: &config,
         system_prompt: &system_prompt,
         task_prompt: &task_prompt,
@@ -807,6 +829,43 @@ async fn score_against_ground_truth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_deployment_label_env_precedence() {
+        // One test, not four — cargo runs tests in parallel and `std::env` is
+        // process-global, so splitting the cases races.
+        unsafe {
+            std::env::set_var("ARES_DEPLOYMENT", "alpha-operator-range");
+        }
+
+        let empty_label = serde_json::json!({ "labels": { "deployment": "" } });
+        assert_eq!(
+            resolve_deployment(&empty_label).as_deref(),
+            Some("alpha-operator-range"),
+            "an empty label must fall through to ARES_DEPLOYMENT, not pin deployment=\"\""
+        );
+
+        let real_label = serde_json::json!({ "labels": { "deployment": "contoso-range" } });
+        assert_eq!(
+            resolve_deployment(&real_label).as_deref(),
+            Some("contoso-range")
+        );
+
+        assert_eq!(
+            resolve_deployment(&serde_json::json!({})).as_deref(),
+            Some("alpha-operator-range")
+        );
+
+        unsafe {
+            std::env::set_var("ARES_DEPLOYMENT", "");
+        }
+        assert_eq!(resolve_deployment(&empty_label), None);
+
+        unsafe {
+            std::env::remove_var("ARES_DEPLOYMENT");
+        }
+        assert_eq!(resolve_deployment(&serde_json::json!({})), None);
+    }
 
     #[test]
     fn extracts_verdict() {
