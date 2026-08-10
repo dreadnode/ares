@@ -27,7 +27,6 @@ pub fn format_vuln_details(
         return "-".to_string();
     }
 
-    // Ordered key display names
     let key_display: &[(&str, &str)] = &[
         ("account", "Account"),
         ("account_name", "Account"),
@@ -84,7 +83,6 @@ pub fn format_vuln_details(
         }
         if let Some(s) = value_to_display(value) {
             let display_key = key.replace('_', " ");
-            // Title case
             let display_key: String = display_key
                 .split_whitespace()
                 .map(|w| {

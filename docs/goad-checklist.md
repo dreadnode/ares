@@ -26,7 +26,7 @@ Comprehensive checklist for GOAD lab provisioning, user/group creation, vulnerab
 - [ ] sevenkingdoms.local forest root created
 - [ ] north.sevenkingdoms.local child domain created
 - [ ] essos.local forest root created
-- [ ] Bidirectional forest trust: sevenkingdoms.local <-> essos.local (no SID filtering by default)
+- [ ] Bidirectional forest trust: sevenkingdoms.local <-> essos.local (SID filtering IS enforced on the receiving DC — a trust-key forge cannot DCSync across it)
 - [ ] Parent-child trust: sevenkingdoms.local <-> north.sevenkingdoms.local
 - [ ] Parent-child DNS conditional forwarder configured (Ansible role: `parent_child_dns`)
 
@@ -428,7 +428,7 @@ Comprehensive checklist for GOAD lab provisioning, user/group creation, vulnerab
 - [ ] DC DNS conditional forwarder (`dc_dns_conditional_forwarder`) - cross-domain DNS path
 - [ ] DC SACL audit policy (`dc_audit_sacl`) - defender visibility posture; check what's audited vs. silent
 - [ ] LDAP diagnostic logging level (`ldap_diagnostic_logging`) - defender visibility into LDAP queries
-- [ ] Forest trust direction + SID filtering posture (default: bidirectional, no filtering between sevenkingdoms ↔ essos)
+- [ ] Forest trust direction + SID filtering posture (bidirectional; the receiving DC filters the cross-realm PAC — RID 519, custom RIDs above 1000, and a direct user RID were all stripped in manual validation, so the forest falls to native escalation inside it, not to the trust key)
 - [ ] Windows ASR rules posture (`security_asr`) - what's blocked vs. allowed
 
 ---

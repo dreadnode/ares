@@ -1,0 +1,44 @@
+# {{ ansible_managed }}
+# Vector — ares log shipper (file/syslog -> S3 store-and-forward).
+# The home-cluster Vector polls the S3 bucket via SQS and replays into Loki.
+
+data_dir: "{{ vector_data_dir }}"
+
+sources:
+  ares_logs:
+    type: file
+    include:
+{% for path in vector_log_includes %}
+      - "{{ path }}"
+{% endfor %}
+    read_from: beginning
+
+transforms:
+  add_labels:
+    type: remap
+    inputs:
+      - ares_logs
+    source: |
+      .deployment = "{{ vector_deployment_name }}"
+      .environment = "{{ vector_environment }}"
+      .app = "ares"
+      path = to_string(.file) ?? ""
+      parts = split(path, "/")
+      .job = if length(parts) > 0 { parts[-1] } else { "ares" }
+
+sinks:
+  s3:
+    type: aws_s3
+    inputs:
+      - add_labels
+    bucket: "{{ vector_s3_bucket }}"
+    region: "{{ vector_s3_region }}"
+    key_prefix: "{{ vector_s3_key_prefix }}/{{ vector_deployment_name }}/{{ inventory_hostname }}/%Y/%m/%d/"
+    compression: gzip
+    encoding:
+      codec: json
+    batch:
+      max_bytes: {{ vector_s3_batch_max_bytes }}
+      timeout_secs: {{ vector_s3_batch_timeout_secs }}
+    healthcheck:
+      enabled: true

@@ -13,10 +13,21 @@ Perform rapid triage of the alert to determine severity, identify initial MITRE 
 ## Investigation Depth by Severity
 
 You have LIMITED steps. Do NOT loop endlessly, but DO investigate thoroughly.
+These are **minimums**, not budgets to stop at:
 
 - **LOW / MEDIUM**: Quick triage — 2-3 queries, record findings, complete.
-- **HIGH / CRITICAL**: Full investigation — aim for 5-8 queries across indicators.
-- **ALL severities**: If queries return empty, that IS a finding. Complete with low confidence.
+- **HIGH**: minimum **5 queries** covering at least **3 distinct event-ID families**
+  (e.g. 4662, 4769, 4886/4887, 5140). Do not complete before then.
+- **CRITICAL**: minimum **8 queries**. If the alert mentions cross-domain,
+  cross-forest, certificate/ADCS, or Kerberos-ticket activity you MUST include
+  the ADCS templates (`detect_esc1_attack`, `detect_adcs_exploitation`) AND the
+  inter-realm templates (`detect_cross_realm_tgs`, `detect_sid_history_extrasid`)
+  before calling `triage_complete`.
+- **LOW / MEDIUM only**: If queries return empty, that IS a finding — complete
+  with low confidence.
+- **HIGH / CRITICAL**: An empty result is NOT a stopping point — **widen the time
+  window** (15min → 1h → 6h) and re-run before concluding "no evidence". Do not
+  complete a CRITICAL alert on empty results without having widened the window.
 
 ## Process
 1. Query logs around the alert timestamp to confirm the alert fired correctly
@@ -80,7 +91,27 @@ Example efficient triage: batch 3-5 queries in ONE `execute_parallel_queries` ca
 
 ## Quick Detection Queries for Triage
 
-When triaging, batch these high-priority checks with `execute_parallel_queries` to scan for the most dangerous techniques in one call:
+**Fastest path: invoke the pre-built templates.** You have `run_detection_query`,
+`run_parallel_detections`, and `list_detection_templates` — use them instead of
+retyping LogQL. For a fast, broad triage sweep:
+
+```
+run_parallel_detections(query_names=[
+  "detect_dcsync", "detect_kerberoasting", "detect_s4u_delegation",
+  "detect_asrep_roasting", "detect_esc1_attack", "detect_cross_realm_tgs"
+])
+```
+
+`detect_asrep_roasting` encodes the correct pre-auth-disabled pattern (`PreAuthType=0`)
+— do NOT triage AS-REP with the Kerberoast `0x17` pattern. Golden Ticket
+(T1558.001) is deliberately absent from this batch: it needs cross-event
+correlation (4769 with no preceding 4768) that a line filter cannot express, so
+the baseline sweep decides it in code and reports the verdict in your prompt.
+`detect_golden_ticket` cannot fire by construction — running it wastes a query. When a compromised
+credential path is suspected, add `detect_esc1_attack` / `detect_adcs_exploitation`
+and `detect_sid_history_extrasid` to the batch.
+
+If you prefer raw LogQL, batch these high-priority checks with `execute_parallel_queries` to scan for the most dangerous techniques in one call:
 
 {% if deployment %}
 ```json
@@ -88,7 +119,7 @@ When triaging, batch these high-priority checks with `execute_parallel_queries` 
   "queries": [
     {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4662\" |= \"1131f6aa\" !~ \"SubjectUserName'.u003e[A-Z0-9_-]+[$]\"", "description": "DCSync ATTACK (excludes machine accounts)"},
     {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4769\" |= \"0x17\"", "description": "Kerberoasting (RC4 TGS)"},
-    {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4769\" |= \"krbtgt\"", "description": "Golden Ticket (krbtgt TGS)"},
+    {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |= \"4769\" |= \"TransmittedServices\"", "description": "S4U / constrained delegation abuse"},
     {"logql": "{job=\"windows-security\", deployment=\"{{ deployment }}\"} |~ \"5140|5145\" |~ \"ADMIN\\\\$|C\\\\$\"", "description": "Admin share access"}
   ],
   "start_time": "<alert_time - 15min>",

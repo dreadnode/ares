@@ -9,3 +9,13 @@
   ansible.builtin.systemd:
     daemon_reload: true
   become: true
+
+# Runs after "Reload systemd" (handlers fire in definition order), so the new
+# unit is on disk and reloaded before the workers bounce. Only fires when the
+# unit template actually changes, so steady-state re-runs don't disrupt ops.
+- name: Restart ares workers
+  ansible.builtin.systemd:
+    name: "ares@{{ item }}.service"
+    state: restarted
+  loop: "{{ redis_ares_worker_roles }}"
+  become: true

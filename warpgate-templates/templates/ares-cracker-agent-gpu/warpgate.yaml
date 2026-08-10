@@ -18,7 +18,7 @@ metadata:
 name: ares-cracker-agent-gpu
 version: latest
 base:
-  image: ghcr.io/dreadnode/ares-cracker-base-gpu@sha256:c72bc94f627c75b87be551b1daa1ad35427a8fa4fff45a7344897eef0b9f88ad
+  image: ghcr.io/l50/ares-cracker-base-gpu@sha256:51a7a181f2238c40a50f93fa7fb085b65fbf686fc120f6a8c1f7b8e32109d0f7
   pull: true
   privileged: true
   volumes:
@@ -41,7 +41,7 @@ base:
 sources:
   - name: ares
     git:
-      repository: https://github.com/dreadnode/ares.git
+      repository: https://github.com/l50/ares.git
       ref: main
       depth: 1
       auth:

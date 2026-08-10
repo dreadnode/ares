@@ -13,6 +13,7 @@ mod credential_access;
 mod lateral;
 mod orchestrator_tools;
 mod privesc;
+pub mod provenance;
 mod recon;
 mod reporting;
 
@@ -23,6 +24,7 @@ use crate::ToolDefinition;
 /// Agent roles that can be assigned tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentRole {
+    Orchestrator,
     Recon,
     CredentialAccess,
     Cracker,
@@ -30,12 +32,12 @@ pub enum AgentRole {
     Privesc,
     Lateral,
     Coercion,
-    Orchestrator,
 }
 
 impl AgentRole {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Orchestrator => "orchestrator",
             Self::Recon => "recon",
             Self::CredentialAccess => "credential_access",
             Self::Cracker => "cracker",
@@ -43,12 +45,12 @@ impl AgentRole {
             Self::Privesc => "privesc",
             Self::Lateral => "lateral",
             Self::Coercion => "coercion",
-            Self::Orchestrator => "orchestrator",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
+            "orchestrator" => Some(Self::Orchestrator),
             "recon" => Some(Self::Recon),
             "credential_access" => Some(Self::CredentialAccess),
             "cracker" | "crack" => Some(Self::Cracker),
@@ -56,7 +58,6 @@ impl AgentRole {
             "privesc" | "privesc_enumeration" => Some(Self::Privesc),
             "lateral" | "lateral_movement" => Some(Self::Lateral),
             "coercion" => Some(Self::Coercion),
-            "orchestrator" => Some(Self::Orchestrator),
             _ => None,
         }
     }
@@ -64,8 +65,8 @@ impl AgentRole {
 
 /// Names of supported callback tools that the agent loop handles directly.
 ///
-/// Includes orchestrator query and dispatch tools — these are handled by a
-/// custom `CallbackHandler` (if provided) rather than being dispatched to workers.
+/// These are handled by a custom `CallbackHandler` (if provided) rather than
+/// being dispatched to workers.
 pub const CALLBACK_TOOLS: &[&str] = &[
     // Universal callbacks
     "task_complete",
@@ -74,37 +75,35 @@ pub const CALLBACK_TOOLS: &[&str] = &[
     "report_finding",
     "report_lateral_success",
     "report_lateral_failed",
-    "complete_operation",
     // Reporting tools (handled in-process, not dispatched to workers)
     // NOTE: record_credential removed — credentials come only from tool output parsing
     // NOTE: record_timeline_event removed — timeline events auto-generated from discoveries
     "record_compromised_host",
     "list_credentials",
-    // Orchestrator query tools (handled by OrchestratorCallbackHandler)
+    "get_operation_summary",
     "get_credential_summary",
     "get_hash_summary",
     "get_all_credentials",
     "get_all_hashes",
-    "get_hash_value",
     "get_pending_tasks",
     "get_agent_status",
-    "get_operation_summary",
-    // Orchestrator dispatch tools
     "dispatch_recon",
     "dispatch_credential_access",
     "dispatch_lateral_movement",
     "dispatch_privesc_exploit",
     "dispatch_coercion",
     "dispatch_crack",
+    "get_proposed_work",
+    "approve_work",
+    "reject_work",
+    "complete_operation",
 ];
 
-/// Removed callback names that are still trapped in-process so a hallucinated
-/// call receives a deterministic "tool removed" response instead of being
-/// dispatched to a worker.
 const REMOVED_CALLBACK_TOOLS: &[&str] = &[
     "record_credential",
     "record_timeline_event",
     "report_cracked_credential",
+    "get_hash_value",
 ];
 
 /// Check if a tool name is a callback (handled in Rust, not dispatched).
@@ -122,6 +121,7 @@ pub fn is_callback_tool(name: &str) -> bool {
 /// Keep this in lock-step with `ares-cli/src/worker/credential_resolver.rs::CREDENTIAL_KEYS`.
 pub const SECRET_SCHEMA_KEYS: &[&str] = &[
     "password",
+    "new_password",
     "hash",
     "nt_hash",
     "ntlm_hash",
@@ -156,12 +156,22 @@ const CALLBACK_NAMES_WITH_SECRETS: &[&str] = &[
     "get_hash_value",
 ];
 
+pub const KERBEROS_ONLY_TOOLS: &[&str] = &[
+    "secretsdump_kerberos",
+    "psexec_kerberos",
+    "wmiexec_kerberos",
+    "smbexec_kerberos",
+];
+
 /// Per-tool exposed-key exemptions. For tools where a "secret-shaped" argument
 /// is actually input *data* (e.g. `password_spray.password` is the candidate
 /// password to spray, not a credential to look up), the named keys remain in
 /// the LLM-visible schema. The credential resolver will not inject anything
 /// for these keys because the calls have no `(username, domain)` principal.
 fn exposed_secret_keys(tool_name: &str) -> &'static [&'static str] {
+    if KERBEROS_ONLY_TOOLS.contains(&tool_name) {
+        return &["ticket_path"];
+    }
     match tool_name {
         "password_spray" => &["password"],
         _ => &[],
@@ -281,7 +291,15 @@ fn callback_tool_definitions() -> Vec<ToolDefinition> {
 ///
 /// Returns role-specific tools plus universal callback and reporting tools.
 pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
+    if role == AgentRole::Orchestrator {
+        let mut tools = orchestrator_tools::tool_definitions();
+        tools.extend(callback_tool_definitions());
+        strip_secrets_from_all(&mut tools);
+        return tools;
+    }
+
     let mut tools = match role {
+        AgentRole::Orchestrator => unreachable!("handled above"),
         AgentRole::Recon => {
             let mut t = recon::tool_definitions();
             // Netexec/ldapsearch tools are available on recon workers — include
@@ -293,7 +311,11 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
         }
         AgentRole::CredentialAccess => credential_access::tool_definitions(),
         AgentRole::Cracker => cracker::tool_definitions(),
-        AgentRole::Acl => acl::tool_definitions(),
+        AgentRole::Acl => {
+            let mut t = acl::tool_definitions();
+            t.push(privesc::adcs::certipy_shadow_definition());
+            t
+        }
         AgentRole::Privesc => {
             let mut t = privesc::tool_definitions();
             // MSSQL tools are implemented in the lateral module but privesc
@@ -307,17 +329,14 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
         }
         AgentRole::Lateral => lateral::tool_definitions(),
         AgentRole::Coercion => coercion::tool_definitions(),
-        AgentRole::Orchestrator => orchestrator_tools::tool_definitions(),
     };
 
-    // Role-specific callback tools
     match role {
         AgentRole::Cracker => tools.extend(cracker::callback_definitions()),
         AgentRole::Lateral => tools.extend(lateral::callback_definitions()),
         _ => {}
     }
 
-    // Universal tools for all roles
     tools.extend(reporting::tool_definitions());
     tools.extend(callback_tool_definitions());
 
@@ -326,40 +345,6 @@ pub fn tools_for_role(role: AgentRole) -> Vec<ToolDefinition> {
     strip_secrets_from_all(&mut tools);
 
     tools
-}
-
-/// Get tool definitions for a specific set of capability names.
-///
-/// This is used when the YAML config specifies which tools a role should have.
-/// Returns only the tools whose names appear in `capabilities`.
-pub fn tools_for_capabilities(capabilities: &[String]) -> Vec<ToolDefinition> {
-    // Dedup by name — same tool may appear in multiple roles
-    let mut seen = std::collections::HashSet::new();
-    let mut matched: Vec<ToolDefinition> = [
-        recon::tool_definitions(),
-        credential_access::tool_definitions(),
-        cracker::tool_definitions(),
-        acl::tool_definitions(),
-        privesc::tool_definitions(),
-        lateral::tool_definitions(),
-        lateral::mssql::definitions(),
-        coercion::tool_definitions(),
-        orchestrator_tools::tool_definitions(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|t| capabilities.iter().any(|c| c == &t.name))
-    .filter(|t| seen.insert(t.name.clone()))
-    .collect();
-
-    // Always include reporting + callback tools
-    matched.extend(reporting::tool_definitions());
-    matched.extend(callback_tool_definitions());
-
-    // Strip credential fields — see tools_for_role.
-    strip_secrets_from_all(&mut matched);
-
-    matched
 }
 
 #[cfg(test)]
@@ -406,7 +391,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             let tools = tools_for_role(role);
             for tool in &tools {
@@ -451,38 +435,6 @@ mod tests {
     }
 
     #[test]
-    fn no_secret_fields_in_capability_schemas() {
-        let caps: Vec<String> = ["psexec", "secretsdump", "generate_golden_ticket"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let tools = tools_for_capabilities(&caps);
-        for tool in &tools {
-            if CALLBACK_NAMES_WITH_SECRETS.contains(&tool.name.as_str()) {
-                continue;
-            }
-            let exposed = exposed_secret_keys(&tool.name);
-            if let Some(props) = tool
-                .input_schema
-                .get("properties")
-                .and_then(|v| v.as_object())
-            {
-                for key in SECRET_SCHEMA_KEYS {
-                    if exposed.contains(key) {
-                        continue;
-                    }
-                    assert!(
-                        !props.contains_key(*key),
-                        "Capability tool '{}' leaks secret field '{}' to LLM",
-                        tool.name,
-                        key
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn tool_schemas_valid_json() {
         for role in [
             AgentRole::Recon,
@@ -492,7 +444,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             let tools = tools_for_role(role);
             for tool in &tools {
@@ -513,21 +464,8 @@ mod tests {
     }
 
     #[test]
-    fn returns_tools_for_capabilities() {
-        let caps = vec!["nmap_scan".to_string(), "secretsdump".to_string()];
-        let tools = tools_for_capabilities(&caps);
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"nmap_scan"));
-        assert!(names.contains(&"secretsdump"));
-        assert!(!names.contains(&"enumerate_users"));
-        // Reporting + callbacks always present
-        assert!(names.contains(&"task_complete"));
-    }
-
-    #[test]
     fn agent_role_str() {
         assert_eq!(AgentRole::Recon.as_str(), "recon");
-        assert_eq!(AgentRole::Orchestrator.as_str(), "orchestrator");
         assert_eq!(AgentRole::CredentialAccess.as_str(), "credential_access");
     }
 
@@ -552,12 +490,107 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_has_management_tools() {
-        let tools = tools_for_role(AgentRole::Orchestrator);
-        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains(&"get_pending_tasks"));
-        assert!(names.contains(&"complete_operation"));
-        assert!(names.contains(&"get_hash_summary"));
+    fn orchestrator_tools_route_in_process_for_every_role() {
+        assert_eq!(
+            AgentRole::parse("orchestrator"),
+            Some(AgentRole::Orchestrator)
+        );
+        for name in [
+            "dispatch_recon",
+            "dispatch_credential_access",
+            "dispatch_lateral_movement",
+            "dispatch_privesc_exploit",
+            "dispatch_coercion",
+            "dispatch_crack",
+            "complete_operation",
+            "get_pending_tasks",
+            "get_hash_summary",
+        ] {
+            assert!(
+                is_callback_tool(name),
+                "{name} must route in-process, or a hallucinated call reaches a worker"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_orchestrator_is_offered_dispatch_and_completion() {
+        for role in [
+            AgentRole::Recon,
+            AgentRole::CredentialAccess,
+            AgentRole::Cracker,
+            AgentRole::Acl,
+            AgentRole::Privesc,
+            AgentRole::Lateral,
+            AgentRole::Coercion,
+        ] {
+            for name in tools_for_role(role).iter().map(|t| t.name.clone()) {
+                assert!(
+                    !name.starts_with("dispatch_") && name != "complete_operation",
+                    "role {role:?} must not be offered orchestrator tool {name}"
+                );
+            }
+        }
+
+        let names: Vec<String> = tools_for_role(AgentRole::Orchestrator)
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        for expected in [
+            "dispatch_recon",
+            "dispatch_credential_access",
+            "dispatch_lateral_movement",
+            "dispatch_privesc_exploit",
+            "dispatch_coercion",
+            "dispatch_crack",
+            "complete_operation",
+            "get_pending_tasks",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "orchestrator must be offered {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn orchestrator_is_offered_no_executable_tool_and_no_secret_argument() {
+        for tool in tools_for_role(AgentRole::Orchestrator) {
+            assert!(
+                tool.name.starts_with("dispatch_")
+                    || tool.name.starts_with("get_")
+                    || matches!(
+                        tool.name.as_str(),
+                        "approve_work"
+                            | "reject_work"
+                            | "complete_operation"
+                            | "task_complete"
+                            | "request_assistance"
+                            | "report_finding"
+                            | "report_crack_failed"
+                            | "report_lateral_success"
+                            | "report_lateral_failed"
+                            | "record_compromised_host"
+                            | "list_credentials"
+                    ),
+                "orchestrator must not be offered executable tool {}",
+                tool.name
+            );
+
+            if let Some(props) = tool
+                .input_schema
+                .get("properties")
+                .and_then(|v| v.as_object())
+            {
+                for key in SECRET_SCHEMA_KEYS {
+                    assert!(
+                        !props.contains_key(*key),
+                        "orchestrator tool {} exposes secret argument {key}",
+                        tool.name
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -570,7 +603,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             let tools = tools_for_role(role);
             let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
@@ -609,7 +641,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             let tools = tools_for_role(role);
             let mut seen = std::collections::HashSet::new();
@@ -660,12 +691,28 @@ mod tests {
     }
 
     #[test]
+    fn rpcclient_command_schema_exposes_null_session() {
+        let tools = tools_for_role(AgentRole::Recon);
+        let rpcclient = tools
+            .iter()
+            .find(|t| t.name == "rpcclient_command")
+            .expect("recon should expose rpcclient_command");
+        assert!(
+            rpcclient.input_schema["properties"]
+                .as_object()
+                .is_some_and(|props| props.contains_key("null_session")),
+            "rpcclient_command schema must advertise null_session fallback"
+        );
+    }
+
+    #[test]
     fn privesc_has_key_tools() {
         let tools = tools_for_role(AgentRole::Privesc);
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"certipy_find"));
         assert!(names.contains(&"find_delegation"));
         assert!(names.contains(&"generate_golden_ticket"));
+        assert!(names.contains(&"generate_silver_ticket"));
         assert!(names.contains(&"extract_trust_key"));
         // MSSQL tools shared from lateral module (privesc container has impacket-mssqlclient)
         assert!(names.contains(&"mssql_command"));
@@ -673,6 +720,112 @@ mod tests {
         assert!(names.contains(&"mssql_enum_linked_servers"));
         // secretsdump_kerberos shared from lateral for cross-forest trust exploitation
         assert!(names.contains(&"secretsdump_kerberos"));
+    }
+
+    /// The silver-ticket schema is the contract with the worker's credential
+    /// resolver: it injects the signing key off `(username, domain)` and the SID
+    /// off `domain`, so those three must stay LLM-visible while every secret is
+    /// stripped. Naming the signing account anything other than `username`
+    /// silently breaks injection and the tool dispatches with no key.
+    #[test]
+    fn silver_ticket_schema_names_the_principal_and_hides_the_key() {
+        let tools = tools_for_role(AgentRole::Privesc);
+        let schema = &tools
+            .iter()
+            .find(|t| t.name == "generate_silver_ticket")
+            .expect("privesc registry must advertise generate_silver_ticket")
+            .input_schema;
+        let props = schema["properties"].as_object().expect("properties");
+        for visible in ["username", "domain", "spn", "impersonate"] {
+            assert!(props.contains_key(visible), "{visible} must stay visible");
+        }
+        for secret in ["hash", "aes_key", "domain_sid"] {
+            assert!(!props.contains_key(secret), "{secret} must be stripped");
+        }
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(required, vec!["username", "domain", "spn"]);
+    }
+
+    #[test]
+    fn kerberos_only_tools_advertise_the_ccache_slot_in_every_role() {
+        for role in [AgentRole::Privesc, AgentRole::Lateral] {
+            for tool in tools_for_role(role)
+                .into_iter()
+                .filter(|t| KERBEROS_ONLY_TOOLS.contains(&t.name.as_str()))
+            {
+                let props = tool.input_schema["properties"]
+                    .as_object()
+                    .expect("properties");
+                assert!(
+                    props.contains_key("ticket_path"),
+                    "{} has no auth mode other than a Kerberos ccache, so stripping ticket_path \
+                     leaves the LLM unable to spend a ticket it just obtained: {:?}",
+                    tool.name,
+                    props.keys().collect::<Vec<_>>()
+                );
+                for secret in ["password", "hash", "nt_hash", "aes_key"] {
+                    assert!(
+                        !props.contains_key(secret),
+                        "{} must still hide {secret}",
+                        tool.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ticket_path_stays_stripped_from_tools_with_another_auth_mode() {
+        for role in [AgentRole::Acl, AgentRole::Privesc, AgentRole::Lateral] {
+            for tool in tools_for_role(role) {
+                if KERBEROS_ONLY_TOOLS.contains(&tool.name.as_str()) {
+                    continue;
+                }
+                let Some(props) = tool.input_schema["properties"].as_object() else {
+                    continue;
+                };
+                assert!(
+                    !props.contains_key("ticket_path"),
+                    "{} takes a password or hash too — the resolver owns its ticket_path",
+                    tool.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn acl_has_shadow_credential_tools() {
+        let tools = tools_for_role(AgentRole::Acl);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"dacl_edit"));
+        assert!(names.contains(&"owner_edit"));
+        assert!(names.contains(&"pywhisker"));
+        assert!(names.contains(&"certipy_auth"));
+        assert!(
+            names.contains(&"certipy_shadow"),
+            "the acl role is the only role that discovers GenericWrite/GenericAll edges and \
+             auto_shadow_credentials routes those dispatches to the acl worker, so without \
+             certipy_shadow the shadow-credential spine has no one-step primitive: {names:?}"
+        );
+    }
+
+    #[test]
+    fn acl_certipy_shadow_matches_the_privesc_definition() {
+        let acl_tool = tools_for_role(AgentRole::Acl)
+            .into_iter()
+            .find(|t| t.name == "certipy_shadow")
+            .expect("acl registry must advertise certipy_shadow");
+        let privesc_tool = tools_for_role(AgentRole::Privesc)
+            .into_iter()
+            .find(|t| t.name == "certipy_shadow")
+            .expect("privesc registry must advertise certipy_shadow");
+        assert_eq!(acl_tool.description, privesc_tool.description);
+        assert_eq!(acl_tool.input_schema, privesc_tool.input_schema);
     }
 
     #[test]
@@ -684,7 +837,7 @@ mod tests {
         assert!(names.contains(&"coercer"));
     }
 
-    // ── AgentRole::parse ────────────────────────────────────────────
+    // AgentRole::parse
 
     #[test]
     fn parse_role_exact() {
@@ -698,10 +851,6 @@ mod tests {
         assert_eq!(AgentRole::parse("privesc"), Some(AgentRole::Privesc));
         assert_eq!(AgentRole::parse("lateral"), Some(AgentRole::Lateral));
         assert_eq!(AgentRole::parse("coercion"), Some(AgentRole::Coercion));
-        assert_eq!(
-            AgentRole::parse("orchestrator"),
-            Some(AgentRole::Orchestrator)
-        );
     }
 
     #[test]
@@ -745,7 +894,6 @@ mod tests {
             AgentRole::Privesc,
             AgentRole::Lateral,
             AgentRole::Coercion,
-            AgentRole::Orchestrator,
         ] {
             assert_eq!(
                 AgentRole::parse(role.as_str()),
@@ -756,9 +904,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
     // Blue team tool registry tests
-    // -----------------------------------------------------------------------
 
     #[cfg(feature = "blue")]
     mod blue_tests {
@@ -817,7 +963,6 @@ mod tests {
             assert!(names.contains(&"get_alert_history"));
             assert!(names.contains(&"get_alerts_in_time_range"));
             assert!(names.contains(&"create_annotation"));
-            assert!(names.contains(&"create_detection_rule"));
             assert!(names.contains(&"post_investigation_started"));
             assert!(names.contains(&"post_investigation_completed"));
             // Learning tools

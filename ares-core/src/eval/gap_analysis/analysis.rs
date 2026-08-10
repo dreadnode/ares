@@ -11,7 +11,6 @@ pub fn analyze_detection_gaps(result: &EvaluationResult) -> GapAnalysisReport {
     let mut detection_gaps: Vec<String> = Vec::new();
     let mut recommendations: Vec<DetectionRecommendation> = Vec::new();
 
-    // Analyze missed IOCs
     for ioc in &result.missed_iocs {
         detection_gaps.push(describe_ioc_gap(ioc));
         if let Some(rec) = recommend_for_ioc(ioc) {
@@ -19,7 +18,6 @@ pub fn analyze_detection_gaps(result: &EvaluationResult) -> GapAnalysisReport {
         }
     }
 
-    // Analyze missed techniques
     for tech in &result.missed_techniques {
         detection_gaps.push(describe_technique_gap(tech));
         if let Some(rec) = recommend_for_technique(tech) {
@@ -27,7 +25,6 @@ pub fn analyze_detection_gaps(result: &EvaluationResult) -> GapAnalysisReport {
         }
     }
 
-    // No alert fired
     if !result.alert_fired {
         detection_gaps.push("No alert fired for this attack scenario".to_string());
         recommendations.push(DetectionRecommendation {
@@ -45,7 +42,6 @@ pub fn analyze_detection_gaps(result: &EvaluationResult) -> GapAnalysisReport {
         });
     }
 
-    // Investigation started but not completed
     if result.investigation_started && !result.investigation_completed {
         detection_gaps.push("Investigation started but did not complete".to_string());
         recommendations.push(DetectionRecommendation {
@@ -61,7 +57,6 @@ pub fn analyze_detection_gaps(result: &EvaluationResult) -> GapAnalysisReport {
         });
     }
 
-    // Low pyramid level
     if result.highest_pyramid_level < 4 {
         detection_gaps.push(format!(
             "Only reached pyramid level {}/6 (did not reach Network/Host Artifacts)",
@@ -81,10 +76,8 @@ pub fn analyze_detection_gaps(result: &EvaluationResult) -> GapAnalysisReport {
         });
     }
 
-    // Generate summary
     let summary = generate_summary(result, &detection_gaps);
 
-    // Sort recommendations by priority
     let priority_order = |p: &str| -> u8 {
         match p {
             "critical" => 0,
@@ -127,7 +120,6 @@ pub(crate) fn describe_technique_gap(tech: &ExpectedTechnique) -> String {
 pub(crate) fn generate_summary(result: &EvaluationResult, gaps: &[String]) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    // Overall assessment
     let grade = result.grade();
     if grade == "A" || grade == "B" {
         parts.push(format!(
@@ -144,7 +136,6 @@ pub(crate) fn generate_summary(result: &EvaluationResult, gaps: &[String]) -> St
         ));
     }
 
-    // Alert status
     if result.alert_fired {
         parts.push("An alert was successfully triggered for this attack.".to_string());
     } else {
@@ -153,14 +144,12 @@ pub(crate) fn generate_summary(result: &EvaluationResult, gaps: &[String]) -> St
         );
     }
 
-    // Detection rates
     parts.push(format!(
         "IOC detection rate was {:.0}% and technique coverage was {:.0}%.",
         result.ioc_detection_rate * 100.0,
         result.technique_coverage * 100.0,
     ));
 
-    // Gap count
     if gaps.is_empty() {
         parts.push("No significant detection gaps were identified.".to_string());
     } else {

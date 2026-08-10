@@ -206,6 +206,7 @@ mod tests {
     fn write_session(root: &Path, op_id: &str, task_id: &str) {
         let cfg = SessionLogConfig {
             dir: Some(root.to_path_buf()),
+            ..Default::default()
         };
         let log = SessionLog::open(&cfg, op_id, task_id, "recon", "test-model");
         log.record_start("sys", "task", &[]);

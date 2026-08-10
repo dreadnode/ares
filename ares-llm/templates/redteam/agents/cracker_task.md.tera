@@ -2,8 +2,16 @@
 
 Attempt to crack the following hash:
 
-**Hash Value**: `{{ hash_value }}`
+**Hash Value**:
+
+```text
+{{ hash_value }}
+```
 
 **Hash Type**: `{{ hash_type }}`
+
+If the hash value contains multiple lines, pass the entire multi-line value to
+the cracking tool verbatim. Do not summarize, truncate, reformat, or crack only
+the first line.
 
 Follow the cracking workflow and report results immediately.

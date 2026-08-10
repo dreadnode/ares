@@ -225,17 +225,26 @@ pub async fn evil_winrm(args: &Value) -> Result<ToolOutput> {
     cmd.flag("-c", command).timeout_secs(120).execute().await
 }
 
-/// Test RDP authentication via xfreerdp.
+/// Build the `xfreerdp` command line for an auth-only RDP probe.
 ///
-/// Required args: `target`, `username`
-/// Optional args: `password`, `hash`, `domain`
-pub async fn xfreerdp(args: &Value) -> Result<ToolOutput> {
-    let target = required_str(args, "target")?;
-    let username = required_str(args, "username")?;
-    let password = optional_str(args, "password");
-    let hash = optional_str(args, "hash");
-    let domain = optional_str(args, "domain");
-
+/// The deployed binary is FreeRDP 3.x (`freerdp3-x11` on Kali, symlinked
+/// `xfreerdp` → `xfreerdp3`). FreeRDP 3 dropped the 2.x `/cert-ignore`
+/// spelling and folded it into the structured `/cert:` option as
+/// `/cert:ignore`. The old spelling is no longer a known keyword, so WinPR's
+/// parser aborts the whole invocation with `Unexpected keyword` *before*
+/// connecting — every RDP attempt fails identically regardless of the
+/// principal or target form. All other flags we emit (`/v:`, `/u:`, `/p:`,
+/// `/pth:`, `/d:`, `+auth-only`) are unchanged in FreeRDP 3.
+///
+/// Split out from [`xfreerdp`] so the constructed argv is unit-testable via
+/// [`CommandBuilder::args_for_test`].
+fn xfreerdp_command(
+    target: &str,
+    username: &str,
+    password: Option<&str>,
+    hash: Option<&str>,
+    domain: Option<&str>,
+) -> CommandBuilder {
     let mut cmd = CommandBuilder::new("xfreerdp")
         .arg(format!("/v:{target}"))
         .arg(format!("/u:{username}"));
@@ -252,10 +261,24 @@ pub async fn xfreerdp(args: &Value) -> Result<ToolOutput> {
         cmd = cmd.arg(format!("/d:{d}"));
     }
 
-    cmd.arg("/cert-ignore")
+    cmd.arg("/cert:ignore")
         .arg("+auth-only")
         .env("HOME", "/root")
         .timeout_secs(30)
+}
+
+/// Test RDP authentication via xfreerdp.
+///
+/// Required args: `target`, `username`
+/// Optional args: `password`, `hash`, `domain`
+pub async fn xfreerdp(args: &Value) -> Result<ToolOutput> {
+    let target = required_str(args, "target")?;
+    let username = required_str(args, "username")?;
+    let password = optional_str(args, "password");
+    let hash = optional_str(args, "hash");
+    let domain = optional_str(args, "domain");
+
+    xfreerdp_command(target, username, password, hash, domain)
         .execute()
         .await
 }
@@ -281,7 +304,7 @@ pub async fn ssh_with_password(args: &Value) -> Result<ToolOutput> {
         .arg(&user_host);
 
     if let Some(p) = port {
-        cmd = cmd.flag("-p", p);
+        cmd = cmd.flag_visible("-p", p);
     }
 
     cmd.arg(command).timeout_secs(120).execute().await
@@ -294,6 +317,11 @@ pub async fn ssh_with_password(args: &Value) -> Result<ToolOutput> {
 ///                `just_dc_user` (single account, e.g. `krbtgt`),
 ///                `use_vss` (bool — use VSS method to bypass DRSUAPI hardening)
 pub async fn secretsdump_kerberos(args: &Value) -> Result<ToolOutput> {
+    build_secretsdump_kerberos(args)?.execute().await
+}
+
+#[doc(hidden)]
+pub fn build_secretsdump_kerberos(args: &Value) -> Result<CommandBuilder> {
     let target = required_str(args, "target")?;
     let username = required_str(args, "username")?;
     let domain = required_str(args, "domain")?;
@@ -321,7 +349,7 @@ pub async fn secretsdump_kerberos(args: &Value) -> Result<ToolOutput> {
         cmd = cmd.arg("-use-vss");
     }
 
-    cmd.timeout_secs(timeout_secs).execute().await
+    Ok(cmd.timeout_secs(timeout_secs))
 }
 
 #[cfg(test)]
@@ -329,8 +357,6 @@ mod tests {
     use crate::args::{optional_i64, optional_str, required_str};
     use crate::credentials;
     use serde_json::json;
-
-    // --- psexec ---
 
     #[test]
     fn psexec_requires_target() {
@@ -397,8 +423,6 @@ mod tests {
         assert_eq!(auth_str, "CONTOSO/admin@192.168.58.1");
         assert_eq!(extra_args, vec!["-hashes", ":aabbccdd"]);
     }
-
-    // --- psexec_kerberos ---
 
     #[test]
     fn psexec_kerberos_target_format() {
@@ -474,8 +498,6 @@ mod tests {
         assert_eq!(optional_str(&args, "dc_ip"), Some("192.168.58.1"));
     }
 
-    // --- wmiexec ---
-
     #[test]
     fn wmiexec_requires_target() {
         let args = json!({"username": "admin"});
@@ -494,8 +516,6 @@ mod tests {
         let command = optional_str(&args, "command").unwrap_or("whoami");
         assert_eq!(command, "whoami");
     }
-
-    // --- wmiexec_kerberos ---
 
     #[test]
     fn wmiexec_kerberos_target_format() {
@@ -518,8 +538,6 @@ mod tests {
         assert_eq!(command, "whoami");
     }
 
-    // --- smbexec ---
-
     #[test]
     fn smbexec_requires_target() {
         let args = json!({"username": "admin"});
@@ -539,8 +557,6 @@ mod tests {
         assert_eq!(command, "whoami");
     }
 
-    // --- smbexec_kerberos ---
-
     #[test]
     fn smbexec_kerberos_target_format() {
         let domain = "child.contoso.local";
@@ -552,8 +568,6 @@ mod tests {
             "child.contoso.local/admin@dc02.child.contoso.local"
         );
     }
-
-    // --- evil_winrm ---
 
     #[test]
     fn evil_winrm_default_command() {
@@ -623,8 +637,6 @@ mod tests {
         assert!(used_flag.is_empty());
     }
 
-    // --- xfreerdp ---
-
     #[test]
     fn xfreerdp_target_format() {
         let target = "192.168.58.1";
@@ -655,6 +667,51 @@ mod tests {
         assert_eq!(format!("/d:{domain}"), "/d:CONTOSO");
     }
 
+    // FreeRDP 3.x rejects the 2.x `/cert-ignore` spelling with a WinPR
+    // "Unexpected keyword" parse error, aborting before any connection. Guard
+    // the constructed argv against regressing to the old flag.
+    #[test]
+    fn xfreerdp_uses_freerdp3_cert_flag() {
+        let cmd = super::xfreerdp_command(
+            "192.168.58.10",
+            "alice",
+            Some("P@ssw0rd!"),
+            None,
+            Some("contoso.local"),
+        );
+        let args = cmd.args_for_test();
+        assert!(
+            args.iter().any(|a| a == "/cert:ignore"),
+            "expected FreeRDP 3.x /cert:ignore, got {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "/cert-ignore"),
+            "found FreeRDP 2.x /cert-ignore which FreeRDP 3.x rejects: {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "+auth-only"),
+            "auth-only probe flag missing: {args:?}"
+        );
+    }
+
+    #[test]
+    fn xfreerdp_command_pth_and_domain() {
+        let cmd = super::xfreerdp_command(
+            "192.168.58.10",
+            "alice",
+            None,
+            Some("aabbccddeeff00112233445566778899"),
+            Some("contoso.local"),
+        );
+        let args = cmd.args_for_test();
+        assert!(args.contains(&"/v:192.168.58.10".to_string()));
+        assert!(args.contains(&"/u:alice".to_string()));
+        assert!(args.contains(&"/pth:aabbccddeeff00112233445566778899".to_string()));
+        assert!(args.contains(&"/d:contoso.local".to_string()));
+        // hash present → password form must not be emitted
+        assert!(!args.iter().any(|a| a.starts_with("/p:")), "{args:?}");
+    }
+
     #[test]
     fn xfreerdp_hash_precedence() {
         let args = json!({
@@ -674,8 +731,6 @@ mod tests {
         };
         assert_eq!(auth_arg, "/pth:aabbccdd");
     }
-
-    // --- ssh_with_password ---
 
     #[test]
     fn ssh_user_host_format() {
@@ -722,8 +777,6 @@ mod tests {
         });
         assert!(optional_str(&args, "port").is_none());
     }
-
-    // --- secretsdump_kerberos ---
 
     #[test]
     fn secretsdump_kerberos_target_format() {
@@ -783,7 +836,56 @@ mod tests {
         assert!(required_str(&args, "ticket_path").is_err());
     }
 
-    // --- mock executor tests ---
+    #[test]
+    fn secretsdump_kerberos_argv_carries_the_ccache_into_impacket() {
+        let cmd = super::build_secretsdump_kerberos(&json!({
+            "target": "dc01.contoso.local",
+            "username": "dc01$",
+            "domain": "contoso.local",
+            "ticket_path": "/tmp/ares-tickets/dc01$@contoso.local.ccache",
+            "dc_ip": "192.168.58.10",
+            "target_ip": "192.168.58.10",
+            "just_dc_user": "krbtgt",
+            "use_vss": true
+        }))
+        .expect("build");
+        let argv = cmd.args_for_test();
+        assert!(argv.iter().any(|a| a == "-k"), "{argv:?}");
+        assert!(argv.iter().any(|a| a == "-no-pass"), "{argv:?}");
+        assert!(argv.iter().any(|a| a == "-use-vss"), "{argv:?}");
+        assert!(
+            argv.iter()
+                .any(|a| a == "contoso.local/dc01$@dc01.contoso.local"),
+            "{argv:?}"
+        );
+        for pair in [
+            ["-dc-ip", "192.168.58.10"],
+            ["-target-ip", "192.168.58.10"],
+            ["-just-dc-user", "krbtgt"],
+        ] {
+            assert!(argv.windows(2).any(|w| w == pair), "{pair:?} in {argv:?}");
+        }
+        assert_eq!(
+            cmd.env_vars_for_test(),
+            &[(
+                "KRB5CCNAME".to_string(),
+                "/tmp/ares-tickets/dc01$@contoso.local.ccache".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn secretsdump_kerberos_without_a_ticket_never_builds_an_argv() {
+        let built = super::build_secretsdump_kerberos(&json!({
+            "target": "dc01.contoso.local",
+            "username": "dc01$",
+            "domain": "contoso.local"
+        }));
+        let Err(err) = built else {
+            panic!("no ccache means no dump")
+        };
+        assert!(err.to_string().contains("ticket_path"), "{err}");
+    }
 
     use crate::executor::mock;
 

@@ -1,0 +1,82 @@
+# Replay observability stack — reproduces argonaut's `observability` namespace
+# for benchmark replay in the lab account. Versions pinned to argonaut (verified
+# via the Grafana datasources API, 2026-07).
+#
+#   Functional (blue tools query these): grafana, loki, prometheus
+#   Parity-only (no blue tool queries them; present so the stack matches
+#   argonaut and datasources resolve): tempo, mimir, alertmanager
+#
+# NOTE: the prometheus image tag below MUST match
+# `ares-cli/src/benchmark/versions.rs::PROMETHEUS_IMAGE` — capture builds TSDB
+# blocks with that promtool version and mismatched Prometheus can't load them.
+#
+# Per-snapshot data is staged into ./data by setup.sh before `docker compose up`.
+services:
+  loki:
+    image: grafana/loki:3.7.6
+    # Run as root: /loki is a root-owned bind mount (docker/setup.sh create the
+    # empty dirs as root); Loki's default uid 10001 otherwise can't write it.
+    user: "0:0"
+    command: -config.file=/etc/loki/loki-config.yaml
+    ports: ["3100:3100"]
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - ./data/loki:/loki
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.13.2
+    # Run as root: /prometheus is a root-owned bind mount; Prometheus's default
+    # nobody:65534 otherwise can't create its query log / write TSDB blocks.
+    user: "0:0"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Captured TSDB blocks carry their real (historical) attack timestamps.
+      # Without this, Prometheus's default 15d retention reaps them on startup /
+      # compaction whenever a snapshot is replayed >15 days after capture —
+      # silently serving empty metrics. Effectively disable time-based retention.
+      - --storage.tsdb.retention.time=10y
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./data/prometheus:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.1.3
+    ports: ["3000:3000"]
+    environment:
+      # Anonymous admin so the replay runner can POST annotations + read the API
+      # without managing a token on the throwaway box.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./data/grafana/dashboards:/var/lib/grafana/dashboards
+    depends_on: [loki, prometheus]
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:3.0.2
+    command: -config.file=/etc/tempo/tempo.yaml
+    ports: ["3200:3200", "4318:4318"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    restart: unless-stopped
+
+  mimir:
+    image: grafana/mimir:3.1.4
+    command: -config.file=/etc/mimir/mimir.yaml
+    ports: ["9009:9009"]
+    volumes:
+      - ./mimir/mimir.yaml:/etc/mimir/mimir.yaml:ro
+      - ./data/mimir:/data
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.33.1
+    ports: ["9093:9093"]
+    restart: unless-stopped

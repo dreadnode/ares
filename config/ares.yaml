@@ -14,16 +14,28 @@ operation:
   task_dispatch_delay: 1.0
   rate_limit_backoff: 15.0
   rate_limit_threshold: 2
-  # Completion mode (mutually exclusive — enable at most one):
+  # Completion mode — three supported stop conditions. The two flags are
+  # mutually exclusive (enable at most one); leaving both false selects the
+  # third (default) mode. See docs/red.md "Operation Completion" for details.
   #
-  # stop_on_domain_admin: true   — stop immediately on DA (any domain)
-  # stop_on_golden_ticket: true  — stop after golden ticket + all forests dominated
+  #   1. Stop on first DA        — stop_on_domain_admin: true
+  #      Ends the op the instant Domain Admin is achieved on ANY domain
+  #      (evaluate_completion in orchestrator/completion.rs, line ~265).
   #
-  # Default (both false): wait until ALL forest root DCs are secretsdumped.
-  # Child domain DA does NOT count — e.g. child.contoso.local krbtgt
-  # does not satisfy contoso.local; trust escalation must complete first.
-  # See docs/red.md "Operation Completion" for details.
-  # stop_on_domain_admin: true
+  #   2. Stop on first GT        — stop_on_golden_ticket: true
+  #      Ends the op the instant a golden ticket is forged on ANY domain
+  #      (completion.rs line ~268). NOTE: on a multi-domain / multi-forest
+  #      target the first ticket lands on the CHILD domain, so this stops at
+  #      1/N domains by design — pick it only when a single foothold ticket is
+  #      the goal, not full-forest compromise.
+  #
+  #   3. Stop when everything is compromised — both flags false (DEFAULT)
+  #      Runs until ALL forest root DCs are secretsdumped, then a grace period.
+  #      Child-domain DA does NOT count — e.g. child.contoso.local krbtgt does
+  #      not satisfy contoso.local; child→parent trust escalation and every
+  #      trusted forest must complete first. Use this for 3/3 dreadgoad ops.
+  #
+  stop_on_domain_admin: false
   stop_on_golden_ticket: false
 
   # Strategy controls which attack techniques the operator prioritises.
@@ -42,6 +54,14 @@ operation:
   #   asrep_roast, esc1, esc4, esc8, mssql_access, mssql_linked_server,
   #   constrained_delegation, unconstrained_delegation, rbcd, acl_abuse,
   #   credential_reuse, forest_trust_escalation
+  #
+  # Note on forest_trust_escalation: it forges an inter-realm TGT from a trust
+  # key. That lands Enterprise Admins on a child->parent (intra-forest) hop.
+  # Across a forest trust the receiving DC's SID filtering strips the injected
+  # claim and DCSync fails with rpc_s_access_denied, so it does NOT take a
+  # second forest — that requires a credential native to the far forest driving
+  # a native escalation (ADCS ESC13/ESC1/ESC4/ESC8, MSSQL linked servers,
+  # AS-REP roasting, foreign security principals).
   exclude_techniques: []
 
   # If non-empty, ONLY these techniques are allowed (allowlist mode).
@@ -56,6 +76,8 @@ operation:
   # vulnerability_priorities defaults of 10/11 and were effectively starved.
   # ACL is de-dominated to 3 and the MSSQL impersonation/linked-server families
   # are lifted to 3 so all three families compete on a level footing.
+  # `acl_abuse` and `dacl_abuse` are aliases: either spelling sets the priority
+  # for (and can exclude) the ACL driver.
   technique_weights:
     esc1: 1
     esc4: 1
@@ -79,245 +101,115 @@ operation:
   # Queue selection temperature for softmax sampling in the exploitation queue.
   # 0.0 = deterministic argmin (current behaviour). Higher = more spread across
   # near-equal-priority work. Distinct from llm_temperature above.
-  # selection_temperature: 0.0
+  selection_temperature: 0.7
   #
   # Cross-run novelty memory: bias each run away from path prefixes prior runs
   # already walked, so the fleet covers more unique paths.
-  # novelty:
-  #   enabled: false
-  #   scope: per-campaign   # which runs share/reset novelty memory
+  novelty:
+    enabled: true
+    scope: per-campaign   # which runs share/reset novelty memory
   #
   # Randomize the entry foothold per run (cheapest diversity source).
-  # randomize_entry_foothold: false
+  randomize_entry_foothold: true
   #
   # Emit structured per-run path records for coverage measurement (Phase 0).
-  # emit_path_records: false
+  emit_path_records: true
+
+  acl_publish_cap: 200
+
+# Orchestrator behaviour flags. ARES_ORCHESTRATOR_PLANNER and
+# ARES_ORCHESTRATOR_MEDIATION override these at runtime and always win; the
+# resolved value and its source are logged at startup as "Orchestrator flags".
+orchestrator:
+  # Run the LLM planner loop that creates orchestrator_plan tasks. It is the
+  # only producer of orchestrator turns and so the sole caller of
+  # complete_operation — off, the rules are the only scheduler and the op runs
+  # to its cap.
+  planner_enabled: true
+
+  # Let the orchestrator review and veto proposed tasks before dispatch.
+  # Opt-in: an orchestrator that does not rule within the window turns every
+  # proposal into a delayed auto-release.
+  mediation_enabled: false
 
 # Agent configurations
 agents:
   orchestrator:
     model: "gpt-5.2"
     max_steps: 200
-    pod_selector: "app.kubernetes.io/name=ares-orchestrator"
-    # Tools: OrchestratorTools, RedTeamReportingTools
-    # NOTE: Orchestrator NEVER executes tools directly - it dispatches to workers
     tools:
       # Dispatch to worker agents
       - dispatch_recon
       - dispatch_credential_access
-      - dispatch_crack_hash
-      - dispatch_acl_analysis
+      - dispatch_crack
       - dispatch_lateral_movement
       - dispatch_privesc_exploit
-      - start_coercion
-      # Workflow triggers
-      - trigger_credential_expansion
-      - queue_vulnerability_for_exploitation
+      - dispatch_coercion
       # State queries
       - get_pending_tasks
+      - get_agent_status
       - get_all_credentials
       - get_all_hashes
-      - get_exploitation_status
-      - get_agent_status
+      - get_credential_summary
+      - get_hash_summary
       - get_operation_summary
-      # Reporting
-      - broadcast_credential
-      - announce_domain_admin
       - complete_operation
 
   recon:
-    model: "gpt-5.2"
+    # Recon is enumerate-and-emit — mechanical tool dispatch over a known matrix.
+    # gpt-5-mini is ~7x cheaper than gpt-5.2 with negligible quality loss here.
+    model: "gpt-5-mini"
     max_steps: 100
-    pod_selector: "ares.dreadnode.io/role=recon"
+    reasoning_effort: low
     # Provisioned by: ansible/playbooks/ares/recon.yml → dreadnode.nimbus_range.recon_tools
-    capabilities:
-      # Network scanning (apt: nmap)
-      - nmap
-      # LDAP enumeration (apt: ldap-utils)
-      - ldapsearch
-      # SMB enumeration (apt: enum4linux, enum4linux-ng, samba-common-bin)
-      - enum4linux
-      - enum4linux-ng
-      - rpcclient
-      # DNS utilities (apt: dnsutils, whois)
-      - dig
-      - nslookup
-      - whois
-      # AD DNS enumeration (pipx: adidnsdump)
-      - adidnsdump
-      # AD enumeration (pipx: netexec, bloodhound, certipy-ad)
-      - netexec
-      - bloodhound-python
-      - certipy
-      # Impacket enumeration scripts (source: /opt/impacket)
-      - impacket-GetNPUsers
-      - impacket-GetUserSPNs
 
   credential_access:
-    model: "gpt-5.2"
+    # Credential-access mostly picks a tool + target from a known matrix.
+    # gpt-5 is ~29% cheaper than gpt-5.2 and handles this shape well.
+    model: "gpt-5"
     max_steps: 100
-    pod_selector: "ares.dreadnode.io/role=credential_access"
+    reasoning_effort: low
     # Provisioned by: ansible/playbooks/ares/credential_access.yml → dreadnode.nimbus_range.credential_access_tools
-    capabilities:
-      # SMB access (apt: smbclient, samba-common-bin)
-      - smbclient
-      - rpcclient
-      # Password spraying (pipx: sprayhound)
-      - sprayhound
-      # Targeted kerberoasting (git: /opt/targetedKerberoast)
-      - targetedKerberoast
-      # LSASS credential extraction (pipx: lsassy)
-      - lsassy
-      # gMSA password extraction (git: /opt/gMSADumper)
-      - gMSADumper
-      # Impacket credential scripts (source: /opt/impacket)
-      - impacket-GetNPUsers
-      - impacket-GetUserSPNs
-      - impacket-secretsdump
 
   cracker:
-    model: "gpt-5.2"
+    # Cracker dispatches hashcat and parses its output — fire-the-tool loop.
+    # gpt-5-mini is ~7x cheaper and sufficient for this mechanical role.
+    model: "gpt-5-mini"
     max_steps: 150
-    pod_selector: "ares.dreadnode.io/role=cracker"
+    reasoning_effort: low
     # Provisioned by: ansible/playbooks/ares/cracker.yml → dreadnode.nimbus_range.cracking_tools
-    capabilities:
-      # Password cracking (apt: hashcat, john)
-      - hashcat
-      - john
-      # Wordlists (/usr/share/wordlists/)
-      - rockyou
-      - seclists
 
   acl:
     model: "gpt-5.2"
-    max_steps: 150  # ACL analysis requires complex path finding
-    pod_selector: "ares.dreadnode.io/role=acl"
+    max_steps: 150  # ACL enumeration is wide: many edges, each needing a separate primitive
     # Provisioned by: ansible/playbooks/ares/acl_abuse.yml → dreadnode.nimbus_range.acl_tools
-    capabilities:
-      # ACL exploitation framework (apt/pipx: bloodyAD)
-      - bloodyAD
-      # Shadow credentials manipulation (pipx: pywhisker)
-      - pywhisker
-      # Targeted kerberoasting via ACLs (git: /opt/targetedKerberoast)
-      - targetedKerberoast
-      # RPC enumeration (apt: samba-common-bin)
-      - rpcclient
-      # Impacket ACL editing (source: /opt/impacket)
-      - impacket-dacledit
 
   privesc:
     model: "gpt-5.2"
     max_steps: 100
-    pod_selector: "ares.dreadnode.io/role=privesc"
     # Provisioned by: ansible/playbooks/ares/privesc.yml → dreadnode.nimbus_range.privesc_tools
-    capabilities:
-      # ADCS exploitation (pipx: certipy-ad)
-      - certipy
-      # LSASS credential extraction (pipx: lsassy)
-      - lsassy
-      # CVE-2021-42287/CVE-2021-42278 (git: /opt/privesc/noPac → /usr/local/bin/nopac)
-      - nopac
-      # Kerberos relay toolkit (git: /opt/krbrelayx) - includes printerbug, addspn, dnstool
-      - krbrelayx
-      - printerbug
-      - addspn
-      - dnstool
-      # Impacket delegation/ticket/MSSQL scripts (source: /opt/impacket)
-      - impacket-findDelegation
-      - impacket-getST
-      - impacket-getTGT
-      - impacket-rbcd
-      - impacket-addcomputer
-      - impacket-lookupsid
-      - impacket-mssqlclient
-      - impacket-raiseChild
-      - impacket-ticketer
-      - impacket-secretsdump  # S4U → secretsdump chain must complete on same pod
-      - impacket-psexec       # S4U → psexec chain must complete on same pod
-      # Windows potato exploits (/opt/privesc/)
-      - PrintSpoofer          # SeImpersonatePrivilege (binary: PrintSpoofer64.exe)
-      - GodPotato             # SeImpersonatePrivilege (binary: GodPotato-NET4.exe)
-      - SweetPotato           # SeImpersonatePrivilege (source repo)
-      # Kerberos relay local privesc (git: /opt/privesc/KrbRelayUp)
-      - KrbRelayUp
-      # GPO abuse tools
-      - SharpGPOAbuse         # .NET GPO abuse (git: /opt/privesc/SharpGPOAbuse)
-      - pygpoabuse            # Python GPO abuse (pipx)
-      # Windows enumeration (binaries from Ghostpack)
-      - Seatbelt
-      - SharpUp
-      # Run commands as another user (binary: /opt/privesc/RunasCs)
-      - RunasCs
-      # PowerShell privesc scripts (/opt/privesc/)
-      - PowerUp               # PowerUp.ps1
-      - PowerUpSQL            # PowerUpSQL.ps1 (MSSQL enumeration/exploitation)
-      # PEAS enumeration scripts (/opt/privesc/)
-      - winPEAS
-      - linPEAS
-      # CVE exploits
-      - printnightmare        # CVE-2021-1675 (/usr/local/bin/printnightmare)
-      - zerologon             # CVE-2020-1472 (git: /opt/privesc/zerologon)
-      - SCMUACBypass          # UAC bypass (git: /opt/privesc/SCMUACBypass)
 
   lateral:
-    model: "gpt-5.2"
+    # Lateral picks a host + an execution tool from a known matrix.
+    # gpt-5 is ~29% cheaper than gpt-5.2 without sacrificing decision quality.
+    model: "gpt-5"
     max_steps: 300
-    pod_selector: "ares.dreadnode.io/role=lateral"
+    reasoning_effort: low
     # Provisioned by: ansible/playbooks/ares/lateral_movement.yml → dreadnode.nimbus_range.lateral_movement_tools
-    capabilities:
-      # WinRM remote access (gem: evil-winrm)
-      - evil-winrm
-      # RDP pass-the-hash (apt: freerdp2-x11/freerdp3-x11)
-      - xfreerdp
-      # SSH with password (apt: sshpass)
-      - sshpass
-      # SMB file access (apt: smbclient)
-      - smbclient
-      # TCP connection proxying (apt: proxychains4)
-      - proxychains4
-      # Pass-the-Hash toolkit (apt: passing-the-hash)
-      - pth-winexe
-      - pth-smbclient
-      - pth-rpcclient
-      - pth-net
-      - pth-wmic
-      # Pre-connection validation (Ares internal function)
-      - posture_validation  # check_rdp_reachability, check_winrm_reachability
-      # Impacket remote execution scripts (source: /opt/impacket)
-      - impacket-psexec
-      - impacket-wmiexec
-      - impacket-smbexec
-      - impacket-secretsdump
 
   coercion:
-    model: "gpt-5.2"
+    # Coercion is a tight fire-the-coercion-tool loop (responder + relay).
+    # gpt-5-mini is ~7x cheaper than gpt-5.2 and handles this fine.
+    model: "gpt-5-mini"
     max_steps: 30
-    pod_selector: "ares.dreadnode.io/role=coercion"
+    reasoning_effort: low
     # Provisioned by: ansible/playbooks/ares/coercion.yml → dreadnode.nimbus_range.coercion_tools
-    capabilities:
-      # LLMNR/NBT-NS/MDNS poisoning (/usr/sbin/responder)
-      - responder
-      # DHCPv6 poisoning (/usr/bin/mitm6)
-      - mitm6
-      # Authentication coercion framework (/usr/bin/coercer)
-      - coercer
-      # MS-EFSRPC coercion (/usr/local/bin/petitpotam)
-      - petitpotam
-      # DFS coercion (/usr/local/bin/dfscoerce)
-      - dfscoerce
-      # Kerberos relay toolkit (/usr/local/bin/) - includes addspn, dnstool
-      - krbrelayx
-      - printerbug
-      - addspn
-      - dnstool
-      # NTLM relay (/usr/local/bin/impacket-ntlmrelayx)
-      - impacket-ntlmrelayx
 
 # Timeout configurations
 timeouts:
   agent_heartbeat: 180  # seconds - agent considered offline after this
   task_timeout: 300  # seconds - default task timeout
-  operation_timeout: 7200  # seconds - 2 hours max operation time
+  operation_timeout: 3600  # seconds - 1 hour max operation time
   lateral_movement: 180  # seconds
   hash_cracking: 600  # seconds - 10 minutes
   exploitation: 900  # seconds - ACL tasks can take 10+ minutes
@@ -411,9 +303,12 @@ security:
 # Grafana integration (for alerting)
 grafana:
   enabled: true
-  base_url: "${GRAFANA_URL}"
-  api_key: "${GRAFANA_SERVICE_ACCOUNT_TOKEN}"
   dashboard_uid: "ares-redteam"
+
+# Benchmark snapshot storage (BENCHMARK_* / LOKI_S3_*) is deliberately NOT a
+# section here — this file is tracked, and bucket names are account-specific.
+# Set them in .env (untracked, see .env.example). An optional `benchmark:`
+# section is still honoured if you add one locally.
 
 # Observability backends (for blue team log/metric queries)
 # In K8s: use cluster-internal URLs

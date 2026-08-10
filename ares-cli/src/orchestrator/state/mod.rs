@@ -7,17 +7,21 @@
 //! State is loaded from Redis at startup and updated incrementally as results
 //! arrive. Dedup sets are persisted to Redis so they survive orchestrator restarts.
 
+mod canonicalize;
 mod dedup;
 pub mod domain_probe;
 mod inner;
 mod persistence;
-mod publishing;
+pub(crate) mod publishing;
 pub(crate) mod replay;
 mod shared;
 
 // Re-export everything that was publicly visible from the old single file.
-pub use dedup::MAX_EXPLOIT_FAILURES;
-pub use inner::StateInner;
+pub(crate) use canonicalize::{
+    canonicalize_domain_label, is_valid_domain_fqdn, resolve_flat_to_fqdn, resolve_fqdn_to_flat,
+};
+pub use dedup::{MAX_ADCS_UNAUTH_RETRIES, MAX_EXPLOIT_FAILURES};
+pub use inner::{krbtgt_da_path, StateInner};
 pub use shared::SharedState;
 
 pub const DEDUP_CRACK_REQUESTS: &str = "crack_requests";
@@ -61,7 +65,6 @@ pub const DEDUP_DFS_COERCION: &str = "dfs_coercion";
 pub const DEDUP_PETITPOTAM_UNAUTH: &str = "petitpotam_unauth";
 pub const DEDUP_WINRM_LATERAL: &str = "winrm_lateral";
 pub const DEDUP_GROUP_ENUMERATION: &str = "group_enumeration";
-pub const DEDUP_KRBRELAYUP: &str = "krbrelayup";
 pub const DEDUP_SEARCHCONNECTOR: &str = "searchconnector";
 pub const DEDUP_LSASSY_DUMP: &str = "lsassy_dump";
 pub const DEDUP_RDP_LATERAL: &str = "rdp_lateral";
@@ -70,6 +73,7 @@ pub const DEDUP_CERTIPY_AUTH: &str = "certipy_auth";
 pub const DEDUP_SID_ENUMERATION: &str = "sid_enumeration";
 pub const DEDUP_DNS_ENUM: &str = "dns_enum";
 pub const DEDUP_DOMAIN_USER_ENUM: &str = "domain_user_enum";
+pub const DEDUP_LOCAL_AUTH_SWEEP: &str = "local_auth_sweep";
 pub const DEDUP_PTH_SPRAY: &str = "pth_spray";
 pub const DEDUP_CERTIFRIED: &str = "certifried";
 pub const DEDUP_DACL_ABUSE: &str = "dacl_abuse";
@@ -97,6 +101,13 @@ pub const DEDUP_MSSQL_LINK_PIVOT: &str = "mssql_link_pivot";
 /// so the next tick re-attempts up to MAX_IMPERSONATION_ATTEMPTS.
 pub const DEDUP_MSSQL_IMPERSONATION: &str = "mssql_impersonation_auto";
 
+/// Dedup for the far-host OS-cred harvest that fires after
+/// `auto_mssql_link_pivot` confirms sysadmin on a linked SQL host. Keyed
+/// per far-host IP so a single hive-dump attempt covers all the pivot
+/// probes that resolved to the same physical host (multiple source
+/// principals often all confirm sysadmin against the same linked server).
+pub const DEDUP_MSSQL_FAR_HOST_DUMP: &str = "mssql_far_host_dump";
+
 // Assist-abandoned tracking moved off the generic dedup set into a
 // timestamped HashMap on `StateInner` (`assist_abandoned_at`) so the
 // abandonment can expire. See `ASSIST_ABANDONED_TTL_SECS` in
@@ -107,6 +118,13 @@ pub const DEDUP_MSSQL_IMPERSONATION: &str = "mssql_impersonation_auto";
 /// immediately marks `sid_history_<user>` exploited, so re-firing is wasteful.
 pub const DEDUP_SID_HISTORY: &str = "sid_history_enum";
 pub const DEDUP_STALL_COLD_START: &str = "stall_cold_start";
+
+/// Dedup for the `Pwn3d!` admin credit of a principal held only as an NTLM
+/// hash. The credential path dedups on `mark_credentials_admin`'s
+/// `false → true` transition, which a hash-only principal never reaches
+/// because it owns no credential row; this set is that transition's stand-in,
+/// keyed per `{domain}\{username}`.
+pub const DEDUP_ADMIN_HASH_UPGRADE: &str = "admin_hash_upgrade";
 
 /// Vuln queue ZSET key suffix.
 pub const KEY_VULN_QUEUE: &str = "vuln_queue";
@@ -156,7 +174,6 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_PETITPOTAM_UNAUTH,
     DEDUP_WINRM_LATERAL,
     DEDUP_GROUP_ENUMERATION,
-    DEDUP_KRBRELAYUP,
     DEDUP_SEARCHCONNECTOR,
     DEDUP_LSASSY_DUMP,
     DEDUP_RDP_LATERAL,
@@ -166,6 +183,7 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_DNS_ENUM,
     DEDUP_DOMAIN_USER_ENUM,
     DEDUP_PTH_SPRAY,
+    DEDUP_LOCAL_AUTH_SWEEP,
     DEDUP_CERTIFRIED,
     DEDUP_DACL_ABUSE,
     DEDUP_SMBCLIENT_ENUM,
@@ -176,8 +194,10 @@ const ALL_DEDUP_SETS: &[&str] = &[
     DEDUP_MSSQL_RETRY,
     DEDUP_MSSQL_LINK_PIVOT,
     DEDUP_MSSQL_IMPERSONATION,
+    DEDUP_MSSQL_FAR_HOST_DUMP,
     DEDUP_SID_HISTORY,
     DEDUP_STALL_COLD_START,
+    DEDUP_ADMIN_HASH_UPGRADE,
 ];
 
 #[cfg(test)]
@@ -211,7 +231,6 @@ mod tests {
             DEDUP_PETITPOTAM_UNAUTH,
             DEDUP_WINRM_LATERAL,
             DEDUP_GROUP_ENUMERATION,
-            DEDUP_KRBRELAYUP,
             DEDUP_SEARCHCONNECTOR,
             DEDUP_LSASSY_DUMP,
             DEDUP_RDP_LATERAL,

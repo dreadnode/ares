@@ -767,6 +767,78 @@ mod tests {
         assert_eq!(chain[1].username, "krbtgt");
     }
 
+    fn krbtgt_hash(id: &str, domain: &str, hash_type: &str) -> Hash {
+        Hash {
+            id: id.to_string(),
+            username: "krbtgt".to_string(),
+            hash_value: "abc123".to_string(),
+            hash_type: hash_type.to_string(),
+            domain: domain.to_string(),
+            cracked_password: None,
+            source: "dcsync".to_string(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 1,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        }
+    }
+
+    #[test]
+    fn compromised_domains_lists_every_krbtgt_realm() {
+        let mut state = SharedRedTeamState::new("op-multi".to_string());
+        state
+            .all_hashes
+            .push(krbtgt_hash("h1", "contoso.local", "NTLM"));
+        state
+            .all_hashes
+            .push(krbtgt_hash("h2", "child.contoso.local", "NTLM"));
+        state
+            .all_hashes
+            .push(krbtgt_hash("h3", "fabrikam.local", "NTLM"));
+        state
+            .all_hashes
+            .push(krbtgt_hash("h4", "fabrikam.local", "aes256"));
+
+        assert_eq!(
+            state.compromised_domains(),
+            vec!["child.contoso.local", "contoso.local", "fabrikam.local"]
+        );
+    }
+
+    #[test]
+    fn build_domain_admin_chains_covers_all_domains_not_just_first() {
+        let mut state = SharedRedTeamState::new("op-multi-chain".to_string());
+        state
+            .all_hashes
+            .push(krbtgt_hash("h1", "contoso.local", "NTLM"));
+        state
+            .all_hashes
+            .push(krbtgt_hash("h2", "fabrikam.local", "NTLM"));
+
+        let chains = state.build_domain_admin_chains();
+        assert_eq!(
+            chains.len(),
+            2,
+            "a 2-domain compromise must render 2 chains, not 1"
+        );
+        let domains: Vec<&str> = chains.iter().map(|(d, _)| d.as_str()).collect();
+        assert_eq!(domains, vec!["contoso.local", "fabrikam.local"]);
+        for (domain, steps) in &chains {
+            assert!(!steps.is_empty(), "chain for {domain} must have steps");
+        }
+    }
+
+    #[test]
+    fn compromised_domains_empty_without_krbtgt() {
+        let state = SharedRedTeamState::new("op-none".to_string());
+        assert!(state.compromised_domains().is_empty());
+        assert!(state.build_domain_admin_chains().is_empty());
+    }
+
     #[test]
     fn build_domain_admin_chain_case_insensitive_krbtgt() {
         let mut state = SharedRedTeamState::new("op-da-case".to_string());
@@ -915,6 +987,7 @@ pub struct SharedRedTeamState {
     // Vulnerability registry
     pub discovered_vulnerabilities: HashMap<String, VulnerabilityInfo>,
     pub exploited_vulnerabilities: HashSet<String>,
+    pub superseded_vulnerabilities: HashSet<String>,
 
     // Success flags
     pub has_domain_admin: bool,
@@ -967,6 +1040,7 @@ impl SharedRedTeamState {
             all_shares: Vec::new(),
             discovered_vulnerabilities: HashMap::new(),
             exploited_vulnerabilities: HashSet::new(),
+            superseded_vulnerabilities: HashSet::new(),
             has_domain_admin: false,
             has_golden_ticket: false,
             domain_admin_path: None,
@@ -1036,7 +1110,6 @@ impl SharedRedTeamState {
     /// Finds the krbtgt NTLM hash and walks its `parent_id` chain backward.
     /// Returns an empty vec if no krbtgt hash exists or DA was not achieved.
     pub fn build_domain_admin_chain(&self) -> Vec<AttackChainStep> {
-        // Find the krbtgt hash (the DA indicator)
         let krbtgt = self.all_hashes.iter().find(|h| {
             h.username.eq_ignore_ascii_case("krbtgt") && h.hash_type.to_lowercase().contains("ntlm")
         });
@@ -1045,6 +1118,45 @@ impl SharedRedTeamState {
             Some(h) => self.build_attack_chain(&h.id),
             None => Vec::new(),
         }
+    }
+
+    /// Domains whose krbtgt NTLM hash was captured, sorted and deduplicated.
+    ///
+    /// This is the authoritative "how many domains actually fell" answer — a
+    /// krbtgt NTLM row is only written by a real DCSync of that domain.
+    pub fn compromised_domains(&self) -> Vec<String> {
+        let mut domains: Vec<String> = self
+            .all_hashes
+            .iter()
+            .filter(|h| {
+                h.username.eq_ignore_ascii_case("krbtgt")
+                    && h.hash_type.to_lowercase().contains("ntlm")
+                    && !h.domain.is_empty()
+            })
+            .map(|h| h.domain.to_lowercase())
+            .collect();
+        domains.sort();
+        domains.dedup();
+        domains
+    }
+
+    /// Build one credential chain per compromised domain.
+    ///
+    /// [`build_domain_admin_chain`](Self::build_domain_admin_chain) reports only
+    /// the first krbtgt it finds, which rendered a 3-of-3 operation as a single
+    /// domain in the executive summary. Pairs each domain with its own chain.
+    pub fn build_domain_admin_chains(&self) -> Vec<(String, Vec<AttackChainStep>)> {
+        self.compromised_domains()
+            .into_iter()
+            .filter_map(|domain| {
+                let krbtgt = self.all_hashes.iter().find(|h| {
+                    h.username.eq_ignore_ascii_case("krbtgt")
+                        && h.hash_type.to_lowercase().contains("ntlm")
+                        && h.domain.eq_ignore_ascii_case(&domain)
+                })?;
+                Some((domain, self.build_attack_chain(&krbtgt.id)))
+            })
+            .collect()
     }
 
     /// Format an attack chain as an arrow-delimited string.
@@ -1066,11 +1178,7 @@ impl SharedRedTeamState {
                 format!("{}\\{} (password)", step.domain, step.username)
             };
 
-            if !step.source.is_empty() && parts.is_empty() {
-                // First step: show source → credential
-                parts.push(step.source.clone());
-            } else if !step.source.is_empty() {
-                // Subsequent steps: show source before credential
+            if !step.source.is_empty() {
                 parts.push(step.source.clone());
             }
             parts.push(cred_desc);

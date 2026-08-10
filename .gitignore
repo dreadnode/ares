@@ -2,7 +2,6 @@
 target/
 **/*.rs.bk
 *.pdb
-.cargo/config.toml
 
 # Ansible
 .ansible/
@@ -29,9 +28,11 @@ target/
 .secrets.baseline
 
 # Claude Code
-.claude/
+.claude/*
 !.claude/agents/
-!.claude/agents/ares-operator.md
+!.claude/agents/*.md
+!.claude/skills/
+!.claude/skills/**
 
 # Python caches (from dev tools)
 __pycache__/
@@ -45,7 +46,18 @@ __pycache__/
 # direnv
 .envrc
 
+# Benchmark snapshots (local Loki data) — ignore data, keep the replay-stack code
+benchmarks/*
+!benchmarks/replay-stack/
+!benchmarks/holdout.yaml
+benchmarks/replay-stack/data/
+/snapshots*/
+
 # Misc
 TODO
 .tool-versions
 *.parquet
+
+# Captured op snapshots (Loki/traces/state) — runtime observability
+# artifacts, not code. Contain live loot tokens.
+snapshots/

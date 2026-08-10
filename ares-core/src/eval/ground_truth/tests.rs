@@ -59,6 +59,7 @@ fn techniques_for_vuln_type() {
 fn ground_truth_filters() {
     let gt = EvaluationGroundTruth {
         operation_id: "op-1".to_string(),
+        host_aliases: vec![],
         target_ip: "192.168.58.10".to_string(),
         expected_iocs: vec![
             ExpectedIOC {
@@ -133,6 +134,7 @@ fn creates_ground_truth_from_red_state() {
         description: String::new(),
         is_admin: true,
         source: String::new(),
+        member_of: Vec::new(),
     }];
     state.all_credentials = vec![Credential {
         id: String::new(),
@@ -225,6 +227,7 @@ fn create_ground_truth_deduplicates() {
         description: String::new(),
         is_admin: false,
         source: String::new(),
+        member_of: Vec::new(),
     }];
     state.all_credentials = vec![Credential {
         id: String::new(),

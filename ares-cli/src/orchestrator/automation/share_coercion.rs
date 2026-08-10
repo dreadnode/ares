@@ -369,8 +369,6 @@ mod tests {
         }
     }
 
-    // --- collect_share_coercion_work tests ---
-
     #[test]
     fn collect_empty_state_returns_no_work() {
         let state = StateInner::new("test-op".into());

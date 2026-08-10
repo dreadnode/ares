@@ -32,7 +32,24 @@ use ares_core::models::{
 use ares_core::nats::{op_state_filter_for_op, NatsBroker, OP_STATE_STREAM};
 
 use super::inner::StateInner;
+
 use super::SharedState;
+
+fn classify_revocation_strength(
+    source: &str,
+    key: &str,
+    kdc_declared: &mut HashSet<String>,
+    blue_actuated: &mut HashSet<String>,
+) {
+    use crate::orchestrator::blue::simulated_response::BLUE_SIMULATED_SOURCE_PREFIX;
+    use crate::orchestrator::result_processing::containment_recovery::KDC_CLIENT_REVOKED_MARKER;
+    if source.contains(KDC_CLIENT_REVOKED_MARKER) {
+        kdc_declared.insert(key.to_string());
+    }
+    if source.starts_with(BLUE_SIMULATED_SOURCE_PREFIX) {
+        blue_actuated.insert(key.to_string());
+    }
+}
 
 /// Lightweight, serialisable snapshot of operation state reconstructed from
 /// the event log. Used by `ares ops replay`
@@ -49,6 +66,32 @@ pub struct ReplaySnapshot {
     pub users: Vec<User>,
     pub discovered_vulnerabilities: HashMap<String, VulnerabilityInfo>,
     pub exploited_vulnerabilities: HashSet<String>,
+    /// Principals blue revoked, keyed by `user@domain`. Value is the recorded_at
+    /// timestamp of the containment event.
+    pub revoked_principals: HashMap<String, DateTime<Utc>>,
+    /// Hosts blue firewalled, keyed by IP.
+    pub isolated_hosts: HashMap<String, DateTime<Utc>>,
+    /// Realms where blue rotated krbtgt, keyed by lowercase domain.
+    pub krbtgt_rotated_at: HashMap<String, DateTime<Utc>>,
+    /// Certificates blue revoked, keyed by lowercase serial.
+    pub revoked_certificates: HashMap<String, DateTime<Utc>>,
+}
+
+/// Apply one `UserDiscovered` event to a replayed user table.
+///
+/// `publish_user` emits a second event for the same principal when a later
+/// sighting adds group membership, so a blind push would leave two rows for one
+/// user and let the earlier membership-free row shadow the later one in
+/// whichever consumer reads first.
+fn upsert_replayed_user(users: &mut Vec<User>, user: &User) {
+    if let Some(existing) = users.iter_mut().find(|u| {
+        u.username.eq_ignore_ascii_case(&user.username)
+            && u.domain.eq_ignore_ascii_case(&user.domain)
+    }) {
+        existing.merge_member_of(&user.member_of);
+        return;
+    }
+    users.push(user.clone());
 }
 
 impl ReplaySnapshot {
@@ -79,7 +122,7 @@ impl ReplaySnapshot {
                 }
             }
             OpStateEventPayload::UserDiscovered { user } => {
-                self.users.push(user.clone());
+                upsert_replayed_user(&mut self.users, user);
             }
             OpStateEventPayload::VulnDiscovered { vuln } => {
                 self.discovered_vulnerabilities
@@ -87,6 +130,23 @@ impl ReplaySnapshot {
             }
             OpStateEventPayload::VulnExploited { vuln_id, .. } => {
                 self.exploited_vulnerabilities.insert(vuln_id.clone());
+            }
+            OpStateEventPayload::CredentialRevoked {
+                username, domain, ..
+            } => {
+                let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+                self.revoked_principals.insert(key, event.recorded_at);
+            }
+            OpStateEventPayload::HostIsolated { ip, .. } => {
+                self.isolated_hosts.insert(ip.clone(), event.recorded_at);
+            }
+            OpStateEventPayload::KrbtgtRotated { domain, .. } => {
+                self.krbtgt_rotated_at
+                    .insert(domain.to_lowercase(), event.recorded_at);
+            }
+            OpStateEventPayload::CertificateRevoked { serial, .. } => {
+                self.revoked_certificates
+                    .insert(serial.to_lowercase(), event.recorded_at);
             }
             OpStateEventPayload::TimelineEvent { .. } => {}
         }
@@ -215,7 +275,7 @@ pub fn apply_event_to_state(state: &mut StateInner, event: &OpStateEvent) {
             }
         }
         OpStateEventPayload::UserDiscovered { user } => {
-            state.users.push(user.clone());
+            upsert_replayed_user(&mut state.users, user);
         }
         OpStateEventPayload::VulnDiscovered { vuln } => {
             state
@@ -224,6 +284,36 @@ pub fn apply_event_to_state(state: &mut StateInner, event: &OpStateEvent) {
         }
         OpStateEventPayload::VulnExploited { vuln_id, .. } => {
             state.exploited_vulnerabilities.insert(vuln_id.clone());
+        }
+        OpStateEventPayload::CredentialRevoked {
+            username,
+            domain,
+            source,
+            ..
+        } => {
+            let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+            state
+                .revoked_principals
+                .insert(key.clone(), event.recorded_at);
+            classify_revocation_strength(
+                source,
+                &key,
+                &mut state.kdc_declared_revocations,
+                &mut state.blue_actuated_revocations,
+            );
+        }
+        OpStateEventPayload::HostIsolated { ip, .. } => {
+            state.isolated_hosts.insert(ip.clone(), event.recorded_at);
+        }
+        OpStateEventPayload::KrbtgtRotated { domain, .. } => {
+            state
+                .krbtgt_rotated_at
+                .insert(domain.to_lowercase(), event.recorded_at);
+        }
+        OpStateEventPayload::CertificateRevoked { serial, .. } => {
+            state
+                .revoked_certificates
+                .insert(serial.to_lowercase(), event.recorded_at);
         }
         OpStateEventPayload::TimelineEvent { .. } => {
             // Red-team timeline replay is deferred until the timeline entries
@@ -455,11 +545,57 @@ mod tests {
                     description: String::new(),
                     is_admin: false,
                     source: "ldap".into(),
+                    member_of: Vec::new(),
                 },
             },
         );
         assert_eq!(s.users.len(), 1);
         assert_eq!(s.users[0].username, "bob");
+    }
+
+    #[test]
+    fn user_discovered_folds_membership_into_the_replayed_row() {
+        let user = |groups: &[&str]| User {
+            username: "bob".into(),
+            domain: "contoso.local".into(),
+            description: String::new(),
+            is_admin: false,
+            source: "ldap".into(),
+            member_of: groups.iter().map(|g| (*g).to_string()).collect(),
+        };
+
+        let mut s = StateInner::new("op-1".into());
+        apply(
+            &mut s,
+            OpStateEventPayload::UserDiscovered { user: user(&[]) },
+        );
+        apply(
+            &mut s,
+            OpStateEventPayload::UserDiscovered {
+                user: user(&["CN=Cert Publishers,CN=Users,DC=contoso,DC=local"]),
+            },
+        );
+
+        assert_eq!(s.users.len(), 1);
+        assert_eq!(
+            s.users[0].member_of,
+            vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string()]
+        );
+
+        let mut snapshot = ReplaySnapshot::new("op-1");
+        for groups in [
+            vec![],
+            vec!["CN=Domain Admins,CN=Users,DC=contoso,DC=local"],
+        ] {
+            snapshot.apply(&OpStateEvent::new(
+                "op-1",
+                OpStateEventPayload::UserDiscovered {
+                    user: user(&groups),
+                },
+            ));
+        }
+        assert_eq!(snapshot.users.len(), 1);
+        assert_eq!(snapshot.users[0].member_of.len(), 1);
     }
 
     #[test]

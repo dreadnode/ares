@@ -191,15 +191,41 @@ fn extract_credential_key_returns_none_when_username_missing() {
 fn extract_credential_key_lowercases_username_and_domain() {
     let call = ares_llm::ToolCall {
         id: "1".into(),
-        name: "password_spray".into(),
+        name: "secretsdump".into(),
         arguments: serde_json::json!({
             "username": "Administrator",
             "domain": "CONTOSO.LOCAL",
-            "passwords": ["P@ss"]
+            "target": "192.168.58.10"
         }),
     };
     let key = extract_credential_key(&call).expect("key extracted");
     assert_eq!(key, "administrator@contoso.local");
+}
+
+/// `password_spray` is listed in `AUTH_BEARING_TOOLS`, but its schema is
+/// `{target, domain, users_file, password, use_common_passwords}` — there is
+/// no `username`, so the throttle can never key it and never fires.
+///
+/// This previously read as throttled because the test fed it an invented
+/// `{username, domain, passwords}` shape the tool does not accept. Spray
+/// lockout is bounded by the per-account password cap in ares-tools instead;
+/// if that ever moves back here, this test is the tripwire.
+#[test]
+fn extract_credential_key_is_none_for_a_real_password_spray_call() {
+    let call = ares_llm::ToolCall {
+        id: "1".into(),
+        name: "password_spray".into(),
+        arguments: serde_json::json!({
+            "target": "192.168.58.10",
+            "domain": "contoso.local",
+            "users_file": "/tmp/users.txt",
+            "use_common_passwords": true
+        }),
+    };
+    assert!(
+        extract_credential_key(&call).is_none(),
+        "spray has no username arg — the throttle cannot key it"
+    );
 }
 
 #[test]
@@ -590,12 +616,12 @@ fn dispatch_error_result_handles_anyhow_errors() {
 #[test]
 fn dispatch_timeout_result_renders_seconds() {
     use redis_dispatcher::dispatch_timeout_result;
-    let r = dispatch_timeout_result("hashcat", std::time::Duration::from_secs(1500));
+    let r = dispatch_timeout_result("hashcat", std::time::Duration::from_secs(5700));
     assert_eq!(r.output, "");
     assert!(r.discoveries.is_none());
     let err = r.error.as_deref().unwrap();
     assert!(err.contains("hashcat"));
-    assert!(err.contains("1500s"));
+    assert!(err.contains("5700s"));
     assert!(err.contains("timed out"));
 }
 
@@ -607,9 +633,59 @@ fn dispatch_timeout_result_zero_seconds_still_well_formed() {
 }
 
 #[test]
-fn default_tool_timeout_is_25_minutes() {
-    // 1500s = 25min — must exceed worst-case hashcat queue + run time.
-    assert_eq!(DEFAULT_TOOL_TIMEOUT_SECS, 25 * 60);
+fn dispatch_status_error_is_none_for_a_clean_result() {
+    use redis_dispatcher::dispatch_status_error;
+    let ok = Ok(ares_llm::ToolExecResult {
+        output: "5 hosts up".into(),
+        error: None,
+        discoveries: None,
+        failure_kind: None,
+    });
+    assert!(dispatch_status_error(&ok).is_none());
+}
+
+#[test]
+fn dispatch_status_error_surfaces_the_timeout_path() {
+    use redis_dispatcher::{dispatch_status_error, dispatch_timeout_result};
+    let timed_out = Ok(dispatch_timeout_result(
+        "hashcat",
+        std::time::Duration::from_secs(5700),
+    ));
+    let status = dispatch_status_error(&timed_out).expect("timeout must mark the span failed");
+    assert!(status.contains("timed out"), "{status}");
+    assert!(status.contains("5700s"), "{status}");
+}
+
+#[test]
+fn dispatch_status_error_surfaces_transport_and_tool_failures() {
+    use redis_dispatcher::{dispatch_error_result, dispatch_status_error};
+    let transport = Ok(dispatch_error_result("certipy", "no responders available"));
+    assert!(dispatch_status_error(&transport)
+        .expect("transport failure must mark the span failed")
+        .contains("no responders available"));
+
+    let tool_error = Ok(ares_llm::ToolExecResult {
+        output: String::new(),
+        error: Some("tool exited with code Some(1)".into()),
+        discoveries: None,
+        failure_kind: Some(ares_llm::ToolFailureKind::ToolError),
+    });
+    assert_eq!(
+        dispatch_status_error(&tool_error).as_deref(),
+        Some("tool exited with code Some(1)")
+    );
+
+    let deserialize_failure: anyhow::Result<ares_llm::ToolExecResult> =
+        Err(anyhow::anyhow!("Failed to deserialize tool exec response"));
+    assert!(dispatch_status_error(&deserialize_failure)
+        .expect("Err must mark the span failed")
+        .contains("Failed to deserialize"));
+}
+
+#[test]
+fn default_tool_timeout_is_95_minutes() {
+    // 5700s = 95min — must exceed worst-case AES hashcat queue + run time.
+    assert_eq!(DEFAULT_TOOL_TIMEOUT_SECS, 95 * 60);
 }
 
 #[test]
@@ -682,11 +758,13 @@ fn tool_exec_result_from_response_passes_through_all_fields() {
         output: "out".into(),
         error: None,
         discoveries: Some(serde_json::json!({"hosts": [{"ip": "192.168.58.10"}]})),
+        failure_kind: None,
     };
     let r = tool_exec_result_from_response(resp);
     assert_eq!(r.output, "out");
     assert!(r.error.is_none());
     assert_eq!(r.discoveries.unwrap()["hosts"][0]["ip"], "192.168.58.10");
+    assert!(r.failure_kind.is_none());
 }
 
 #[test]
@@ -697,8 +775,31 @@ fn tool_exec_result_from_response_preserves_error_string() {
         output: String::new(),
         error: Some("connection refused".into()),
         discoveries: None,
+        failure_kind: None,
     };
     let r = tool_exec_result_from_response(resp);
     assert_eq!(r.error.as_deref(), Some("connection refused"));
     assert!(r.discoveries.is_none());
+}
+
+#[test]
+fn tool_exec_result_from_response_preserves_failure_kind() {
+    // Locks the plumbing: the runner's pruning check keys off
+    // `ToolExecResult.failure_kind`, which is populated *only* by this
+    // Response→Result bridge. If this ever silently drops the field,
+    // ENOENT pruning falls back to string matching for every worker
+    // reply and the whole point of the typed enum is lost.
+    use redis_dispatcher::tool_exec_result_from_response;
+    let resp = ToolExecResponse {
+        call_id: "c".into(),
+        output: String::new(),
+        error: Some("failed to spawn 'nmap' — is it installed?".into()),
+        discoveries: None,
+        failure_kind: Some(ares_llm::ToolFailureKind::BinaryNotFound),
+    };
+    let r = tool_exec_result_from_response(resp);
+    assert_eq!(
+        r.failure_kind,
+        Some(ares_llm::ToolFailureKind::BinaryNotFound)
+    );
 }

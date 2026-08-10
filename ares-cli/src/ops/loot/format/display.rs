@@ -3,8 +3,96 @@ use std::collections::{HashMap, HashSet};
 use ares_core::models::{Credential, Hash, SharedRedTeamState, VulnerabilityInfo};
 
 use super::format_duration;
-use super::hosts::{clean_os_string, dedup_hosts, is_real_service};
-use crate::dedup::{dedup_credentials, dedup_hashes, dedup_users, normalize_source_label};
+use super::hosts::{clean_os_string, dedup_hosts, hostname_by_ip, is_real_service};
+use crate::dedup::{
+    dedup_credentials, dedup_hashes, dedup_users, looks_like_workgroup_pseudo_domain,
+    normalize_source_label,
+};
+use crate::orchestrator::exploitation::NO_EXECUTION_PRIMITIVE_VULN_TYPES;
+
+/// Draw the DA/GT achievement banner box. Shared by `print_loot_human` and
+/// `print_runtime_summary` so both views render identically.
+fn print_achievement_banner(
+    state: &SharedRedTeamState,
+    achievements: &HashMap<String, DomainAchievement>,
+    total_domains: usize,
+) {
+    if !(state.has_domain_admin || state.has_golden_ticket) {
+        return;
+    }
+    let mut lines = Vec::new();
+    if state.has_domain_admin {
+        let da_count = achievements.values().filter(|a| a.has_da).count();
+        if total_domains > 0 {
+            lines.push(format!(
+                "\u{2605} DOMAIN ADMIN ACHIEVED ({da_count}/{total_domains} domains)"
+            ));
+        } else {
+            lines.push("\u{2605} DOMAIN ADMIN ACHIEVED".to_string());
+        }
+        if let Some(path) = &state.domain_admin_path {
+            lines.push(format!("  path: {path}"));
+        }
+    }
+    if state.has_golden_ticket {
+        let gt_count = achievements
+            .values()
+            .filter(|a| a.has_golden_ticket)
+            .count();
+        if total_domains > 0 {
+            lines.push(format!(
+                "\u{2605} GOLDEN TICKET OBTAINED ({gt_count}/{total_domains} domains)"
+            ));
+        } else {
+            lines.push("\u{2605} GOLDEN TICKET OBTAINED".to_string());
+        }
+    }
+    let inner_width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 2;
+    println!("\u{250c}{}\u{2510}", "\u{2500}".repeat(inner_width));
+    for line in &lines {
+        println!(
+            "\u{2502} {:<width$} \u{2502}",
+            line,
+            width = inner_width - 2
+        );
+    }
+    println!("\u{2514}{}\u{2518}", "\u{2500}".repeat(inner_width));
+    println!();
+}
+
+/// Print the forest/child domain tree with per-domain achievement markers.
+/// Shared by `print_loot_human` and `print_runtime_summary`.
+fn print_domain_tree(
+    forest_roots: &[String],
+    child_domains: &HashMap<String, String>,
+    achievements: &HashMap<String, DomainAchievement>,
+) {
+    let mut displayed = HashSet::new();
+    for root in forest_roots {
+        print_domain_line(root, "(forest root)", "  ", achievements);
+        displayed.insert(root.clone());
+        let mut children: Vec<_> = child_domains
+            .iter()
+            .filter(|(_, parent)| *parent == root)
+            .map(|(child, _)| child.clone())
+            .collect();
+        children.sort();
+        for child in &children {
+            print_domain_line(child, "(child)", "    \u{2514}\u{2500} ", achievements);
+            displayed.insert(child.clone());
+        }
+    }
+    // Any achievement domains not in the discovered domain list.
+    let mut extra: Vec<_> = achievements
+        .keys()
+        .filter(|d| !displayed.contains(*d))
+        .cloned()
+        .collect();
+    extra.sort();
+    for domain in &extra {
+        print_domain_line(domain, "", "  ", achievements);
+    }
+}
 
 pub(super) fn print_loot_human(
     state: &SharedRedTeamState,
@@ -36,47 +124,7 @@ pub(super) fn print_loot_human(
         .count();
     let compromised_forests_count = count_compromised_forests(&topology, &achievements);
 
-    if state.has_domain_admin || state.has_golden_ticket {
-        let mut lines = Vec::new();
-        let total_domains = domains.len();
-        if state.has_domain_admin {
-            let da_count = achievements.values().filter(|a| a.has_da).count();
-            if total_domains > 0 {
-                lines.push(format!(
-                    "\u{2605} DOMAIN ADMIN ACHIEVED ({da_count}/{total_domains} domains)"
-                ));
-            } else {
-                lines.push("\u{2605} DOMAIN ADMIN ACHIEVED".to_string());
-            }
-            if let Some(path) = &state.domain_admin_path {
-                lines.push(format!("  path: {path}"));
-            }
-        }
-        if state.has_golden_ticket {
-            let gt_count = achievements
-                .values()
-                .filter(|a| a.has_golden_ticket)
-                .count();
-            if total_domains > 0 {
-                lines.push(format!(
-                    "\u{2605} GOLDEN TICKET OBTAINED ({gt_count}/{total_domains} domains)"
-                ));
-            } else {
-                lines.push("\u{2605} GOLDEN TICKET OBTAINED".to_string());
-            }
-        }
-        let inner_width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 2;
-        println!("\u{250c}{}\u{2510}", "\u{2500}".repeat(inner_width));
-        for line in &lines {
-            println!(
-                "\u{2502} {:<width$} \u{2502}",
-                line,
-                width = inner_width - 2
-            );
-        }
-        println!("\u{2514}{}\u{2518}", "\u{2500}".repeat(inner_width));
-        println!();
-    }
+    print_achievement_banner(state, &achievements, domains.len());
 
     if domains.is_empty() {
         println!("Domains: None");
@@ -88,31 +136,7 @@ pub(super) fn print_loot_human(
             compromised_forests_count,
             forest_roots.len()
         );
-        let mut displayed = HashSet::new();
-        for root in forest_roots {
-            print_domain_line(root, "(forest root)", "  ", &achievements);
-            displayed.insert(root.clone());
-            let mut children: Vec<_> = child_domains
-                .iter()
-                .filter(|(_, parent)| *parent == root)
-                .map(|(child, _)| child.clone())
-                .collect();
-            children.sort();
-            for child in &children {
-                print_domain_line(child, "(child)", "    \u{2514}\u{2500} ", &achievements);
-                displayed.insert(child.clone());
-            }
-        }
-        // Any achievement domains not in the discovered domain list
-        let mut extra: Vec<_> = achievements
-            .keys()
-            .filter(|d| !displayed.contains(*d))
-            .cloned()
-            .collect();
-        extra.sort();
-        for domain in &extra {
-            print_domain_line(domain, "", "  ", &achievements);
-        }
+        print_domain_tree(forest_roots, child_domains, &achievements);
     }
     println!();
 
@@ -211,11 +235,7 @@ pub(super) fn print_loot_human(
         let users = &users_by_source[src];
         println!("  [{src}] ({})", users.len());
         for user in users {
-            let prefix = if user.domain.is_empty() {
-                user.username.clone()
-            } else {
-                format!("{}\\{}", user.domain, user.username)
-            };
+            let prefix = format_principal(&user.domain, &user.username);
             let suffix = if user.is_admin { " (admin)" } else { "" };
             println!("    - {prefix}{suffix}");
         }
@@ -225,24 +245,21 @@ pub(super) fn print_loot_human(
     let unique_creds = dedup_credentials(credentials);
     println!("Credentials ({}):", unique_creds.len());
     for cred in &unique_creds {
-        let prefix = if cred.domain.is_empty() {
-            cred.username.clone()
-        } else {
-            format!("{}\\{}", cred.domain, cred.username)
-        };
+        let prefix = format_principal(&cred.domain, &cred.username);
         let suffix = if cred.is_admin { " (admin)" } else { "" };
-        println!("  - {prefix}:{}{suffix}", cred.password);
+        let origin = if cred.source.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", normalize_source_label(&cred.source))
+        };
+        println!("  - {prefix}:{}{suffix}{origin}", cred.password);
     }
     println!();
 
     let unique_hashes = dedup_hashes(hashes);
     println!("Hashes ({}):", unique_hashes.len());
     for h in &unique_hashes {
-        let prefix = if h.domain.is_empty() {
-            h.username.clone()
-        } else {
-            format!("{}\\{}", h.domain, h.username)
-        };
+        let prefix = format_principal(&h.domain, &h.username);
         println!("  - {prefix}:{}:{}", h.hash_type, h.hash_value);
     }
     println!();
@@ -265,11 +282,13 @@ pub(super) fn print_loot_human(
     print_vulnerabilities(
         &state.discovered_vulnerabilities,
         &state.exploited_vulnerabilities,
+        &hostname_by_ip(&merged_hosts),
     );
 
     print_token_coverage(
         &state.discovered_vulnerabilities,
         &state.exploited_vulnerabilities,
+        &state.superseded_vulnerabilities,
     );
 
     print_attack_path(&state.all_timeline_events);
@@ -331,47 +350,7 @@ pub(super) fn print_runtime_summary(
         .count();
     let compromised_forests_count = count_compromised_forests(&topology, &achievements);
 
-    if state.has_domain_admin || state.has_golden_ticket {
-        let mut lines = Vec::new();
-        let total_domains = domains.len();
-        if state.has_domain_admin {
-            let da_count = achievements.values().filter(|a| a.has_da).count();
-            if total_domains > 0 {
-                lines.push(format!(
-                    "\u{2605} DOMAIN ADMIN ACHIEVED ({da_count}/{total_domains} domains)"
-                ));
-            } else {
-                lines.push("\u{2605} DOMAIN ADMIN ACHIEVED".to_string());
-            }
-            if let Some(path) = &state.domain_admin_path {
-                lines.push(format!("  path: {path}"));
-            }
-        }
-        if state.has_golden_ticket {
-            let gt_count = achievements
-                .values()
-                .filter(|a| a.has_golden_ticket)
-                .count();
-            if total_domains > 0 {
-                lines.push(format!(
-                    "\u{2605} GOLDEN TICKET OBTAINED ({gt_count}/{total_domains} domains)"
-                ));
-            } else {
-                lines.push("\u{2605} GOLDEN TICKET OBTAINED".to_string());
-            }
-        }
-        let inner_width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 2;
-        println!("\u{250c}{}\u{2510}", "\u{2500}".repeat(inner_width));
-        for line in &lines {
-            println!(
-                "\u{2502} {:<width$} \u{2502}",
-                line,
-                width = inner_width - 2
-            );
-        }
-        println!("\u{2514}{}\u{2518}", "\u{2500}".repeat(inner_width));
-        println!();
-    }
+    print_achievement_banner(state, &achievements, domains.len());
 
     if !domains.is_empty() {
         println!(
@@ -381,30 +360,7 @@ pub(super) fn print_runtime_summary(
             compromised_forests_count,
             forest_roots.len()
         );
-        let mut displayed = HashSet::new();
-        for root in forest_roots {
-            print_domain_line(root, "(forest root)", "  ", &achievements);
-            displayed.insert(root.clone());
-            let mut children: Vec<_> = child_domains
-                .iter()
-                .filter(|(_, parent)| *parent == root)
-                .map(|(child, _)| child.clone())
-                .collect();
-            children.sort();
-            for child in &children {
-                print_domain_line(child, "(child)", "    \u{2514}\u{2500} ", &achievements);
-                displayed.insert(child.clone());
-            }
-        }
-        let mut extra: Vec<_> = achievements
-            .keys()
-            .filter(|d| !displayed.contains(*d))
-            .cloned()
-            .collect();
-        extra.sort();
-        for domain in &extra {
-            print_domain_line(domain, "", "  ", &achievements);
-        }
+        print_domain_tree(forest_roots, child_domains, &achievements);
     }
 
     let merged_hosts = dedup_hosts(
@@ -420,11 +376,29 @@ pub(super) fn print_runtime_summary(
 /// as actively exploitable rather than an informational finding.
 const EXPLOITABLE_PRIORITY_MAX: i32 = 3;
 
-/// Print vulnerabilities split into two tables: actively exploitable
-/// (priority <= EXPLOITABLE_PRIORITY_MAX) and informational findings (rest).
+/// Whether a vulnerability names a capability ares has no execution primitive
+/// for and never will (see `NO_EXECUTION_PRIMITIVE_VULN_TYPES`). Renders under
+/// its own table so the operator can distinguish "observed but permanently
+/// undispatchable" from "priority-deferred finding".
+pub(super) fn is_not_exploitable_by_construction(vuln: &VulnerabilityInfo) -> bool {
+    NO_EXECUTION_PRIMITIVE_VULN_TYPES.contains(&vuln.vuln_type.to_lowercase().as_str())
+}
+
+/// Whether a vulnerability is actively exploitable rather than an informational
+/// finding. Shared with `super::vulnerability_counts` so the `ops runtime`
+/// headline and the `ops loot` tables can never disagree on the split.
+pub(super) fn is_exploitable(vuln: &VulnerabilityInfo) -> bool {
+    !is_not_exploitable_by_construction(vuln) && vuln.priority <= EXPLOITABLE_PRIORITY_MAX
+}
+
+/// Print vulnerabilities split into three tables: actively exploitable
+/// (priority <= EXPLOITABLE_PRIORITY_MAX), informational findings (rest by
+/// priority), and observed-but-not-exploitable-by-construction (vuln_type in
+/// `NO_EXECUTION_PRIMITIVE_VULN_TYPES`, regardless of priority).
 fn print_vulnerabilities(
     discovered: &HashMap<String, VulnerabilityInfo>,
     exploited: &HashSet<String>,
+    hostnames: &HashMap<String, String>,
 ) {
     if discovered.is_empty() {
         return;
@@ -432,8 +406,11 @@ fn print_vulnerabilities(
 
     let mut exploitable: Vec<(&String, &VulnerabilityInfo)> = Vec::new();
     let mut findings: Vec<(&String, &VulnerabilityInfo)> = Vec::new();
+    let mut not_exploitable: Vec<(&String, &VulnerabilityInfo)> = Vec::new();
     for (id, vuln) in discovered.iter() {
-        if vuln.priority <= EXPLOITABLE_PRIORITY_MAX {
+        if is_not_exploitable_by_construction(vuln) {
+            not_exploitable.push((id, vuln));
+        } else if is_exploitable(vuln) {
             exploitable.push((id, vuln));
         } else {
             findings.push((id, vuln));
@@ -448,6 +425,7 @@ fn print_vulnerabilities(
     };
     sort_vulns(&mut exploitable);
     sort_vulns(&mut findings);
+    sort_vulns(&mut not_exploitable);
 
     let exploited_in_exploitable = exploitable
         .iter()
@@ -462,15 +440,21 @@ fn print_vulnerabilities(
     if exploitable.is_empty() {
         println!("  (none)");
     } else {
-        print_vuln_table(&exploitable, exploited);
+        print_vuln_table(&exploitable, exploited, hostnames);
     }
     println!();
 
     println!("Findings ({}):", findings.len());
     if !findings.is_empty() {
-        print_vuln_table(&findings, exploited);
+        print_vuln_table(&findings, exploited, hostnames);
     }
     println!();
+
+    if !not_exploitable.is_empty() {
+        println!("Observed but not exploitable ({}):", not_exploitable.len());
+        print_vuln_table(&not_exploitable, exploited, hostnames);
+        println!();
+    }
 }
 
 /// Render a scoreboard-aligned token coverage table:
@@ -588,9 +572,15 @@ pub(super) struct TokenCoverageRow {
 /// emitted golden ticket entries) render with `discovered=0, exploited>0` and
 /// status `"\u{2713}"` — implicit-token semantics. Categories are sorted
 /// alphabetically.
+///
+/// IDs in `superseded` are present in `exploited` but were credited by another
+/// path rather than proven, so they do not raise the exploited count. Their
+/// category still gets a row — a technique reached only by supersession is
+/// unproven, not absent.
 pub(super) fn compute_token_coverage_rows(
     discovered: &HashMap<String, VulnerabilityInfo>,
     exploited: &HashSet<String>,
+    superseded: &HashSet<String>,
 ) -> Vec<TokenCoverageRow> {
     let mut discovered_by_cat: std::collections::BTreeMap<String, usize> =
         std::collections::BTreeMap::new();
@@ -603,7 +593,10 @@ pub(super) fn compute_token_coverage_rows(
     }
     for id in exploited {
         let cat = token_category(id);
-        *exploited_by_cat.entry(cat).or_default() += 1;
+        let counter = exploited_by_cat.entry(cat).or_default();
+        if !superseded.contains(id) {
+            *counter += 1;
+        }
     }
 
     let mut categories: Vec<&String> = discovered_by_cat.keys().collect();
@@ -641,12 +634,13 @@ pub(super) fn compute_token_coverage_rows(
 fn print_token_coverage(
     discovered: &HashMap<String, VulnerabilityInfo>,
     exploited: &HashSet<String>,
+    superseded: &HashSet<String>,
 ) {
     if discovered.is_empty() && exploited.is_empty() {
         return;
     }
 
-    let rows = compute_token_coverage_rows(discovered, exploited);
+    let rows = compute_token_coverage_rows(discovered, exploited, superseded);
 
     println!(
         "Token Coverage ({} categories observed, scoreboard alignment):",
@@ -729,7 +723,10 @@ pub(super) fn token_category(vuln_id: &str) -> String {
         "sid_history",
         "asrep_roast",
         "seimpersonate",
+        "printnightmare",
+        "zerologon",
         "kerberoast",
+        "nopac",
         "ntlmv1",
         "gpo_abuse",
         "gpo",
@@ -761,30 +758,58 @@ pub(super) fn token_category(vuln_id: &str) -> String {
 }
 
 /// Render a single vulnerability table body (header + rows).
-fn print_vuln_table(vulns: &[(&String, &VulnerabilityInfo)], exploited: &HashSet<String>) {
+/// Render a `DOMAIN\username` principal, or the bare username when the domain
+/// is empty.
+fn format_principal(domain: &str, username: &str) -> String {
+    if domain.is_empty() {
+        username.to_string()
+    } else {
+        format!("{domain}\\{username}")
+    }
+}
+
+/// Truncate `s` to at most `max` bytes on a char boundary, appending `...` when
+/// it was shortened. Returns the string unchanged when already within `max`.
+fn truncate_on_boundary(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
+fn format_vuln_target(target: &str, hostnames: &HashMap<String, String>) -> String {
+    let trimmed = target.trim();
+    match hostnames.get(trimmed) {
+        Some(hostname) if !hostname.is_empty() => format!("{hostname} ({trimmed})"),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn print_vuln_table(
+    vulns: &[(&String, &VulnerabilityInfo)],
+    exploited: &HashSet<String>,
+    hostnames: &HashMap<String, String>,
+) {
     println!(
-        "  {:<30} {:<20} {:>8} {:>9}  Details",
+        "  {:<30} {:<46} {:>8} {:>9}  Details",
         "Type", "Target", "Priority", "Exploited"
     );
-    println!("  {}", "-".repeat(100));
+    println!("  {}", "-".repeat(126));
     for (vuln_id, vuln) in vulns {
         let is_exploited = exploited.contains(*vuln_id);
         let exploited_mark = if is_exploited { "\u{2713}" } else { "\u{2717}" };
 
         let details = format_vuln_details(&vuln.details);
-        let details_display = if details.len() > 80 {
-            let mut end = 80;
-            while !details.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}...", &details[..end])
-        } else {
-            details
-        };
+        let details_display = truncate_on_boundary(&details, 80);
+        let target_display = truncate_on_boundary(&format_vuln_target(&vuln.target, hostnames), 43);
 
         println!(
-            "  {:<30} {:<20} {:>8} {:>9}  {}",
-            vuln.vuln_type, vuln.target, vuln.priority, exploited_mark, details_display
+            "  {:<30} {:<46} {:>8} {:>9}  {}",
+            vuln.vuln_type, target_display, vuln.priority, exploited_mark, details_display
         );
     }
 }
@@ -794,6 +819,16 @@ fn format_vuln_details(details: &HashMap<String, serde_json::Value>) -> String {
     if details.is_empty() {
         return String::new();
     }
+    // Stringify a JSON value and render `Key: value`, skipping empty/null values.
+    let format_kv = |key: &str, val: &serde_json::Value| -> Option<String> {
+        let val_str = match val {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        (!val_str.is_empty() && val_str != "null")
+            .then(|| format!("{}: {}", capitalize(key), val_str))
+    };
+
     let mut parts = Vec::new();
     let priority_keys = [
         "hostname",
@@ -806,15 +841,9 @@ fn format_vuln_details(details: &HashMap<String, serde_json::Value>) -> String {
     ];
     let mut seen = HashSet::new();
     for key in &priority_keys {
-        if let Some(val) = details.get(*key) {
-            let val_str = match val {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            if !val_str.is_empty() && val_str != "null" {
-                parts.push(format!("{}: {}", capitalize(key), val_str));
-                seen.insert(*key);
-            }
+        if let Some(part) = details.get(*key).and_then(|val| format_kv(key, val)) {
+            parts.push(part);
+            seen.insert(*key);
         }
     }
     let mut remaining: Vec<_> = details
@@ -823,14 +852,8 @@ fn format_vuln_details(details: &HashMap<String, serde_json::Value>) -> String {
         .collect();
     remaining.sort();
     for key in remaining {
-        if let Some(val) = details.get(key) {
-            let val_str = match val {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            if !val_str.is_empty() && val_str != "null" {
-                parts.push(format!("{}: {}", capitalize(key), val_str));
-            }
+        if let Some(part) = details.get(key).and_then(|val| format_kv(key, val)) {
+            parts.push(part);
         }
     }
     parts.join("; ")
@@ -882,15 +905,7 @@ fn print_attack_path(timeline_events: &[serde_json::Value]) {
 
         let mitre = extract_mitre_from_event(event);
 
-        let desc_display = if description.len() > 65 {
-            let mut end = 65;
-            while !description.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{prefix}{}...", &description[..end])
-        } else {
-            format!("{prefix}{description}")
-        };
+        let desc_display = format!("{prefix}{}", truncate_on_boundary(description, 65));
 
         println!("  {:<23} {:<70} {}", ts_display, desc_display, mitre);
     }
@@ -899,15 +914,12 @@ fn print_attack_path(timeline_events: &[serde_json::Value]) {
 
 /// Format a timeline timestamp for display.
 fn format_timeline_timestamp(ts: &str) -> String {
-    // Try to parse as RFC3339 and reformat
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
         return dt.format("%Y-%m-%d %H:%M:%S").to_string();
     }
-    // Try common variants
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S%.f") {
         return dt.format("%Y-%m-%d %H:%M:%S").to_string();
     }
-    // Return as-is, truncated
     if ts.len() > 23 {
         ts[..23].to_string()
     } else {
@@ -983,33 +995,29 @@ fn resolve_domain_fqdn(domain: &str, netbios_to_fqdn: &HashMap<String, String>) 
     lower
 }
 
-/// Defensive filter for domains that originated from a Windows workgroup or
-/// auto-generated computer name rather than a real Kerberos realm.
+/// Canonicalise a raw `state.all_domains` list for topology and headline
+/// counting: resolve NetBIOS short names to their FQDN, drop empties and
+/// workgroup/computer-name pseudo-domains, then sort + dedup.
 ///
-/// Upstream parsers (`smb.rs`, `output_extraction::users`) drop these at
-/// ingest, but old loot already in state may still carry them. Without this
-/// filter, a stray `krbtgt@win-xxx.wgrp.local` row would flip the pseudo-domain
-/// to "compromised" in the achievements rollup.
-///
-/// Heuristic operates on a single domain string (no `(name:...)` context here):
-/// matches literal `WORKGROUP`/`MSHOME`, and the Windows default computer-name
-/// prefix `WIN-` followed by 11 alphanumerics as the first label.
-fn looks_like_workgroup_pseudo_domain(domain: &str) -> bool {
-    let domain = domain.trim().trim_end_matches('.');
-    if domain.is_empty() {
-        return false;
-    }
-    if domain.eq_ignore_ascii_case("WORKGROUP") || domain.eq_ignore_ascii_case("MSHOME") {
-        return true;
-    }
-    let first_label = domain.split('.').next().unwrap_or("");
-    if first_label.len() == 15 && first_label[..4].eq_ignore_ascii_case("WIN-") {
-        let suffix = &first_label[4..];
-        if suffix.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            return true;
-        }
-    }
-    false
+/// Applied before `compute_forest_topology` so the `(N/M domains, X/Y forests)`
+/// denominators use the same FQDN-resolved, pseudo-filtered set as the
+/// compromised-domain numerator in `build_domain_achievements`. Without it a
+/// stray host-FQDN suffix or a NetBIOS duplicate that survived
+/// `normalize_state_domains` counts toward the totals but can never count as
+/// compromised, inflating the banner (e.g. `1/4 domains, 1/3 forests` against a
+/// 3-domain / 2-forest target).
+pub(super) fn canonicalize_display_domains(
+    domains: &[String],
+    netbios_to_fqdn: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = domains
+        .iter()
+        .map(|d| resolve_domain_fqdn(d, netbios_to_fqdn))
+        .filter(|d| !d.is_empty() && !looks_like_workgroup_pseudo_domain(d))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Per-domain achievement status.
@@ -1029,7 +1037,6 @@ pub(super) fn build_domain_achievements(
 ) -> HashMap<String, DomainAchievement> {
     let mut achievements: HashMap<String, DomainAchievement> = HashMap::new();
 
-    // krbtgt hashes indicate DA for that domain
     for h in hashes {
         if h.username.eq_ignore_ascii_case("krbtgt") {
             let domain = resolve_domain_fqdn(&h.domain, &state.netbios_to_fqdn);
@@ -1044,7 +1051,6 @@ pub(super) fn build_domain_achievements(
         }
     }
 
-    // golden_ticket vulnerabilities
     for vuln in state.discovered_vulnerabilities.values() {
         if vuln.vuln_type == "golden_ticket" {
             if let Some(domain_val) = vuln.details.get("domain") {
@@ -1057,7 +1063,6 @@ pub(super) fn build_domain_achievements(
         }
     }
 
-    // Admin credentials
     for c in credentials {
         if c.is_admin {
             let domain = resolve_domain_fqdn(&c.domain, &state.netbios_to_fqdn);
@@ -1072,7 +1077,6 @@ pub(super) fn build_domain_achievements(
         }
     }
 
-    // Administrator hashes also indicate DA
     for h in hashes {
         if h.username.eq_ignore_ascii_case("administrator") {
             let domain = resolve_domain_fqdn(&h.domain, &state.netbios_to_fqdn);
@@ -1461,6 +1465,65 @@ mod tests {
         assert_eq!(resolve_domain_fqdn("CONTOSO.LOCAL", &map), "contoso.local");
     }
 
+    // canonicalize_display_domains
+
+    #[test]
+    fn canonicalize_display_domains_drops_workgroup_pseudo() {
+        // A stray WIN-<11> pseudo-domain and a WORKGROUP entry must not survive
+        // into the topology/count denominators.
+        let raw = vec![
+            "contoso.local".to_string(),
+            "child.contoso.local".to_string(),
+            "fabrikam.local".to_string(),
+            "WIN-ABCDEFGHIJK.wgrp.local".to_string(),
+            "WORKGROUP".to_string(),
+        ];
+        let out = canonicalize_display_domains(&raw, &HashMap::new());
+        assert_eq!(
+            out,
+            vec![
+                "child.contoso.local".to_string(),
+                "contoso.local".to_string(),
+                "fabrikam.local".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn canonicalize_display_domains_collapses_netbios_duplicate() {
+        // A NetBIOS short name that resolves to an already-present FQDN must
+        // collapse, not double-count as its own (parentless) forest root.
+        let mut map = HashMap::new();
+        map.insert("contoso".to_string(), "contoso.local".to_string());
+        let raw = vec![
+            "contoso.local".to_string(),
+            "CONTOSO".to_string(),
+            "fabrikam.local".to_string(),
+        ];
+        let out = canonicalize_display_domains(&raw, &map);
+        assert_eq!(
+            out,
+            vec!["contoso.local".to_string(), "fabrikam.local".to_string()]
+        );
+    }
+
+    #[test]
+    fn canonicalize_display_domains_fixes_inflated_forest_count() {
+        // Regression: raw list carrying a phantom parentless domain reported
+        // 4 domains / 3 forests against a 3-domain / 2-forest target. After
+        // canonicalisation the topology must be 3 domains / 2 forests.
+        let raw = vec![
+            "contoso.local".to_string(),
+            "child.contoso.local".to_string(),
+            "fabrikam.local".to_string(),
+            "WIN-ABCDEFGHIJK.leak.local".to_string(),
+        ];
+        let domains = canonicalize_display_domains(&raw, &HashMap::new());
+        let topology = compute_forest_topology(&domains);
+        assert_eq!(domains.len(), 3);
+        assert_eq!(topology.forest_roots.len(), 2);
+    }
+
     // build_domain_achievements
 
     #[test]
@@ -1738,8 +1801,6 @@ mod tests {
         assert!(children.is_empty());
     }
 
-    // --- token_category coverage ------------------------------------------
-
     #[test]
     fn token_category_adcs_long_form_does_not_collapse_to_esc1() {
         // Real vuln_id forms always include `_<details>` after the ESC code.
@@ -1798,7 +1859,10 @@ mod tests {
             super::token_category("mssql_impersonation_192.168.58.51"),
             "mssql_exploit"
         );
-        assert_eq!(super::token_category("mssql_10_1_2_51"), "mssql_exploit");
+        assert_eq!(
+            super::token_category("mssql_192_168_58_51"),
+            "mssql_exploit"
+        );
     }
 
     #[test]
@@ -1867,13 +1931,20 @@ mod tests {
     }
 
     #[test]
-    fn token_category_unknown_falls_through_to_other() {
-        assert_eq!(super::token_category("zerologon_dc01"), "other");
-        assert_eq!(super::token_category("nopac_192.168.58.10"), "other");
-        assert_eq!(super::token_category(""), "other");
+    fn token_category_cve_techniques_are_not_other() {
+        assert_eq!(super::token_category("zerologon_dc01"), "zerologon");
+        assert_eq!(super::token_category("nopac_192.168.58.10"), "nopac");
+        assert_eq!(
+            super::token_category("printnightmare_192.168.58.10"),
+            "printnightmare"
+        );
     }
 
-    // ── compute_forest_topology ─────────────────────────────────────────
+    #[test]
+    fn token_category_unknown_falls_through_to_other() {
+        assert_eq!(super::token_category("wombat_dc01"), "other");
+        assert_eq!(super::token_category(""), "other");
+    }
 
     #[test]
     fn topology_empty_input() {
@@ -1951,8 +2022,6 @@ mod tests {
         assert_eq!(t1, t2);
     }
 
-    // ── count_compromised_forests ───────────────────────────────────────
-
     fn ach(has_da: bool, has_gt: bool) -> super::DomainAchievement {
         super::DomainAchievement {
             has_da,
@@ -2017,8 +2086,6 @@ mod tests {
         assert_eq!(super::count_compromised_forests(&topology, &a), 0);
     }
 
-    // ── compute_token_coverage_rows ─────────────────────────────────────
-
     fn discovered_vuln(vuln_id: &str) -> (String, ares_core::models::VulnerabilityInfo) {
         (
             vuln_id.to_string(),
@@ -2041,7 +2108,8 @@ mod tests {
 
     #[test]
     fn coverage_rows_empty_when_both_empty() {
-        let rows = super::compute_token_coverage_rows(&HashMap::new(), &HashSet::new());
+        let rows =
+            super::compute_token_coverage_rows(&HashMap::new(), &HashSet::new(), &HashSet::new());
         assert!(rows.is_empty());
     }
 
@@ -2049,6 +2117,7 @@ mod tests {
     fn coverage_rows_x_mark_when_discovered_but_none_exploited() {
         let rows = super::compute_token_coverage_rows(
             &discovered_map(&["kerberoast_svc_sql"]),
+            &HashSet::new(),
             &HashSet::new(),
         );
         assert_eq!(rows.len(), 1);
@@ -2062,7 +2131,7 @@ mod tests {
     fn coverage_rows_check_mark_when_all_exploited() {
         let discovered = discovered_map(&["kerberoast_svc_sql"]);
         let exploited: HashSet<String> = ["kerberoast_svc_sql".to_string()].into_iter().collect();
-        let rows = super::compute_token_coverage_rows(&discovered, &exploited);
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited, &HashSet::new());
         assert_eq!(rows[0].status, "\u{2713}");
         assert_eq!(rows[0].exploited, 1);
     }
@@ -2071,7 +2140,7 @@ mod tests {
     fn coverage_rows_partial_when_some_exploited() {
         let discovered = discovered_map(&["kerberoast_a", "kerberoast_b"]);
         let exploited: HashSet<String> = ["kerberoast_a".to_string()].into_iter().collect();
-        let rows = super::compute_token_coverage_rows(&discovered, &exploited);
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited, &HashSet::new());
         assert_eq!(rows[0].category, "kerberoast");
         assert_eq!(rows[0].discovered, 2);
         assert_eq!(rows[0].exploited, 1);
@@ -2084,7 +2153,7 @@ mod tests {
         let exploited: HashSet<String> = ["golden_ticket_contoso.local".to_string()]
             .into_iter()
             .collect();
-        let rows = super::compute_token_coverage_rows(&HashMap::new(), &exploited);
+        let rows = super::compute_token_coverage_rows(&HashMap::new(), &exploited, &HashSet::new());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].category, "golden_ticket");
         assert_eq!(rows[0].discovered, 0);
@@ -2095,7 +2164,8 @@ mod tests {
     #[test]
     fn coverage_rows_sorted_alphabetically() {
         let discovered = discovered_map(&["kerberoast_a", "asrep_roast_b", "adcs_esc1_c"]);
-        let rows = super::compute_token_coverage_rows(&discovered, &HashSet::new());
+        let rows =
+            super::compute_token_coverage_rows(&discovered, &HashSet::new(), &HashSet::new());
         let cats: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
         assert_eq!(cats, vec!["adcs_esc1", "asrep_roast", "kerberoast"]);
     }
@@ -2109,9 +2179,126 @@ mod tests {
         let exploited: HashSet<String> = ["kerberoast_a".to_string(), "kerberoast_b".to_string()]
             .into_iter()
             .collect();
-        let rows = super::compute_token_coverage_rows(&discovered, &exploited);
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited, &HashSet::new());
         assert_eq!(rows[0].status, "\u{2713}");
         assert_eq!(rows[0].discovered, 1);
         assert_eq!(rows[0].exploited, 2);
+    }
+
+    #[test]
+    fn coverage_rows_superseded_does_not_count_as_exploited() {
+        let discovered = discovered_map(&["kerberoast_a", "kerberoast_b"]);
+        let exploited: HashSet<String> = ["kerberoast_a".to_string(), "kerberoast_b".to_string()]
+            .into_iter()
+            .collect();
+        let superseded: HashSet<String> = ["kerberoast_b".to_string()].into_iter().collect();
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited, &superseded);
+        assert_eq!(rows[0].discovered, 2);
+        assert_eq!(
+            rows[0].exploited, 1,
+            "a vuln credited by supersession is not a proven technique"
+        );
+        assert_eq!(rows[0].status, "PARTIAL");
+    }
+
+    #[test]
+    fn coverage_rows_fully_superseded_category_still_renders_as_unproven() {
+        let discovered = discovered_map(&["forest_trust_contoso_local_fabrikam_local"]);
+        let exploited: HashSet<String> = ["forest_trust_contoso_local_fabrikam_local".to_string()]
+            .into_iter()
+            .collect();
+        let superseded = exploited.clone();
+        let rows = super::compute_token_coverage_rows(&discovered, &exploited, &superseded);
+        assert_eq!(rows.len(), 1, "the category must not vanish from the table");
+        assert_eq!(rows[0].category, "forest_trust");
+        assert_eq!(rows[0].exploited, 0);
+        assert_eq!(rows[0].status, "\u{2717}");
+    }
+
+    #[test]
+    fn coverage_rows_implicit_token_that_is_superseded_keeps_its_row() {
+        let exploited: HashSet<String> = ["golden_ticket_contoso.local".to_string()]
+            .into_iter()
+            .collect();
+        let superseded = exploited.clone();
+        let rows = super::compute_token_coverage_rows(&HashMap::new(), &exploited, &superseded);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].category, "golden_ticket");
+        assert_eq!(rows[0].discovered, 0);
+        assert_eq!(rows[0].exploited, 0);
+        assert_eq!(
+            rows[0].status, "\u{2717}",
+            "discovered=0 must not short-circuit to a check mark when the only \
+             credit came from supersession"
+        );
+    }
+
+    fn hostname_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(ip, hostname)| (ip.to_string(), hostname.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn vuln_target_annotated_with_the_known_hostname() {
+        let map = hostname_map(&[("192.168.58.50", "ca01.contoso.local")]);
+        assert_eq!(
+            super::format_vuln_target("192.168.58.50", &map),
+            "ca01.contoso.local (192.168.58.50)"
+        );
+    }
+
+    #[test]
+    fn vuln_target_unchanged_when_the_ip_is_unknown() {
+        let map = hostname_map(&[("192.168.58.50", "ca01.contoso.local")]);
+        assert_eq!(
+            super::format_vuln_target("192.168.58.99", &map),
+            "192.168.58.99"
+        );
+    }
+
+    #[test]
+    fn vuln_target_unchanged_when_already_a_hostname() {
+        let map = hostname_map(&[("192.168.58.10", "dc01.contoso.local")]);
+        assert_eq!(
+            super::format_vuln_target("dc01.contoso.local", &map),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn vuln_target_trimmed_before_lookup() {
+        let map = hostname_map(&[("192.168.58.10", "dc01.contoso.local")]);
+        assert_eq!(
+            super::format_vuln_target("  192.168.58.10  ", &map),
+            "dc01.contoso.local (192.168.58.10)"
+        );
+    }
+
+    #[test]
+    fn vuln_target_empty_stays_empty() {
+        assert_eq!(super::format_vuln_target("", &HashMap::new()), "");
+    }
+
+    #[test]
+    fn vuln_target_ignores_an_empty_hostname_entry() {
+        let map = hostname_map(&[("192.168.58.10", "")]);
+        assert_eq!(
+            super::format_vuln_target("192.168.58.10", &map),
+            "192.168.58.10"
+        );
+    }
+
+    #[test]
+    fn vuln_target_annotated_fits_the_column() {
+        let map = hostname_map(&[("192.168.58.50", "ca01.child.contoso.local")]);
+        let rendered = super::format_vuln_target("192.168.58.50", &map);
+        assert!(
+            rendered.len() <= 43,
+            "a realistic FQDN + IP must fit the 46-wide Target column without \
+             truncation, got {} chars: {rendered}",
+            rendered.len()
+        );
     }
 }

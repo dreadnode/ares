@@ -8,6 +8,7 @@
 //! - [`models`] — Data model structs.
 //! - [`state`] — Redis state backend with key patterns and read/write operations.
 
+pub mod blue_invalidation;
 pub mod config;
 #[cfg(feature = "blue")]
 pub mod correlation;
@@ -15,11 +16,13 @@ pub mod correlation;
 pub mod detection;
 #[cfg(feature = "blue")]
 pub mod eval;
+pub mod ldap;
 pub mod models;
 pub mod nats;
 pub mod op_state_log;
 pub mod parsing;
 pub mod persistent_store;
+pub mod replay_clock;
 pub mod reports;
 pub mod state;
 #[cfg(feature = "telemetry")]

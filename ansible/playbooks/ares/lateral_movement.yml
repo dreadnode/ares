@@ -13,7 +13,7 @@
       vars:
         base_update_cache: "{{ not _container_build }}"
 
-    - role: dreadnode.nimbus_range.lateral_movement_tools
+    - role: l50.arsenal.lateral_movement_tools
       vars:
         lateral_movement_tools_update_cache: "{{ not _container_build }}"
 

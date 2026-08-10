@@ -291,8 +291,8 @@ DC02$   Computer     Unconstrained                        N/A                   
         // classify as rbcd, not constrained (which would misroute to S4U).
         let output = "\
 AccountName  AccountType  DelegationType                          DelegationRightsTo
-svc$         Computer     Resource-Based Constrained Delegation   kingslanding$";
-        let params = json!({"domain": "contoso.local", "target_ip": "10.0.0.1"});
+svc$         Computer     Resource-Based Constrained Delegation   dc01$";
+        let params = json!({"domain": "contoso.local", "target_ip": "192.168.58.1"});
         let vulns = parse_delegation(output, &params);
         assert_eq!(vulns.len(), 1);
         assert_eq!(vulns[0]["vuln_type"], "rbcd");
@@ -302,16 +302,14 @@ svc$         Computer     Resource-Based Constrained Delegation   kingslanding$"
     fn parse_delegation_protocol_transition_flag() {
         let output = "\
 AccountName  AccountType  DelegationType                       DelegationRightsTo
-jon.snow     Person       Constrained w/ Protocol Transition   HTTP/winterfell
-castelblack$ Computer     Constrained w/o Protocol Transition  HTTP/winterfell";
-        let params = json!({"domain": "north.local", "target_ip": "10.0.0.2"});
+alice        Person       Constrained w/ Protocol Transition   HTTP/web01
+ws01$        Computer     Constrained w/o Protocol Transition  HTTP/web01";
+        let params = json!({"domain": "child.contoso.local", "target_ip": "192.168.58.2"});
         let vulns = parse_delegation(output, &params);
         assert_eq!(vulns.len(), 2);
         assert_eq!(vulns[0]["details"]["protocol_transition"], true);
         assert_eq!(vulns[1]["details"]["protocol_transition"], false);
     }
-
-    // ── extract_spn_from_parts ────────────────────────────────────
 
     #[test]
     fn spn_basic() {
@@ -369,5 +367,233 @@ castelblack$ Computer     Constrained w/o Protocol Transition  HTTP/winterfell";
             extract_spn_from_parts(&parts),
             Some("LDAP/dc01".to_string())
         );
+    }
+}
+
+/// Banner impacket-addcomputer prints on a successful creation, carrying the
+/// account name and password it actually used.
+pub(crate) const ADD_COMPUTER_BANNER: &str = "Successfully added machine account ";
+
+/// Pull `(name, password)` out of impacket-addcomputer's success banner
+/// (`Successfully added machine account WS01$ with password P@ssw0rd!.`).
+pub fn scrape_added_machine_account(output: &str) -> Option<(&str, &str)> {
+    let i = output.find(ADD_COMPUTER_BANNER)?;
+    let line = output[i + ADD_COMPUTER_BANNER.len()..].lines().next()?;
+    let (name, password) = line.split_once(" with password ")?;
+    let password = password.trim();
+    let password = password.strip_suffix('.').unwrap_or(password);
+    let name = name.trim();
+    (!name.is_empty() && !password.is_empty()).then_some((name, password))
+}
+
+/// Recover the machine account created by `add_computer`.
+///
+/// The name and password are read back out of the success banner rather than
+/// echoed from the call's params: `build_add_computer` mints both on the add
+/// path, so the params the agent supplied are not what ended up in the
+/// directory. Without this credential the account is unusable by later RBCD
+/// steps, which look the principal up in operation state rather than
+/// re-reading tool text.
+pub fn parse_add_computer(output: &str, params: &Value) -> Vec<Value> {
+    let Some((name, password)) = scrape_added_machine_account(output) else {
+        return Vec::new();
+    };
+    let username = if name.ends_with('$') {
+        name.to_string()
+    } else {
+        format!("{name}$")
+    };
+    vec![json!({
+        "username": username,
+        "password": password,
+        "domain": params.get("domain").and_then(|v| v.as_str()).unwrap_or(""),
+        "source": "add_computer",
+        "is_admin": false,
+    })]
+}
+
+/// Marker `privesc::delegation::generate_silver_ticket` appends to ticketer's
+/// stdout carrying the SPN the ticket was scoped to.
+///
+/// ticketer prints the same `Saving ticket in <principal>.ccache` line for a
+/// TGT and a TGS, so the SPN is the only thing that identifies a forge as a
+/// silver ticket. Both the parser below and the orchestrator's golden-ticket
+/// completion check key off this marker.
+pub const SILVER_TICKET_SPN_MARKER: &str = "[ares] silver_ticket_spn: ";
+
+/// Extract the forged service ticket from `generate_silver_ticket` output.
+///
+/// A silver ticket produces no credential, hash, or host — its whole result is
+/// a ccache on disk bound to one SPN. The orchestrator's exploit evidence gate
+/// only credits a task when `discoveries` carries something a parser put there,
+/// so without this the forge lands as a *failed* exploit despite ticketer
+/// exiting 0. The record goes under `spns` because that is an evidence-only
+/// discovery key: it satisfies the gate without being re-queued for
+/// exploitation the way a `vulnerabilities` entry would be.
+pub fn parse_silver_ticket(output: &str, params: &Value) -> Vec<Value> {
+    let Some(spn) = output
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(SILVER_TICKET_SPN_MARKER))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Vec::new();
+    };
+    let ccache = output
+        .lines()
+        .find_map(|l| l.trim().rsplit_once("Saving ticket in "))
+        .map(|(_, path)| path.trim())
+        .filter(|p| p.ends_with(".ccache"));
+    let Some(ccache) = ccache else {
+        return Vec::new();
+    };
+    let param = |key: &str| params.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    vec![json!({
+        "spn": spn,
+        "service_account": param("username"),
+        "domain": param("domain"),
+        "impersonated": params
+            .get("impersonate")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Administrator"),
+        "ticket_path": ccache,
+        "source": "generate_silver_ticket",
+    })]
+}
+
+#[cfg(test)]
+mod silver_ticket_tests {
+    use super::*;
+
+    fn params() -> Value {
+        json!({
+            "username": "SQL01$",
+            "domain": "contoso.local",
+            "spn": "MSSQLSvc/sql01.contoso.local:1433",
+        })
+    }
+
+    fn forged(spn: &str) -> String {
+        format!(
+            "Impacket v0.13.0\n\
+             [*] Creating basic skeleton ticket and PAC Infos\n\
+             [*] Signing/Encrypting final ticket\n\
+             [*] Saving ticket in Administrator.ccache\n\
+             {SILVER_TICKET_SPN_MARKER}{spn}\n"
+        )
+    }
+
+    #[test]
+    fn records_the_forged_service_ticket() {
+        let out = forged("MSSQLSvc/sql01.contoso.local:1433");
+        let spns = parse_silver_ticket(&out, &params());
+        assert_eq!(spns.len(), 1);
+        assert_eq!(spns[0]["spn"], "MSSQLSvc/sql01.contoso.local:1433");
+        assert_eq!(spns[0]["service_account"], "SQL01$");
+        assert_eq!(spns[0]["domain"], "contoso.local");
+        assert_eq!(spns[0]["impersonated"], "Administrator");
+        assert_eq!(spns[0]["ticket_path"], "Administrator.ccache");
+        assert_eq!(spns[0]["source"], "generate_silver_ticket");
+    }
+
+    #[test]
+    fn carries_the_impersonated_principal_from_params() {
+        let mut p = params();
+        p.as_object_mut()
+            .unwrap()
+            .insert("impersonate".into(), json!("alice"));
+        let spns = parse_silver_ticket(&forged("cifs/sql01.contoso.local"), &p);
+        assert_eq!(spns[0]["impersonated"], "alice");
+    }
+
+    /// ticketer exits 0 on some failures and the marker is only appended on
+    /// success, so evidence must require BOTH the marker and the saved ccache.
+    #[test]
+    fn requires_both_the_marker_and_a_saved_ccache() {
+        let no_marker = "[*] Saving ticket in Administrator.ccache\n";
+        assert!(parse_silver_ticket(no_marker, &params()).is_empty());
+
+        let no_ccache =
+            format!("[-] Kerberos SessionError\n{SILVER_TICKET_SPN_MARKER}cifs/sql01\n");
+        assert!(parse_silver_ticket(&no_ccache, &params()).is_empty());
+    }
+
+    #[test]
+    fn ignores_a_ticket_saved_to_a_non_ccache_path() {
+        let kirbi = format!(
+            "[*] Saving ticket in Administrator.kirbi\n{SILVER_TICKET_SPN_MARKER}cifs/sql01\n"
+        );
+        assert!(parse_silver_ticket(&kirbi, &params()).is_empty());
+    }
+
+    #[test]
+    fn empty_marker_value_yields_no_evidence() {
+        let blank = format!("[*] Saving ticket in a.ccache\n{SILVER_TICKET_SPN_MARKER}\n");
+        assert!(parse_silver_ticket(&blank, &params()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod add_computer_tests {
+    use super::*;
+
+    fn params() -> Value {
+        json!({ "domain": "contoso.local" })
+    }
+
+    fn banner(name: &str, password: &str) -> String {
+        format!("[*] Successfully added machine account {name} with password {password}.")
+    }
+
+    #[test]
+    fn recovers_machine_account_on_success() {
+        let creds = parse_add_computer(&banner("ARES-1A2B3C4D$", "P@ssw0rd!"), &params());
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0]["username"], "ARES-1A2B3C4D$");
+        assert_eq!(creds[0]["password"], "P@ssw0rd!");
+        assert_eq!(creds[0]["domain"], "contoso.local");
+        assert_eq!(creds[0]["source"], "add_computer");
+    }
+
+    /// The banner is authoritative: `build_add_computer` mints the identity, so
+    /// a name the agent asked for is not what reached the directory. Trusting
+    /// params here stored a lab-flavoured name that no such account ever had.
+    #[test]
+    fn banner_wins_over_caller_supplied_params() {
+        let mut p = params();
+        p["computer_name"] = json!("ws01");
+        p["computer_password"] = json!("Requested123!");
+        let creds = parse_add_computer(&banner("ARES-1A2B3C4D$", "Minted123!"), &p);
+        assert_eq!(creds[0]["username"], "ARES-1A2B3C4D$");
+        assert_eq!(creds[0]["password"], "Minted123!");
+    }
+
+    #[test]
+    fn appends_missing_trailing_dollar() {
+        let creds = parse_add_computer(&banner("ARES-1A2B3C4D", "P@ssw0rd!"), &params());
+        assert_eq!(creds[0]["username"], "ARES-1A2B3C4D$");
+    }
+
+    /// impacket terminates the banner with a period; it is punctuation, not
+    /// part of the password, but only the last one is.
+    #[test]
+    fn strips_only_the_banner_terminator() {
+        let creds = parse_add_computer(&banner("ARES-1A2B3C4D$", "pass."), &params());
+        assert_eq!(creds[0]["password"], "pass.");
+    }
+
+    #[test]
+    fn ignores_refusal_that_still_exits_zero() {
+        let refused = "[-] Could not add machine account: ACCESS_DENIED";
+        assert!(parse_add_computer(refused, &params()).is_empty());
+    }
+
+    /// A banner without the password clause cannot yield a usable credential,
+    /// and params are no longer a fallback.
+    #[test]
+    fn requires_the_password_clause() {
+        let truncated = "[*] Successfully added machine account ARES-1A2B3C4D$";
+        assert!(parse_add_computer(truncated, &params()).is_empty());
     }
 }

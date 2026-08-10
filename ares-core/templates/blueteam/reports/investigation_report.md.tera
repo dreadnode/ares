@@ -13,10 +13,10 @@
 
 {{ assessment }}
 
-**Evidence Collected:** {{ evidence_count }} items
+**Evidence Collected:** {{ evidence_count }} items ({{ analyst_evidence_count }} analyst, {{ sweep_evidence_count }} baseline sweep)
 **MITRE Techniques:** {{ technique_count }} identified
-**TTPs Identified:** {{ ttp_count }}
-**Highest Pyramid Level:** {{ highest_pyramid_level }}/6
+**TTPs Identified:** {{ ttp_count }} ({{ analyst_ttp_count }} analyst, {{ sweep_ttp_count }} baseline sweep)
+**Highest Pyramid Level:** {{ highest_analyst_pyramid_level }}/6 analyst, {{ highest_pyramid_level }}/6 including baseline sweep
 
 ### Key Findings
 
@@ -72,13 +72,17 @@ _No techniques identified during investigation._
 
 ## Pyramid of Pain Assessment
 
-**Elevation Score:** {{ elevation_score }}
+**Elevation Score:** {{ analyst_elevation_score }} analyst, {{ elevation_score }} including baseline sweep
 
-| Level | Category | Count | Adversary Pain |
-|-------|----------|-------|----------------|
+| Level | Category | Analyst | Baseline Sweep | Total | Adversary Pain |
+|-------|----------|---------|----------------|-------|----------------|
 {% for entry in pyramid_entries %}
-| {{ entry.level }} | {{ entry.category }} | {{ entry.count }} | {{ entry.pain }} |
+| {{ entry.level }} | {{ entry.category }} | {{ entry.analyst_count }} | {{ entry.sweep_count }} | {{ entry.count }} | {{ entry.pain }} |
 {% endfor %}
+
+{% if sweep_evidence_count > 0 %}
+The deterministic detection sweep records every fired detection at level 6 by construction — each one is a MITRE-keyed detection template, so "TTPs" is accurate per detection, but the level is a property of the catalog rather than a finding. {{ sweep_evidence_count }} of {{ evidence_count }} evidence items came from it. The Analyst column is what the investigation loop produced on its own.
+{% endif %}
 
 ### Assessment
 
@@ -159,12 +163,12 @@ _No specific recommendations generated._
 ### Detection Improvements
 
 {% if detection_techniques | length > 0 %}
-Consider adding or tuning detection rules for:
+Red executed these with no matching blue detection — add or tune rules for:
 {% for tech in detection_techniques %}
-- **{{ tech.id }}** ({{ tech.name }})
+- **{{ tech }}**
 {% endfor %}
 {% else %}
-_No detection improvements suggested._
+_Detection gaps need red team ground truth — see the operation report._
 {% endif %}
 
 ---

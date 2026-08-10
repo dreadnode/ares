@@ -1,12 +1,14 @@
 //! Credential access task prompt generation.
 //!
 //! Split into submodules by branch:
+//! - `cert_auth` -- PKINIT conversion of a certificate already on disk
 //! - `kerberos` -- Kerberos ticket-based secretsdump prompt
 //! - `low_hanging` -- Low-hanging fruit with/without credentials
 //! - `spray` -- Username-as-password spray prompt
 //! - `no_cred` -- Technique enforcement without credentials
 //! - `generic` -- Generic fallback prompt
 
+mod cert_auth;
 mod generic;
 mod kerberos;
 mod low_hanging;
@@ -137,6 +139,10 @@ pub(crate) fn generate_credential_access_prompt(
         has_creds,
         excluded_users,
     };
+
+    if let Some(result) = cert_auth::try_generate(task_id, payload, &params, state) {
+        return result;
+    }
 
     // Branch 1: Kerberos ticket-based secretsdump
     if let Some(result) = kerberos::try_generate(task_id, &params, state) {

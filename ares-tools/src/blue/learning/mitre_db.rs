@@ -124,6 +124,13 @@ pub(super) static TECHNIQUES: LazyLock<HashMap<&'static str, Technique>> = LazyL
         detection: "Monitor for TGS requests (Event 4769) that reference the krbtgt service with RC4 encryption. Look for tickets with unusually long lifetimes or issued by non-existent accounts. Compare TGT encrypted timestamps against DC records.",
     });
 
+    m.insert("T1558.002", Technique {
+        name: "Silver Ticket",
+        description: "Adversaries who have the password hash of a target service account may forge Kerberos service tickets (TGS) for that service. A silver ticket is presented directly to the service, so the KDC is never involved and no ticket request is logged on any domain controller.",
+        tactics: &["Credential Access"],
+        detection: "The KDC never issues a silver ticket, so there is no Event 4769 for it anywhere. Correlate successful Kerberos network logons on service hosts (Event 4624, logon type 3, AuthenticationPackageName Kerberos) against 4769 service-ticket requests on the DCs: a principal that authenticated to a service with no service ticket issued for it presented a forged one. Watch for an accompanying Event 4672 when the forged PAC claims privileged groups.",
+    });
+
     m.insert("T1558.003", Technique {
         name: "Kerberoasting",
         description: "Adversaries may abuse a valid Kerberos TGT or sniff network traffic to obtain a TGS ticket that may be vulnerable to brute force. Service accounts with SPNs are targeted for offline password cracking.",
@@ -143,6 +150,20 @@ pub(super) static TECHNIQUES: LazyLock<HashMap<&'static str, Technique>> = LazyL
         description: "Adversaries may manipulate accounts to maintain access to victim systems. Account manipulation may consist of modifying credentials, permissions, or adding new accounts to maintain persistence.",
         tactics: &["Persistence", "Privilege Escalation"],
         detection: "Monitor for account modification events: Event 4738 (user account changed), Event 4728/4732 (member added to security group), Event 4720 (account created). Watch for SPN modification on user accounts and delegation flag changes.",
+    });
+
+    m.insert("T1556", Technique {
+        name: "Modify Authentication Process",
+        description: "Adversaries may modify authentication mechanisms and processes to access user credentials or enable otherwise unwarranted access to accounts.",
+        tactics: &["Credential Access", "Defense Evasion", "Persistence"],
+        detection: "Monitor Event 5136 (directory service object modified) for writes to authentication-related attributes. Correlate an attribute write against an account with a subsequent certificate-based logon (Event 4768 with a certificate issuer) for that same account.",
+    });
+
+    m.insert("T1556.006", Technique {
+        name: "Multi-Factor Authentication",
+        description: "Adversaries may write msDS-KeyCredentialLink on a target account (Shadow Credentials), registering attacker-controlled key material so they can request a TGT as that account via PKINIT without knowing its password.",
+        tactics: &["Credential Access", "Defense Evasion", "Persistence"],
+        detection: "Monitor Event 5136 where AttributeLDAPDisplayName is msDS-KeyCredentialLink, especially on privileged targets (krbtgt, Administrator, domain controller computer objects). Writes performed by a principal that is not the account owner, or on accounts not enrolled in Windows Hello for Business, are the strongest signal.",
     });
 
     m.insert("T1110", Technique {
@@ -308,6 +329,7 @@ pub(super) static EVIDENCE_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>
                 "T1003.006",
                 "T1558",
                 "T1558.001",
+                "T1558.002",
                 "T1558.003",
                 "T1558.004",
                 "T1110",
@@ -379,6 +401,7 @@ pub(super) static EVIDENCE_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>
             vec![
                 "T1558",
                 "T1558.001",
+                "T1558.002",
                 "T1558.003",
                 "T1558.004",
                 "T1550",
@@ -393,6 +416,8 @@ pub(super) static EVIDENCE_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>
         m.insert("dcsync", vec!["T1003.006"]);
 
         m.insert("golden_ticket", vec!["T1558.001"]);
+
+        m.insert("silver_ticket", vec!["T1558.002"]);
 
         m.insert("service_creation", vec!["T1543", "T1543.003"]);
 
@@ -409,7 +434,6 @@ pub(super) static EVIDENCE_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>
 pub fn lookup_technique(args: &Value) -> Result<ToolOutput> {
     let technique_id = required_str(args, "technique_id")?;
 
-    // Normalize: uppercase the T prefix if needed
     let normalized = if technique_id.starts_with('t') || technique_id.starts_with('T') {
         let mut s = technique_id.to_string();
         s.replace_range(0..1, "T");
@@ -488,7 +512,6 @@ pub fn lookup_technique(args: &Value) -> Result<ToolOutput> {
 pub fn suggest_techniques(args: &Value) -> Result<ToolOutput> {
     let evidence_type = required_str(args, "evidence_type")?;
 
-    // Normalize: lowercase, replace spaces/hyphens with underscores
     let normalized = evidence_type.to_lowercase().replace([' ', '-'], "_");
 
     if let Some(technique_ids) = EVIDENCE_MAP.get(normalized.as_str()) {
@@ -555,8 +578,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── truncate_description ────────────────────────────────────────
-
     #[test]
     fn truncate_short_string_unchanged() {
         assert_eq!(truncate_description("hello", 10), "hello");
@@ -578,8 +599,6 @@ mod tests {
     fn truncate_empty_string() {
         assert_eq!(truncate_description("", 10), "");
     }
-
-    // ── lookup_technique ────────────────────────────────────────────
 
     #[test]
     fn lookup_known_technique() {
@@ -630,8 +649,6 @@ mod tests {
         assert!(result.stdout.contains("OS Credential Dumping"));
     }
 
-    // ── suggest_techniques ──────────────────────────────────────────
-
     #[test]
     fn suggest_credential_access() {
         let args = json!({"evidence_type": "credential_access"});
@@ -668,8 +685,6 @@ mod tests {
         let args = json!({});
         assert!(suggest_techniques(&args).is_err());
     }
-
-    // ── static data integrity ───────────────────────────────────────
 
     #[test]
     fn techniques_db_is_nonempty() {

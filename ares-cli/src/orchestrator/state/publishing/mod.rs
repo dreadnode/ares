@@ -1,6 +1,7 @@
 //! Publishing methods — add credentials, hashes, hosts, and vulnerabilities
 //! to both in-memory state and Redis.
 
+mod containment;
 mod credentials;
 mod domains;
 mod entities;
@@ -36,6 +37,47 @@ pub(super) async fn emit_op_state(
 pub(super) static PASSWORD_PREFIX_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^password\s*:\s*").unwrap());
 
+/// Whether the realm string on a captured credential / hash / user came from
+/// an authoritative AD source — i.e. a successful authenticated round-trip,
+/// a host-pinned NTDS/LSA dump, or an LDAP/Kerberos enumeration result.
+///
+/// Used to gate auto-promotion of the realm into `state.domains`. Realms
+/// from these sources cannot have been an LLM typo: a wrong realm would
+/// have rejected the auth, been absent from NTDS, or never come back from
+/// the DC's LDAP response in the first place. Lower-trust sources (text
+/// scrapes of tool prose, registry autologon, SYSVOL scripts, description
+/// fields) are explicitly excluded — those can carry typos that would
+/// otherwise pollute the canonical domain registry.
+pub(super) fn realm_source_is_authoritative(source: &str) -> bool {
+    matches!(
+        source,
+        // Host-pinned dumps — realm pinned by NTDS / LSA storage.
+        "secretsdump"
+            | "lsassy"
+            | "lsa_secrets"
+            | "dpapi"
+            | "kerberos_extracted"
+            | "initial"
+            // Realm validated by an actual auth round-trip, or extracted
+            // from a Kerberos response that carried the crealm.
+            | "netexec_auth"
+            | "password_spray"
+            | "kerberoast"
+            | "asrep_roast"
+            // Cracked from a hash whose realm was already pinned.
+            | "cracked:hashcat"
+            | "cracked:john"
+            | "cracked"
+            // Authoritative user-enumeration sources (LDAP / Kerberos).
+            | "ldap_extraction"
+            | "kerberos_enum"
+            | "netexec_user_enum"
+            | "secretsdump_implicit"
+            // Cert-based credential extraction (host-pinned chain).
+            | "certipy_esc1_full_chain"
+    )
+}
+
 /// Trust ranking for a credential source.
 ///
 /// Used by `publish_credential` to decide whether a new (user, password)
@@ -50,11 +92,27 @@ pub(super) static PASSWORD_PREFIX_RE: LazyLock<Regex> =
 ///   inferred from surrounding tool output and can bleed across forests
 ///   (description fields, registry autologon, SYSVOL scripts).
 /// - **Unknown (0)**: anything not classified — treated as least trusted.
-pub(super) fn credential_source_trust(source: &str) -> u8 {
+pub(crate) fn credential_source_trust(source: &str) -> u8 {
     match source {
-        "secretsdump" | "lsa_secrets" | "dpapi" | "kerberos_extracted" | "initial" => 3,
-        "netexec_auth" | "cracked:hashcat" | "cracked:john" | "cracked" => 2,
+        // Deterministic: a host-pinned dump, or material this operation set
+        // itself and therefore knows exactly.
+        "secretsdump"
+        | "lsa_secrets"
+        | "dpapi"
+        | "kerberos_extracted"
+        | "initial"
+        | "lsassy"
+        | "laps_dump"
+        | "add_computer"
+        | "bloodyad_set_password" => 3,
+        // Realm validated by an auth round-trip, or cracked from a hash whose
+        // realm was already pinned.
+        "netexec_auth" | "password_spray" | "cracked:hashcat" | "cracked:john" | "cracked" => 2,
+        // Text scraped out of an attribute, script or registry value — the
+        // realm is inferred from surrounding output and can bleed across
+        // forests.
         "description_field"
+        | "ldap_description"
         | "autologon_registry"
         | "sysvol_script"
         | "user_description_leak"
@@ -91,7 +149,6 @@ pub(super) fn sanitize_credential(
     cred.password = strip_ansi(&cred.password);
     cred.domain = strip_ansi(&cred.domain);
 
-    // Trim whitespace
     cred.username = cred.username.trim().to_string();
     cred.password = cred.password.trim().to_string();
     cred.domain = cred.domain.trim().to_string();
@@ -194,7 +251,6 @@ pub(super) fn sanitize_credential(
     // keys built with `format!("{domain}\\{user}:{pass}")`.
     cred.domain = cred.domain.to_lowercase();
 
-    // Validate after sanitization
     if !crate::orchestrator::output_extraction::is_valid_credential(&cred.username, &cred.password)
     {
         return None;
@@ -321,8 +377,6 @@ mod tests {
             attack_step: 0,
         }
     }
-
-    // --- sanitize_credential ---
 
     #[test]
     fn valid_credential_passes_through() {
@@ -499,8 +553,6 @@ mod tests {
         assert_eq!(result.domain, "contoso.local");
     }
 
-    // --- is_default_os_label ---
-
     #[test]
     fn default_os_label_detects_windows_oobe() {
         assert!(is_default_os_label("WIN-HVTT4F8YN5N"));
@@ -548,7 +600,7 @@ mod tests {
         assert!(looks_like_real_domain("contoso.local"));
         assert!(looks_like_real_domain("child.contoso.local"));
         assert!(looks_like_real_domain("eu.contoso.local"));
-        assert!(looks_like_real_domain("contoso.com"));
+        assert!(looks_like_real_domain("fabrikam.local"));
     }
 
     #[test]
@@ -578,8 +630,6 @@ mod tests {
             "ip-10-0-0-1.us-west-2.compute.internal"
         ));
     }
-
-    // --- strip_netexec_artifact ---
 
     #[test]
     fn strip_netexec_zero_dot() {
@@ -621,5 +671,40 @@ mod tests {
             strip_netexec_artifact("dc02.child.contoso.local0."),
             "dc02.child.contoso.local"
         );
+    }
+
+    /// Drift guard. An unclassified source scores 0, which is *below* a
+    /// description scrape, so a writer added without a tier silently loses
+    /// every phantom-domain contest it should win.
+    #[test]
+    fn every_production_credential_source_is_classified() {
+        use crate::orchestrator::result_processing::parsing::PARSER_CREDENTIAL_SOURCES;
+        for source in PARSER_CREDENTIAL_SOURCES {
+            assert!(
+                credential_source_trust(source) > 0,
+                "credential source `{source}` is unranked, so it loses to `description_field`"
+            );
+        }
+    }
+
+    /// The guarantee this table exists to enforce: a password scraped out of an
+    /// AD description cannot displace one from an authoritative dump. Both of
+    /// these ranked 0 before, so the scrape won.
+    #[test]
+    fn authoritative_credential_sources_outrank_attribute_scrapes() {
+        for scrape in [
+            "description_field",
+            "ldap_description",
+            "user_description_leak",
+            "sysvol_script",
+            "autologon_registry",
+        ] {
+            for authoritative in ["secretsdump", "lsassy", "laps_dump", "add_computer"] {
+                assert!(
+                    credential_source_trust(authoritative) > credential_source_trust(scrape),
+                    "`{scrape}` must not outrank `{authoritative}`"
+                );
+            }
+        }
     }
 }

@@ -16,11 +16,9 @@ pub(crate) async fn blue_triage_status(
     let mut conn = connect_redis(redis_url).await?;
     let inv_id = resolve_investigation_id(&mut conn, investigation_id, latest).await?;
 
-    // Read triage decision
     let decision_key = format!("ares:blue:inv:{inv_id}:triage:decision");
     let decision_raw: Option<String> = conn.get(&decision_key).await?;
 
-    // Read triage records (audit trail)
     let records_key = format!("ares:blue:inv:{inv_id}:triage:records");
     let records_raw: Vec<String> = conn.lrange(&records_key, 0, -1).await?;
     let mut records: Vec<serde_json::Value> = Vec::new();
@@ -30,7 +28,6 @@ pub(crate) async fn blue_triage_status(
         }
     }
 
-    // Read investigation status
     let status_key = format!("ares:blue:inv:{inv_id}:status");
     let status_raw: Option<String> = conn.get(&status_key).await?;
     let status = status_raw
@@ -39,7 +36,6 @@ pub(crate) async fn blue_triage_status(
         .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(String::from))
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Read meta for escalation info
     let meta_key = format!("ares:blue:inv:{inv_id}:meta");
     let meta_data: HashMap<String, String> = conn.hgetall(&meta_key).await?;
     let escalated = meta_data

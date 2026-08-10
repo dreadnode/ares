@@ -16,30 +16,6 @@ mod tests {
     use crate::args::{optional_i64, required_str};
     use serde_json::json;
 
-    /// Verify that the base_dn builder produces correct LDAP distinguished names.
-    #[test]
-    fn base_dn_from_domain() {
-        let domain = "contoso.local";
-        let dn: String = domain
-            .split('.')
-            .map(|p| format!("DC={p}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(dn, "DC=contoso,DC=local");
-    }
-
-    /// Verify that the base_dn builder handles a deeper domain.
-    #[test]
-    fn base_dn_from_child_domain() {
-        let domain = "child.contoso.local";
-        let dn: String = domain
-            .split('.')
-            .map(|p| format!("DC={p}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        assert_eq!(dn, "DC=child,DC=contoso,DC=local");
-    }
-
     /// Verify password_spray builds args for jitter correctly (presence only).
     #[test]
     fn password_spray_args_shape() {

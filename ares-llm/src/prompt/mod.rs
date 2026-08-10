@@ -16,6 +16,7 @@ mod credential_access;
 mod exploit;
 mod helpers;
 mod lateral;
+mod orchestrator_plan;
 mod privesc;
 mod recon;
 mod state_context;
@@ -93,6 +94,9 @@ pub fn generate_task_prompt(
         "acl_analysis" => acl::generate_acl_analysis_prompt(task_id, payload, state),
         "acl_chain_step" => acl::generate_acl_chain_step_prompt(task_id, payload, state),
         "command" => command::generate_command_prompt(task_id, payload),
+        "orchestrator_plan" => {
+            orchestrator_plan::generate_orchestrator_plan_prompt(task_id, payload)
+        }
         _ => return None,
     };
     Some(result.unwrap_or_else(|e| format!("Error generating prompt: {e}")))

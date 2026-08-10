@@ -65,7 +65,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "ticket_path": {
                         "type": "string",
-                        "description": "Path to the Kerberos ticket (.ccache file)"
+                        "description": "Path to the Kerberos ccache to authenticate with, e.g. the .ccache that certipy_auth or getTGT just wrote. Pass it whenever an earlier step in this task produced a ticket; omit it to let the worker resolve the most recent realm-matched ccache for this principal."
                     },
                     "command": {
                         "type": "string",
@@ -143,7 +143,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "ticket_path": {
                         "type": "string",
-                        "description": "Path to the Kerberos ticket (.ccache file)"
+                        "description": "Path to the Kerberos ccache to authenticate with, e.g. the .ccache that certipy_auth or getTGT just wrote. Pass it whenever an earlier step in this task produced a ticket; omit it to let the worker resolve the most recent realm-matched ccache for this principal."
                     },
                     "command": {
                         "type": "string",
@@ -221,7 +221,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "ticket_path": {
                         "type": "string",
-                        "description": "Path to the Kerberos ticket (.ccache file)"
+                        "description": "Path to the Kerberos ccache to authenticate with, e.g. the .ccache that certipy_auth or getTGT just wrote. Pass it whenever an earlier step in this task produced a ticket; omit it to let the worker resolve the most recent realm-matched ccache for this principal."
                     },
                     "command": {
                         "type": "string",
@@ -406,7 +406,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     },
                     "ticket_path": {
                         "type": "string",
-                        "description": "Path to the Kerberos ticket (.ccache file)"
+                        "description": "Path to the Kerberos ccache to authenticate with, e.g. the .ccache that certipy_auth or getTGT just wrote. Pass it whenever an earlier step in this task produced a ticket; omit it to let the worker resolve the most recent realm-matched ccache for this principal."
                     },
                     "dc_ip": {
                         "type": "string",

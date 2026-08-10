@@ -26,6 +26,10 @@
   gather_facts: true
   become: true
 
+  vars_files:
+    # Shared with logrotate.yml so bake-time and runtime hot-apply cannot drift.
+    - vars/logrotate.yml
+
   vars:
     # Environment configuration
     alloy_env: "{{ lookup('env', 'ENVIRONMENT') | default('goad', true) }}"
@@ -33,7 +37,7 @@
     alloy_server_id: ""
     alloy_instance_id: ""
     alloy_loki_endpoint: "{{ lookup('env', 'ALLOY_LOKI_ENDPOINT') | default('http://localhost:3100/loki/api/v1/push', true) }}"
-    alloy_version: "1.10.1"
+    alloy_version: "1.17.1"
 
     # Python version
     base_python_version: "3.13.7"
@@ -81,16 +85,31 @@
     acl_tools_install_bloodyad: true
     acl_tools_install_pywhisker: true
 
-    # Enable all privilege escalation tools for GOAD
+    # Privilege escalation tools. Split into two groups:
+    #
+    # Dispatched by ares (have a reachable code path in ares-tools/ares-llm):
+    #   - sharpgpoabuse  (ACL abuse, ares-tools/src/acl.rs)
+    #   - nopac          (CVE-2021-42278/42287, ares-cli/src/orchestrator/automation/nopac.rs)
+    #   - printnightmare (CVE-2021-1675, ares-cli/src/orchestrator/automation/print_nightmare.rs)
+    #     NOTE: printnightmare is dispatched but currently credits zero — its
+    #     success parser is gated on marker strings the real binary never
+    #     emits (fabricated-markers class of bug). Kept installed so a fix
+    #     doesn't also need an AMI rebake.
+    privesc_tools_install_sharpgpoabuse: true
+    privesc_tools_install_nopac: true
+    privesc_tools_install_printnightmare: true
+
+    # Provisioned attacker-side with no ares dispatch path today — GAPS.md §5.8
+    # is the pending work to wire them up (transfer to target, execute under an
+    # unprivileged foothold, journal for cleanup on op wrap). Kept staged so
+    # that work does not also need a second AMI rebake. If you land a code
+    # path for any of these, promote it to the group above and mark it closed
+    # in §5.8 so the grouping stays honest.
     privesc_tools_install_printspoofer: true
     privesc_tools_install_godpotato: true
     privesc_tools_install_sweetpotato: true
-    privesc_tools_install_krbrelayup: true
-    privesc_tools_install_sharpgpoabuse: true
     privesc_tools_install_winpeas: true
     privesc_tools_install_linpeas: true
-    privesc_tools_install_nopac: true
-    privesc_tools_install_printnightmare: true
     privesc_tools_install_runascs: true
     privesc_tools_install_powerupsql: true
 
@@ -123,9 +142,16 @@
     # require the EC2 instance metadata service (cloudwatch-agent's
     # `fetch-config -m ec2` hits 169.254.169.254 and aborts the build
     # on Azure).
-    - role: dreadnode.nimbus_range.aws_ssm_agent
+    - role: l50.bulwark.aws_ssm_agent
       when: cloud_provider | default('aws') == 'aws'
-    - role: dreadnode.nimbus_range.aws_cloudwatch_agent
+      vars:
+        # This is a GPU cracking box and hashcat is driven via SSM, so its
+        # workers run INSIDE the amazon-ssm-agent cgroup. The role's default
+        # 512M MemoryMax then OOM-kills hashcat during kernel build (RC=137,
+        # looks like a "GPU hang" after "Generated bitmap tables"). Uncap the
+        # agent cgroup on the attack box so SSM-launched hashcat can use GPU/RAM.
+        aws_ssm_agent_memory_max: "infinity"
+    - role: l50.bulwark.aws_cloudwatch_agent
       when: cloud_provider | default('aws') == 'aws'
 
     # Base Ares requirements
@@ -133,39 +159,45 @@
       vars:
         base_install_uv: true
         base_verify_install: true
+        # Swap cushion + OOM sysctls for the worker fleet (formerly ec2 setup.sh)
+        base_configure_swap: true
+        base_oom_tuning: true
 
     # Network reconnaissance tools (nmap, netexec, impacket, bloodhound, certipy, etc.)
-    - role: dreadnode.nimbus_range.recon_tools
+    - role: l50.arsenal.recon_tools
       vars:
         recon_tools_verify_install: true
 
     # Credential access tools (GetNPUsers, secretsdump, lsassy, sprayhound)
-    - role: dreadnode.nimbus_range.credential_access_tools
+    - role: l50.arsenal.credential_access_tools
       vars:
         credential_access_tools_verify_install: true
 
     # Network poisoning and relay tools (Responder, mitm6, Coercer, PetitPotam)
-    - role: dreadnode.nimbus_range.coercion_tools
+    - role: l50.arsenal.coercion_tools
       vars:
         coercion_tools_verify_install: true
 
     # Lateral movement tools (evil-winrm, xfreerdp, smbclient, impacket)
-    - role: dreadnode.nimbus_range.lateral_movement_tools
+    - role: l50.arsenal.lateral_movement_tools
       vars:
         lateral_movement_tools_verify_install: true
 
     # ACL exploitation tools (bloodyAD, pywhisker)
-    - role: dreadnode.nimbus_range.acl_tools
+    - role: l50.arsenal.acl_tools
       vars:
         acl_tools_verify_install: true
 
     # Password cracking tools (hashcat, john, wordlists)
-    - role: dreadnode.nimbus_range.cracking_tools
+    - role: l50.arsenal.cracking_tools
       vars:
         cracking_tools_verify_install: true
 
-    # Privilege escalation tools (PrintSpoofer, noPac, PrintNightmare, etc.)
-    - role: dreadnode.nimbus_range.privesc_tools
+    # Privilege escalation tools. noPac and PrintNightmare are dispatched by
+    # ares; PrintSpoofer/GodPotato/WinPEAS/LinPEAS/PowerUpSQL are staged for
+    # operator manual triage only (no reachable code path in ares — Linux-side
+    # remote-protocol orchestrator with no on-target unprivileged exec).
+    - role: l50.arsenal.privesc_tools
       vars:
         privesc_tools_verify_install: true
 
@@ -251,6 +283,11 @@
               url = "{{ alloy_loki_endpoint }}"
             }
           }
+
+    # Rotate /var/log/ares/*.log so ingest.log (JSONL firehose) and the
+    # per-role worker logs don't fill the root FS between AMI rebakes.
+    # Rotation vars come from vars/logrotate.yml (shared with logrotate.yml).
+    - role: cowdogmoo.workstation.logging
 
   post_tasks:
     - name: Setup shell history file permissions for Alloy
@@ -350,14 +387,10 @@
           - ""
           - "8. MSSQL Exploitation:"
           - "   - mssqlclient.py (via impacket)"
-          - "   - PowerUpSQL (PowerShell MSSQL toolkit)"
           - ""
           - "9. Privilege Escalation:"
-          - "   - PrintSpoofer, GodPotato"
           - "   - noPac (CVE-2021-42287)"
           - "   - PrintNightmare (CVE-2021-1675)"
-          - "   - KrbRelayUp"
-          - "   - WinPEAS, LinPEAS"
           - ""
           - "10. Lateral Movement:"
           - "    - evil-winrm"
@@ -368,6 +401,15 @@
           - "11. Domain Trust Exploitation:"
           - "    - raiseChild.py (via impacket)"
           - "    - ticketer.py (via impacket)"
+          - ""
+          - "12. Installed but NOT reachable from ares (operator manual only):"
+          - "    - PrintSpoofer, GodPotato, SweetPotato (SeImpersonate -> SYSTEM)"
+          - "    - WinPEAS, LinPEAS (enumeration)"
+          - "    - PowerUpSQL (PowerShell MSSQL toolkit)"
+          - "    - RunasCs, PowerUp, SharpUp, Seatbelt, scm_uac_bypass"
+          - "    Ares is a Linux-side remote-protocol orchestrator; it has no"
+          - "    primitive for staging or running a Windows binary on-target"
+          - "    as an unprivileged user. See docs/red.md for the full boundary."
           - ""
           - "Tools Location:"
           - "  - Ares workspace: /opt/ares"

@@ -29,7 +29,7 @@ pub async fn create_annotation(args: &Value) -> Result<ToolOutput> {
         .filter(|t| !t.is_empty())
         .collect();
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    let now_ms = crate::blue::replay_clock::replay_now().timestamp_millis();
 
     let mut body = serde_json::json!({
         "text": text,
@@ -104,7 +104,7 @@ pub async fn post_investigation_started(args: &Value) -> Result<ToolOutput> {
         severity.to_string(),
     ];
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    let now_ms = crate::blue::replay_clock::replay_now().timestamp_millis();
     let body = serde_json::json!({
         "text": text,
         "tags": tags,
@@ -188,7 +188,7 @@ pub async fn post_investigation_completed(args: &Value) -> Result<ToolOutput> {
         alert_name.to_string(),
     ];
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
+    let now_ms = crate::blue::replay_clock::replay_now().timestamp_millis();
     let body = serde_json::json!({
         "text": text,
         "tags": tags,

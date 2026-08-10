@@ -13,7 +13,7 @@
       vars:
         base_update_cache: "{{ not _container_build }}"
 
-    - role: dreadnode.nimbus_range.privesc_tools
+    - role: l50.arsenal.privesc_tools
       vars:
         privesc_tools_update_cache: "{{ not _container_build }}"
 

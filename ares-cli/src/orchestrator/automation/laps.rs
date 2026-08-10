@@ -32,10 +32,11 @@ fn is_laps_candidate(vuln_type: &str) -> bool {
 /// and emit one work item per (unexploited, unprocessed) LAPS vulnerability.
 ///
 /// Filters mirror the inline path: `is_laps_candidate` vuln types,
-/// not-yet-exploited, not-yet-dispatched, and the principal must be present in
-/// `state.credentials` (we lack auth material to act on a name we can't
-/// authenticate as). Splits out so the per-vuln field extraction can be unit
-/// tested without spinning a Dispatcher.
+/// not-yet-exploited, not-yet-dispatched, and the principal must be
+/// authenticable — either a plaintext credential or an NTLM hash, since a
+/// named LAPS reader is frequently a machine account or a group member whose
+/// only recovered material is a hash. Splits out so the per-vuln field
+/// extraction can be unit tested without spinning a Dispatcher.
 fn collect_laps_vuln_work(state: &StateInner) -> Vec<LapsWork> {
     let mut items = Vec::new();
     for vuln in state.discovered_vulnerabilities.values() {
@@ -81,7 +82,43 @@ fn collect_laps_vuln_work(state: &StateInner) -> Vec<LapsWork> {
                 .cloned()
         });
 
+        let hash_reader = credential
+            .is_none()
+            .then_some(reader)
+            .flatten()
+            .and_then(|r| {
+                state.hashes.iter().find(|h| {
+                    h.username.eq_ignore_ascii_case(r)
+                        && h.hash_type.to_lowercase() == "ntlm"
+                        && h.hash_value.len() == 32
+                        && h.hash_value.chars().all(|c| c.is_ascii_hexdigit())
+                        && (domain.is_empty() || h.domain.to_lowercase() == domain.to_lowercase())
+                })
+            });
+
+        let (credential, nt_hash) = match (credential, hash_reader) {
+            (Some(c), _) => (Some(c), None),
+            (None, Some(h)) => (
+                Some(ares_core::models::Credential {
+                    id: String::new(),
+                    username: h.username.clone(),
+                    password: String::new(),
+                    domain: h.domain.clone(),
+                    source: "hash_fallback".into(),
+                    discovered_at: None,
+                    is_admin: false,
+                    parent_id: None,
+                    attack_step: 0,
+                }),
+                Some(h.hash_value.clone()),
+            ),
+            (None, None) => (None, None),
+        };
+
         if let Some(cred) = credential {
+            if state.is_principal_quarantined(&cred.username, &cred.domain) {
+                continue;
+            }
             let dc_ip = state
                 .domain_controllers
                 .get(&domain.to_lowercase())
@@ -96,7 +133,7 @@ fn collect_laps_vuln_work(state: &StateInner) -> Vec<LapsWork> {
                     Some(target_computer.to_string())
                 },
                 credential: cred,
-                nt_hash: None,
+                nt_hash,
                 vuln_id: Some(vuln.vuln_id.clone()),
             });
         }
@@ -805,6 +842,88 @@ mod tests {
         );
         // No credential for "ghost" — item must not be emitted.
         assert!(collect_laps_vuln_work(&s).is_empty());
+    }
+
+    #[test]
+    fn laps_vuln_work_uses_hash_only_reader_for_pass_the_hash() {
+        let mut s = state_with_dc("contoso.local", "192.168.58.10");
+        s.discovered_vulnerabilities.insert(
+            "vuln-hash".into(),
+            vuln_with_details(
+                "vuln-hash",
+                "laps_reader",
+                vec![
+                    ("source", "WS01$"),
+                    ("domain", "contoso.local"),
+                    ("target", "ws07.contoso.local"),
+                ],
+            ),
+        );
+        s.hashes.push(ares_core::models::Hash {
+            id: "h-ws01".into(),
+            username: "WS01$".into(),
+            hash_value: "abcdef1234567890abcdef1234567890".into(),
+            hash_type: "ntlm".into(),
+            domain: "contoso.local".into(),
+            cracked_password: None,
+            source: "secretsdump".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        });
+
+        let work = collect_laps_vuln_work(&s);
+        assert_eq!(work.len(), 1, "a hash-only reader must still dispatch");
+        assert_eq!(work[0].credential.username, "WS01$");
+        assert_eq!(
+            work[0].nt_hash.as_deref(),
+            Some("abcdef1234567890abcdef1234567890")
+        );
+        assert_eq!(
+            build_laps_payload(&work[0])["nt_hash"],
+            "abcdef1234567890abcdef1234567890"
+        );
+    }
+
+    #[test]
+    fn laps_vuln_work_prefers_plaintext_reader_over_hash() {
+        let mut s = state_with_dc("contoso.local", "192.168.58.10");
+        s.discovered_vulnerabilities.insert(
+            "vuln-both".into(),
+            vuln_with_details(
+                "vuln-both",
+                "laps_reader",
+                vec![("source", "alice"), ("domain", "contoso.local")],
+            ),
+        );
+        s.credentials
+            .push(plaintext_cred("alice", "contoso.local", "P@ssw0rd!"));
+        s.hashes.push(ares_core::models::Hash {
+            id: "h-alice".into(),
+            username: "alice".into(),
+            hash_value: "abcdef1234567890abcdef1234567890".into(),
+            hash_type: "ntlm".into(),
+            domain: "contoso.local".into(),
+            cracked_password: None,
+            source: "secretsdump".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        });
+        let work = collect_laps_vuln_work(&s);
+        assert_eq!(work.len(), 1);
+        assert!(work[0].nt_hash.is_none());
+        assert_eq!(work[0].credential.password, "P@ssw0rd!");
     }
 
     #[test]

@@ -11,9 +11,10 @@ use crate::orchestrator::state::SharedState;
 use crate::orchestrator::task_queue::TaskQueue;
 use crate::worker::credential_resolver::resolve_credentials;
 
-use super::domain_validator::check_domain_arg;
+use super::domain_validator::{check_cross_realm_auth, check_domain_arg};
 use super::{
-    extract_credential_key, inject_excluded_users, push_realtime_discoveries, AuthThrottle,
+    extract_credential_key, inject_excluded_users, inject_spray_attempts,
+    push_realtime_discoveries, AuthThrottle,
 };
 
 /// Dispatches tool calls directly via `ares_tools::dispatch` without Redis.
@@ -55,6 +56,13 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
     ) -> Result<ToolExecResult> {
         // Reject calls whose `domain` argument doesn't match a known domain.
         if let Some(rejection) = check_domain_arg(&self.queue, &self.operation_id, call).await {
+            return Ok(rejection);
+        }
+
+        // Reject native-credential auth aimed across a forest boundary with no
+        // forged inter-realm ticket — the doomed KDC_ERR_WRONG_REALM mechanic.
+        if let Some(rejection) = check_cross_realm_auth(&self.queue, &self.operation_id, call).await
+        {
             return Ok(rejection);
         }
 
@@ -108,24 +116,30 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
             }
         }
 
+        // Spray lockout budget. Deliberately after the credential-resolution
+        // match rather than beside `inject_excluded_users`: the error arm
+        // rebuilds `resolved_arguments` from scratch, so injecting earlier
+        // would either be discarded or debit the tally twice. Here it runs
+        // exactly once, against the arguments actually dispatched.
+        inject_spray_attempts(&self.state, &call.name, &mut resolved_arguments).await;
+
         match ares_tools::dispatch(&effective_tool_name, &resolved_arguments).await {
             Ok(output) => {
                 let raw = output.combined_raw();
-                let combined = output.combined();
-                let error = if output.success {
-                    None
-                } else {
-                    Some(format!("tool exited with code {:?}", output.exit_code))
-                };
+                let mut combined = output.combined();
+                let error = ares_tools::executor::failure_message(&output);
 
                 // Parse structured discoveries from raw (unfiltered) output.
                 // Use the effective (post-redirect) tool name so the parser
                 // matches the actual binary that ran — secretsdump and
                 // secretsdump_kerberos emit slightly different output shapes.
-                let discoveries = ares_tools::parsers::parse_tool_output(
+                let discoveries = crate::orchestrator::output_extraction::gate_parsed_discoveries(
                     &effective_tool_name,
-                    &raw,
-                    &resolved_arguments,
+                    ares_tools::parsers::parse_tool_output(
+                        &effective_tool_name,
+                        &raw,
+                        &resolved_arguments,
+                    ),
                 );
                 let discoveries = if discoveries.as_object().is_none_or(|o| o.is_empty()) {
                     None
@@ -145,17 +159,47 @@ impl ares_llm::ToolDispatcher for LocalToolDispatcher {
                     .await;
                 }
 
+                // Mirror the worker path: flag a zero-yield unauthenticated
+                // harvest so the LLM changes strategy instead of re-spraying.
+                if output.success {
+                    if let Some(note) = ares_tools::parsers::empty_harvest_advisory(
+                        &effective_tool_name,
+                        discoveries.as_ref(),
+                    ) {
+                        combined.push_str(&note);
+                    }
+                }
+
                 Ok(ToolExecResult {
                     output: combined,
                     error,
                     discoveries,
+                    failure_kind: if output.success {
+                        None
+                    } else {
+                        Some(ares_llm::ToolFailureKind::ToolError)
+                    },
                 })
             }
-            Err(e) => Ok(ToolExecResult {
-                output: String::new(),
-                error: Some(e.to_string()),
-                discoveries: None,
-            }),
+            Err(e) => {
+                // Classify the spawn error via the typed marker so the
+                // in-process LocalToolDispatcher matches the NATS path's
+                // pruning behavior exactly (BinaryNotFound → prune,
+                // TransientSpawn → do not prune).
+                let failure_kind = ares_tools::spawn_error_kind(&e).map(|kind| {
+                    if kind.is_not_found() {
+                        ares_llm::ToolFailureKind::BinaryNotFound
+                    } else {
+                        ares_llm::ToolFailureKind::TransientSpawn
+                    }
+                });
+                Ok(ToolExecResult {
+                    output: String::new(),
+                    error: Some(e.to_string()),
+                    discoveries: None,
+                    failure_kind,
+                })
+            }
         }
     }
 }

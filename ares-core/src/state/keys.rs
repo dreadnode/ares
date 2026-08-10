@@ -9,6 +9,15 @@ pub const LOCK_PREFIX: &str = "ares:lock";
 /// Redis key prefix for task status records.
 pub const TASK_STATUS_PREFIX: &str = "ares:task_status";
 
+/// Retention TTL (seconds) applied to every remaining `ares:op:{id}:*` key when
+/// an operation is finalized. Bounds Redis growth under the `noeviction` policy:
+/// most per-op keys (hosts, hashes, credentials, loot, techniques, ...) are
+/// written without a TTL and would otherwise accumulate across every operation
+/// ever run. 24h matches the meta key's TTL, so an operation's full state
+/// expires in step with its discoverability — reports and blue learning resolve
+/// operations via the meta key, which is already gone by then.
+pub const OP_RETENTION_TTL_SECS: i64 = 86_400;
+
 // Collection key suffixes (appended to `ares:op:{op_id}:`)
 /// Redis HASH key suffix for discovered credentials (dedup_key → JSON).
 pub const KEY_CREDENTIALS: &str = "credentials";
@@ -29,6 +38,10 @@ pub const KEY_CANDIDATE_DOMAINS: &str = "candidate_domains";
 pub const KEY_VULNS: &str = "vulns";
 /// Redis SET key suffix for exploited vulnerability IDs.
 pub const KEY_EXPLOITED: &str = "exploited";
+/// Redis SET key suffix for vulnerability IDs credited only because another
+/// path reached the same goal. Subset of [`KEY_EXPLOITED`]; the technique
+/// itself was never proven to work.
+pub const KEY_SUPERSEDED: &str = "superseded";
 /// Redis HASH key suffix for operation metadata.
 pub const KEY_META: &str = "meta";
 /// Redis HASH key suffix mapping IP → DC hostname.
@@ -145,6 +158,14 @@ pub const BLUE_KEY_PIVOT_QUEUE: &str = "pivot_queue";
 /// Redis LIST key suffix for queued chained detection methods.
 #[cfg(feature = "blue")]
 pub const BLUE_KEY_CHAIN_QUEUE: &str = "chain_queue";
+/// Redis STRING key suffix for a supersede request signal.
+///
+/// Set when a newer investigation renders an in-flight one obsolete — the blue
+/// runner executes investigations serially, so a mid-op investigation built
+/// from partial loot must yield its slot rather than hold the terminal
+/// investigation behind it for up to a full investigation timeout.
+#[cfg(feature = "blue")]
+pub const BLUE_KEY_SUPERSEDE: &str = "supersede";
 
 /// Redis key prefix for blue team task queues.
 #[cfg(feature = "blue")]
@@ -172,6 +193,11 @@ pub const BLUE_STATUS_PREFIX: &str = "ares:blue:inv";
 /// Field = `{source}:{target}:{username}`, value = `KerberosTicket` JSON.
 pub const KEY_KERBEROS_TICKETS: &str = "kerberos_tickets";
 
+/// Redis LIST key suffix for operator escape-hatch inter-realm forge requests.
+/// Each element is a `ForceInterRealmForgeRequest` JSON blob RPUSHed by
+/// `ares ops force-inter-realm-forge`; the orchestrator trust loop drains it.
+pub const KEY_FORCE_FORGE_REQUESTS: &str = "force_forge_requests";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +220,7 @@ mod tests {
             KEY_DOMAINS,
             KEY_VULNS,
             KEY_EXPLOITED,
+            KEY_SUPERSEDED,
             KEY_META,
             KEY_DC_MAP,
             KEY_NETBIOS_MAP,
@@ -242,6 +269,7 @@ mod tests {
             KEY_DOMAINS,
             KEY_VULNS,
             KEY_EXPLOITED,
+            KEY_SUPERSEDED,
             KEY_META,
             KEY_DC_MAP,
             KEY_NETBIOS_MAP,

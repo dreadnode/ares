@@ -88,6 +88,86 @@ pub(crate) struct PhaseState {
     pub completed: bool,
 }
 
+/// Return true when `a` and `b` are in the same AD forest (intra-forest
+/// parent-child relationship), case-insensitively. Mirrors the helper in
+/// `ntlm_relay.rs` / `credential_reuse.rs` — duplicated here to avoid a
+/// cross-module dep for a three-line predicate, matching the pattern those
+/// modules already use. Empty inputs are treated as "unknown" and match only
+/// another empty string.
+fn same_forest_domain(a: &str, b: &str) -> bool {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    if a.is_empty() || b.is_empty() {
+        return a == b;
+    }
+    a == b || a.ends_with(&format!(".{b}")) || b.ends_with(&format!(".{a}"))
+}
+
+/// Credential-selection tier reached for an unconstrained-delegation work
+/// item. Recorded so the silent-drop warn names which fallback ladders ran
+/// dry — distinguishing "no cred anywhere" from "no cross-forest ccache, no
+/// same-forest fallback either" makes the next op's triage actionable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialTier {
+    /// Exact-domain match: `c.domain == vuln.domain`.
+    SameDomain,
+    /// Parent/child realm inside the same AD forest as the vuln domain.
+    /// Kerberos cross-realm referrals make the SMB / LSASS chain authenticate
+    /// transparently from the user's realm to the target DC's realm.
+    SameForest,
+}
+
+/// Pick a credential for an unconstrained-delegation vuln with progressive
+/// forest fallback. Same-domain wins; same-forest is acceptable because
+/// cross-realm referrals are transparent inside a forest. Cross-forest creds
+/// are NOT acceptable — the target DC rejects the foreign-realm principal
+/// without an inter-realm ccache (handled separately via
+/// [`inter_realm_ccache_for_target`]).
+///
+/// Skips quarantined principals so the spray-lockout feedback loop doesn't
+/// also poison the unconstrained-delegation chain.
+pub(crate) fn pick_unconstrained_credential(
+    state: &StateInner,
+    target_domain: &str,
+) -> Option<(ares_core::models::Credential, CredentialTier)> {
+    let dom_l = target_domain.to_lowercase();
+    // 1. Exact-domain match (preferred — no referral hop needed).
+    if let Some(c) = state.credentials.iter().find(|c| {
+        !c.password.is_empty()
+            && c.domain.to_lowercase() == dom_l
+            && !state.is_principal_quarantined(&c.username, &c.domain)
+    }) {
+        return Some((c.clone(), CredentialTier::SameDomain));
+    }
+    // 2. Same-forest fallback (parent or child realm).
+    if let Some(c) = state.credentials.iter().find(|c| {
+        !c.password.is_empty()
+            && same_forest_domain(&c.domain, target_domain)
+            && !state.is_principal_quarantined(&c.username, &c.domain)
+    }) {
+        return Some((c.clone(), CredentialTier::SameForest));
+    }
+    None
+}
+
+/// Look up the path of a published inter-realm ccache forged for
+/// `target_domain`. Populated by `dispatch_create_inter_realm_ticket` when
+/// the trust-follow suppression branch fires (see Bug A); downstream LLM
+/// exploit paths can hand the ccache to a Kerberos-capable tool to bind as
+/// `Administrator@TARGET_REALM` even when no plaintext cred for the target
+/// forest is in hand.
+pub(crate) fn inter_realm_ccache_for_target(
+    state: &StateInner,
+    target_domain: &str,
+) -> Option<String> {
+    let dom_l = target_domain.to_lowercase();
+    state
+        .kerberos_tickets
+        .iter()
+        .find(|t| t.target_domain.to_lowercase() == dom_l && !t.ticket_path.is_empty())
+        .map(|t| t.ticket_path.clone())
+}
+
 /// Look up the IP of the unconstrained-delegation machine account by
 /// matching its trailing-`$` prefix against `state.hosts`. Returns `None`
 /// when no host has a matching short hostname or FQDN.
@@ -186,23 +266,71 @@ pub(crate) fn select_unconstrained_work_items(
             // Credentials gate applies to both deterministic and
             // LLM-fallback paths — without a working cred for the
             // account's domain neither variant can authenticate.
-            let credential = state
-                .credentials
-                .iter()
-                .find(|c| {
-                    !c.password.is_empty()
-                        && c.domain.to_lowercase() == domain.to_lowercase()
-                        && !state.is_principal_quarantined(&c.username, &c.domain)
-                })
-                .cloned();
+            //
+            // Bug 2: pre-fix this was an exact-domain match only, which
+            // silently dropped the work item whenever no same-realm cred
+            // had been captured yet. In a cross-forest soak the most
+            // common case is: vuln on `DC02$@fabrikam.local`, every cred
+            // is `*@contoso.local` or a child realm, no cred for
+            // fabrikam until late in the op. Falling back to same-forest
+            // (parent/child realm) restores the work item whenever
+            // referrals can carry the auth, and surfacing the published
+            // inter-realm ccache gives the LLM-exploit path a Kerberos
+            // option even when no plaintext fabrikam cred ever lands.
+            let (credential, _cred_tier) =
+                match pick_unconstrained_credential(state, &domain) {
+                    Some((c, tier)) => (Some(c), Some(tier)),
+                    None => (None, None),
+                };
+            let inter_realm_ticket_path = if credential.is_none() {
+                inter_realm_ccache_for_target(state, &domain)
+            } else {
+                None
+            };
 
-            credential.as_ref()?;
+            if credential.is_none() && inter_realm_ticket_path.is_none() {
+                // Silent-drop visibility — the previous code returned
+                // `None` here with no log line, so the operator had no
+                // way to tell an unconstrained-delegation vuln from a
+                // missing-cred drop without grepping discovered_vulns
+                // against the dispatch trace.
+                warn!(
+                    vuln_id = %vuln.vuln_id,
+                    account = %account_name,
+                    domain = %domain,
+                    "Unconstrained delegation: no credential and no inter-realm ccache for target — work dropped (Bug 2 visibility)"
+                );
+                return None;
+            }
+            // Two LlmExploit return paths below (user accounts + unknown-
+            // host machines) each consume `inter_realm_ticket_path`. Only
+            // one fires per iteration (the first returns), so Rust's
+            // conditional-move analysis lets both use the same binding
+            // without cloning.
 
             // User accounts: always LLM-routed (the user's TGT lives on
             // their workstation, not on the DC; the LLM has to find a
             // host where the user is logged in and pull their TGT).
-            if !is_machine {
-                let dedup_key = format!("uc_user:{}", account_name.to_lowercase());
+            // User accounts and unknown-host machines share the LlmExploit
+            // path; `!is_machine` and `machine_host_unknown` are mutually
+            // exclusive so the inter-realm ccache binding can be moved
+            // once into whichever branch fires.
+            if !is_machine || machine_host_unknown {
+                let dedup_key = if !is_machine {
+                    // User account: TGT lives on the user's workstation,
+                    // not the DC, so the LLM has to find a host where the
+                    // user is logged in and pull their TGT.
+                    format!("uc_user:{}", account_name.to_lowercase())
+                } else {
+                    // Machine account with no known host IP. The
+                    // skip_self_coerce_loop check below is intentionally
+                    // bypassed — that guard only applies to the
+                    // deterministic coerce path against a machine whose
+                    // host IS in state.hosts and happens to coincide with
+                    // the DC. The LLM-fallback path treats dc_ip as a
+                    // starting hint, not as the coerce-loopback target.
+                    format!("uc_machine_unknown:{}", account_name.to_lowercase())
+                };
                 return Some(UnconstrainedWork {
                     vuln_id: vuln.vuln_id.clone(),
                     account_name,
@@ -212,29 +340,7 @@ pub(crate) fn select_unconstrained_work_items(
                     credential,
                     action: Action::LlmExploit,
                     _dedup_key: Some(dedup_key),
-                });
-            }
-
-            // Machine account with no known host IP: route to LLM exploit
-            // with a distinct dedup key so it doesn't collide with user
-            // LlmExploit work and doesn't compete with the resolved-host
-            // coerce-dump phases. The skip_self_coerce_loop check below is
-            // intentionally bypassed — that guard only applies to the
-            // deterministic coerce path against a machine whose host IS in
-            // state.hosts and happens to coincide with the DC. The
-            // LLM-fallback path treats dc_ip as a starting hint, not as
-            // the coerce-loopback target.
-            if machine_host_unknown {
-                let dedup_key = format!("uc_machine_unknown:{}", account_name.to_lowercase());
-                return Some(UnconstrainedWork {
-                    vuln_id: vuln.vuln_id.clone(),
-                    account_name,
-                    domain,
-                    host_ip,
-                    dc_ip,
-                    credential,
-                    action: Action::LlmExploit,
-                    _dedup_key: Some(dedup_key),
+                    inter_realm_ticket_path,
                 });
             }
 
@@ -282,6 +388,10 @@ pub(crate) fn select_unconstrained_work_items(
                 _ => return None,
             };
 
+            // Deterministic Coerce/Dump paths need a plaintext credential
+            // for SMB pipe auth; the inter-realm ccache is informational
+            // here (the LLM-fallback paths above carry it explicitly).
+            credential.as_ref()?;
             Some(UnconstrainedWork {
                 vuln_id: vuln.vuln_id.clone(),
                 account_name,
@@ -291,6 +401,7 @@ pub(crate) fn select_unconstrained_work_items(
                 credential,
                 action,
                 _dedup_key: None,
+                inter_realm_ticket_path: None,
             })
         })
         .collect()
@@ -342,12 +453,19 @@ pub(crate) fn build_unconstrained_dump_payload(item: &UnconstrainedWork) -> Valu
 }
 
 /// Build the user-account LLM-exploit payload (for non-machine principals).
-/// Pure JSON construction; `Value::Null` when no credential is attached.
+/// Pure JSON construction.
+///
+/// Either a credential OR an inter-realm ccache must be present — the
+/// work-item builder guarantees this (silent-drop warn fires otherwise).
+/// When only the ccache is available, the LLM gets `ticket_path` and is
+/// expected to invoke a Kerberos-capable enum or exploit tool against the
+/// foreign DC (the credential resolver's `tool_consumes_ticket_path`
+/// allowlist + `KRB5CCNAME` wiring handle the env plumbing).
 pub(crate) fn build_unconstrained_llm_exploit_payload(item: &UnconstrainedWork) -> Value {
-    let Some(cred) = item.credential.as_ref() else {
+    if item.credential.is_none() && item.inter_realm_ticket_path.is_none() {
         return Value::Null;
-    };
-    json!({
+    }
+    let mut payload = json!({
         "technique": "unconstrained_delegation_exploit",
         "vuln_type": "unconstrained_delegation",
         "vuln_id": item.vuln_id,
@@ -356,12 +474,19 @@ pub(crate) fn build_unconstrained_llm_exploit_payload(item: &UnconstrainedWork) 
         "domain": item.domain,
         "account_name": item.account_name,
         "is_user_account": true,
-        "credential": {
+    });
+    if let Some(cred) = item.credential.as_ref() {
+        payload["credential"] = json!({
             "username": cred.username,
             "password": cred.password,
             "domain": cred.domain,
-        },
-    })
+        });
+    }
+    if let Some(ticket) = item.inter_realm_ticket_path.as_ref() {
+        payload["ticket_path"] = json!(ticket);
+        payload["auth_via_kerberos"] = json!(true);
+    }
+    payload
 }
 
 /// Monitors for unconstrained delegation vulns and orchestrates coerce → dump.
@@ -562,6 +687,12 @@ pub(crate) struct UnconstrainedWork {
     pub credential: Option<ares_core::models::Credential>,
     pub action: Action,
     pub _dedup_key: Option<String>,
+    /// Cross-forest inter-realm ccache path forged by
+    /// `dispatch_create_inter_realm_ticket` for `domain`. Set on
+    /// `LlmExploit` work items when no plaintext same-forest cred is
+    /// available so the LLM exploit agent can still authenticate to the
+    /// foreign DC via Kerberos.
+    pub inter_realm_ticket_path: Option<String>,
 }
 
 #[cfg(test)]
@@ -900,6 +1031,7 @@ mod tests {
             }),
             action: Action::Coerce,
             _dedup_key: None,
+            inter_realm_ticket_path: None,
         };
 
         assert!(work.account_name.ends_with('$'));
@@ -930,6 +1062,7 @@ mod tests {
             }),
             action: Action::Dump,
             _dedup_key: None,
+            inter_realm_ticket_path: None,
         };
 
         assert!(matches!(work.action, Action::Dump));
@@ -957,6 +1090,7 @@ mod tests {
             }),
             action: Action::LlmExploit,
             _dedup_key: Some("uc_user:svc_admin".to_string()),
+            inter_realm_ticket_path: None,
         };
 
         assert!(!work.account_name.ends_with('$'));
@@ -1164,7 +1298,7 @@ mod tests {
         ));
     }
 
-    // ── helpers for select_unconstrained_work_items / payload builder tests ──
+    // helpers for select_unconstrained_work_items / payload builder tests
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -1212,8 +1346,6 @@ mod tests {
         }
     }
 
-    // --- find_host_ip_for_machine_account ------------------------------
-
     #[test]
     fn find_host_ip_short_hostname_match() {
         let mut s = StateInner::new("op-test".into());
@@ -1251,8 +1383,6 @@ mod tests {
             .push(make_host("dc011.contoso.local", "192.168.58.11"));
         assert!(find_host_ip_for_machine_account(&s, "DC01$").is_none());
     }
-
-    // --- select_unconstrained_work_items -------------------------------
 
     #[test]
     fn select_uc_skips_other_vuln_types() {
@@ -1549,8 +1679,6 @@ mod tests {
         assert!(select_unconstrained_work_items(&s, &HashMap::new(), Instant::now()).is_empty());
     }
 
-    // --- payload builders ---------------------------------------------
-
     fn coerce_work() -> UnconstrainedWork {
         UnconstrainedWork {
             vuln_id: "v1".into(),
@@ -1561,6 +1689,7 @@ mod tests {
             credential: Some(make_cred("alice", "Pw!", "contoso.local")),
             action: Action::Coerce,
             _dedup_key: None,
+            inter_realm_ticket_path: None,
         }
     }
 
@@ -1625,9 +1754,186 @@ mod tests {
     }
 
     #[test]
-    fn llm_exploit_payload_null_when_no_credential() {
+    fn llm_exploit_payload_null_when_no_credential_and_no_ticket() {
+        // Bug 2: when neither tier of credential fallback found a cred AND
+        // no inter-realm ccache is published, the payload must be Null —
+        // there's nothing for the LLM to authenticate with.
         let mut w = coerce_work();
         w.credential = None;
+        w.inter_realm_ticket_path = None;
         assert!(build_unconstrained_llm_exploit_payload(&w).is_null());
+    }
+
+    #[test]
+    fn llm_exploit_payload_carries_inter_realm_ccache_when_only_ticket_present() {
+        // Bug 2: a published inter-realm ccache for the target domain is a
+        // valid auth fallback for the LLM-exploit path (the LLM picks a
+        // Kerberos-capable enum/exploit tool and the credential resolver
+        // wires KRB5CCNAME from `ticket_path`). The payload must surface
+        // the ticket path and flag the kerberos-auth flow.
+        let mut w = coerce_work();
+        w.credential = None;
+        w.inter_realm_ticket_path =
+            Some("/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache".into());
+        let p = build_unconstrained_llm_exploit_payload(&w);
+        assert!(!p.is_null());
+        assert_eq!(
+            p["ticket_path"],
+            "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache"
+        );
+        assert_eq!(p["auth_via_kerberos"], true);
+        assert!(p.get("credential").is_none());
+    }
+
+    // Bug 2: credential-fallback tiers + inter-realm ccache visibility
+
+    #[test]
+    fn pick_unconstrained_credential_prefers_same_domain() {
+        let mut s = StateInner::new("op-test".into());
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.credentials
+            .push(make_cred("bob", "Pw!", "child.contoso.local"));
+        let (c, tier) = pick_unconstrained_credential(&s, "contoso.local").expect("cred");
+        assert_eq!(c.username, "alice");
+        assert_eq!(tier, CredentialTier::SameDomain);
+    }
+
+    #[test]
+    fn pick_unconstrained_credential_falls_back_to_same_forest() {
+        // No exact-domain cred — a child-realm cred should still be picked
+        // because cross-realm referrals are transparent inside a forest.
+        let mut s = StateInner::new("op-test".into());
+        s.credentials
+            .push(make_cred("bob", "Pw!", "child.contoso.local"));
+        let (c, tier) = pick_unconstrained_credential(&s, "contoso.local").expect("cred");
+        assert_eq!(c.username, "bob");
+        assert_eq!(tier, CredentialTier::SameForest);
+    }
+
+    #[test]
+    fn pick_unconstrained_credential_rejects_cross_forest() {
+        // A cred in a different forest must NOT be returned — the target
+        // DC rejects the foreign-realm principal without an inter-realm
+        // referral ticket.
+        let mut s = StateInner::new("op-test".into());
+        s.credentials
+            .push(make_cred("carol", "P@ssw0rd!", "contoso.local"));
+        assert!(pick_unconstrained_credential(&s, "fabrikam.local").is_none());
+    }
+
+    #[test]
+    fn pick_unconstrained_credential_skips_quarantined_principal() {
+        let mut s = StateInner::new("op-test".into());
+        s.credentials
+            .push(make_cred("alice", "Pw!", "contoso.local"));
+        s.quarantine_principal("alice", "contoso.local");
+        assert!(pick_unconstrained_credential(&s, "contoso.local").is_none());
+    }
+
+    #[test]
+    fn inter_realm_ccache_for_target_finds_published_ticket() {
+        let mut s = StateInner::new("op-test".into());
+        s.kerberos_tickets.push(ares_core::models::KerberosTicket {
+            source_domain: "contoso.local".into(),
+            target_domain: "fabrikam.local".into(),
+            username: "Administrator".into(),
+            ticket_path: "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache"
+                .into(),
+            forged_at: None,
+        });
+        assert_eq!(
+            inter_realm_ccache_for_target(&s, "fabrikam.local").as_deref(),
+            Some("/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache")
+        );
+        // Case-insensitive lookup.
+        assert!(inter_realm_ccache_for_target(&s, "FABRIKAM.LOCAL").is_some());
+        // Missing target returns None.
+        assert!(inter_realm_ccache_for_target(&s, "child.fabrikam.local").is_none());
+    }
+
+    #[test]
+    fn select_uc_falls_back_to_same_forest_cred_for_user_account() {
+        // Vuln on user@contoso.local; only available cred is from
+        // child.contoso.local — same forest, so the LlmExploit path
+        // should still fire instead of silently dropping.
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v-uc-user", "alice.smith", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("bob", "Pw!", "child.contoso.local"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        let work = select_unconstrained_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].action, Action::LlmExploit);
+        assert_eq!(work[0].credential.as_ref().unwrap().username, "bob");
+        assert!(work[0].inter_realm_ticket_path.is_none());
+    }
+
+    #[test]
+    fn select_uc_surfaces_inter_realm_ccache_when_no_forest_cred() {
+        // Cross-forest vuln on DC02$@fabrikam.local; only cred is in a
+        // different forest entirely. Pre-Bug 2 fix this dropped silently;
+        // now we surface the published inter-realm ccache so the
+        // LlmExploit path has a kerberos auth option.
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v-uc-cross", "alice.smith", "fabrikam.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.credentials
+            .push(make_cred("carol", "P@ssw0rd!", "contoso.local"));
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.20".into());
+        s.kerberos_tickets.push(ares_core::models::KerberosTicket {
+            source_domain: "contoso.local".into(),
+            target_domain: "fabrikam.local".into(),
+            username: "Administrator".into(),
+            ticket_path: "/tmp/ares-tickets/contoso_local__fabrikam_local__Administrator.ccache"
+                .into(),
+            forged_at: None,
+        });
+        let work = select_unconstrained_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].action, Action::LlmExploit);
+        // No cred chosen (no same-forest match) — kerberos ccache instead.
+        assert!(work[0].credential.is_none());
+        assert!(work[0].inter_realm_ticket_path.is_some());
+    }
+
+    #[test]
+    fn select_uc_drops_with_warn_when_no_cred_and_no_ccache() {
+        // No same-forest cred, no inter-realm ccache: the vuln is dropped
+        // (as before), but with a visibility warn rather than silently.
+        // The drop itself is what we assert; the warn is observable in
+        // tracing-test if needed.
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v-uc-orphan", "alice.smith", "fabrikam.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.20".into());
+        let work = select_unconstrained_work_items(&s, &HashMap::new(), Instant::now());
+        assert!(work.is_empty());
+    }
+
+    #[test]
+    fn select_uc_machine_path_requires_password_cred() {
+        // Resolved-host machine with same-forest cred works; with only an
+        // inter-realm ccache (no plaintext cred at all) the deterministic
+        // Coerce/Dump payload can't be built, so the machine path drops —
+        // the LlmExploit fallback already handled the ccache path above
+        // for unknown-host machines.
+        let mut s = StateInner::new("op-test".into());
+        let v = make_uc_vuln("v-uc-mach", "DC02$", "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.hosts
+            .push(make_host("dc02.contoso.local", "192.168.58.11"));
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+        s.credentials
+            .push(make_cred("bob", "Pw!", "child.contoso.local"));
+        let work = select_unconstrained_work_items(&s, &HashMap::new(), Instant::now());
+        assert_eq!(work.len(), 1);
+        assert!(matches!(work[0].action, Action::Coerce));
+        assert!(work[0].credential.is_some());
     }
 }

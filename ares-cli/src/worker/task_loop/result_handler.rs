@@ -17,6 +17,15 @@ use super::types::{TaskMessage, TaskResult};
 
 const TASK_STATUS_PREFIX: &str = "ares:task_status";
 
+/// Resolve the role a task ran as, mirroring `Dispatcher::do_submit_outcome`.
+/// Empty when unresolvable, which suppresses the role counters.
+fn resolve_task_role(task: &TaskMessage) -> String {
+    ares_llm::tool_registry::AgentRole::parse(&task.target_agent)
+        .or_else(|| crate::orchestrator::llm_runner::role_for_task_type(&task.task_type))
+        .map(|r| r.as_str().to_string())
+        .unwrap_or_default()
+}
+
 /// Process a single task: set status, run agent, publish result.
 pub async fn process_task(
     conn: &mut redis::aio::ConnectionManager,
@@ -44,7 +53,19 @@ pub async fn process_task(
         warn!(task_id = %task.task_id, "Failed to set task status to running: {e}");
     }
 
-    let agent_result = run_agent_task(&task.task_type, &task.payload, config.task_timeout).await;
+    // Pass `conn` + `operation_id` so run_agent_task's per-tool dispatches
+    // pick up credential_resolver injection (KRB5CCNAME, NTLM hash,
+    // Kerberos-variant tool rename). Pre-fix this path bypassed the
+    // resolver entirely — every cred-injection fix the orchestrator made
+    // only ran via LocalToolDispatcher.
+    let agent_result = run_agent_task(
+        &task.task_type,
+        &task.payload,
+        config.task_timeout,
+        Some(conn.clone()),
+        config.operation_id.as_deref(),
+    )
+    .await;
 
     let usage_for_tracking = agent_result.as_ref().ok().and_then(|ar| ar.usage.clone());
 
@@ -60,12 +81,15 @@ pub async fn process_task(
         if usage.total_tokens > 0 {
             if let Some(ref op_id) = config.operation_id {
                 let model = usage.model.as_deref().unwrap_or("");
+                let role = resolve_task_role(task);
                 if let Err(e) = token_usage::increment_token_usage(
                     conn,
                     op_id,
                     usage.input_tokens,
+                    usage.cache_read_input_tokens,
                     usage.output_tokens,
                     model,
+                    &role,
                 )
                 .await
                 {
@@ -75,7 +99,6 @@ pub async fn process_task(
         }
     }
 
-    // Publish result to JetStream result subject
     match serde_json::to_vec(&task_result) {
         Ok(bytes) => {
             let subject = nats::task_result_subject(&task.task_id);
@@ -273,6 +296,7 @@ mod tests {
                 input_tokens: 12,
                 output_tokens: 34,
                 total_tokens: 46,
+                cache_read_input_tokens: 0,
                 model: Some("openai/gpt-4.1-mini".into()),
             }),
             discoveries: None,

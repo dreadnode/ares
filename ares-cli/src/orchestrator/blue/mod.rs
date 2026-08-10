@@ -12,8 +12,10 @@ pub mod auto_submit;
 mod callbacks;
 pub mod chaining;
 mod investigation;
-mod runner;
+pub(crate) mod runner;
+pub(crate) mod simulated_response;
 mod sub_agent;
+mod sweep;
 
 pub use auto_submit::spawn_blue_auto_submit;
 pub use runner::spawn_blue_orchestrator;

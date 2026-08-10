@@ -88,7 +88,6 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
             }
         }
 
-        // OS detection
         if line.starts_with("OS details:") || line.starts_with("Running:") {
             os_info = line
                 .split_once(':')
@@ -151,7 +150,6 @@ pub fn parse_nmap_output(output: &str, params: &Value) -> Vec<Value> {
         }
     }
 
-    // Flush last host
     if seen_report && !current_ip.is_empty() {
         flush_nmap_host(&current_ip, &hostname, &os_info, &services, &mut hosts);
     }
@@ -204,7 +202,6 @@ pub fn flush_nmap_host(
         roles.push("domain_controller".to_string());
     }
 
-    // Check for common services to assign roles
     if services.iter().any(|s| s.contains("1433")) {
         roles.push("mssql".to_string());
     }

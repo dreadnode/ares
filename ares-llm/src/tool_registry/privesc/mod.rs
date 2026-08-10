@@ -7,7 +7,7 @@
 //! - `escalation` — Windows privesc binaries, gMSA, unconstrained delegation
 //! - `cve_exploits` — noPac, PrintNightmare, PetitPotam
 
-mod adcs;
+pub(super) mod adcs;
 mod cve_exploits;
 mod delegation;
 mod escalation;

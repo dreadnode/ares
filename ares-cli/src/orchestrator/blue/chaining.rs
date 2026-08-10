@@ -6,15 +6,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-use anyhow::Result;
-use chrono::Utc;
 use serde_json::Value;
-use tracing::{debug, info};
+use tracing::info;
 
-use ares_core::state::blue_task_queue::{BlueTaskMessage, BlueTaskQueue, BlueTaskResult};
+use ares_core::state::blue_task_queue::BlueTaskResult;
 use ares_llm::tool_registry::blue::BlueAgentRole;
-
-// ── Static configuration ───────────────────────────────────────────
 
 /// Follow-up action descriptor produced by evidence chaining.
 #[derive(Debug, Clone)]
@@ -31,8 +27,8 @@ struct ChainAction {
 ///
 /// When a task result contains an evidence type key, the corresponding
 /// actions are dispatched as follow-up sub-tasks (subject to dedup).
-static EVIDENCE_CHAIN_MAP: LazyLock<HashMap<&'static str, Vec<ChainAction>>> =
-    LazyLock::new(|| {
+static EVIDENCE_CHAIN_MAP: LazyLock<HashMap<&'static str, Vec<ChainAction>>> = LazyLock::new(
+    || {
         let mut m = HashMap::new();
 
         m.insert(
@@ -105,8 +101,57 @@ static EVIDENCE_CHAIN_MAP: LazyLock<HashMap<&'static str, Vec<ChainAction>>> =
             ],
         );
 
+        // Crown-jewel evidence types (the paths blue historically missed)
+        // Focus strings are actionable: event IDs to query and fields to check,
+        // not English blurbs — the sub-agent gets them verbatim as its focus.
+
+        m.insert(
+            "certificate_abuse",
+            vec![ChainAction {
+                task_type: "threat_hunt",
+                role: BlueAgentRole::ThreatHunter,
+                focus: "ADCS ESC1/4/8 chain: run detect_esc1_attack + detect_adcs_exploitation; \
+                        correlate 4886 (request) with 4887 (issue); flag requester != SubjectUserName; \
+                        4768 PreAuthType=17 (PKINIT cert auth)",
+            }],
+        );
+
+        m.insert(
+            "sid_history",
+            vec![ChainAction {
+                task_type: "threat_hunt",
+                role: BlueAgentRole::ThreatHunter,
+                focus: "inter-realm SID history: run detect_cross_realm_tgs + detect_sid_history_extrasid; \
+                        4769 ServiceName=krbtgt/<foreign_realm>; child-domain krbtgt principal used against \
+                        the parent DC; 4662/4627 with Enterprise/Domain-Admin RIDs (-519/-512) in ExtraSids",
+            }],
+        );
+
+        m.insert(
+            "cross_forest",
+            vec![ChainAction {
+                task_type: "lateral_analysis",
+                role: BlueAgentRole::LateralAnalyst,
+                focus: "trust-key material used across a forest boundary: run detect_trust_key_exfil; \
+                        DC machine-account (DOMAIN$) auth (4776/4624 type 3) into a foreign domain; \
+                        drsuapi/1131f6aa replication of a trust account",
+            }],
+        );
+
+        m.insert(
+            "asrep_roast",
+            vec![ChainAction {
+                task_type: "user_investigation",
+                role: BlueAgentRole::ThreatHunter,
+                focus: "preauth-disabled account activity post-crack: run detect_asrep_roasting; \
+                        4768 PreAuthType=0 (NOT the 0x17 Kerberoast pattern); then trace the roasted \
+                        account's logons/lateral use after the crack window",
+            }],
+        );
+
         m
-    });
+    },
+);
 
 /// Users whose appearance in results triggers automatic escalation.
 static CRITICAL_USERS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
@@ -119,103 +164,114 @@ static CRITICAL_USERS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     s
 });
 
-// ── Public API ─────────────────────────────────────────────────────
+/// A follow-up hunt the chain map wants to run, resolved from evidence.
+///
+/// The planner returns these; the caller executes them (inline in this
+/// deployment, since there is no blue-task worker fleet to consume an
+/// enqueued task). Kept `Clone` so callers can log/collect them freely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedChain {
+    /// Evidence type that triggered this follow-up (for logging / prompts).
+    pub evidence_type: String,
+    /// Task type label (e.g. `"threat_hunt"`, `"lateral_analysis"`).
+    pub task_type: &'static str,
+    /// Worker role that should run the follow-up.
+    pub role: BlueAgentRole,
+    /// Actionable focus string handed to the sub-agent verbatim.
+    pub focus: &'static str,
+}
 
-/// Process a completed task result and dispatch any follow-up tasks
-/// dictated by the evidence chain map.
+/// Escalation hunts fired when a critical user (krbtgt / DA) shows up. These
+/// look UPSTREAM for the path that produced the compromise — including the
+/// ADCS cert path, which blue historically never checked.
+const ESCALATION_HUNTS: &[(&str, BlueAgentRole, &str)] = &[
+    (
+        "threat_hunt",
+        BlueAgentRole::ThreatHunter,
+        "DCSync for critical-user activity: run detect_dcsync + detect_dcsync_replication; \
+         4662 replication by a user account. Golden ticket (T1558.001) is already decided by \
+         the baseline sweep's 4769-without-4768 correlation — do not re-derive it from \
+         single-event fields such as a krbtgt ServiceName or a non-DC source IP, which match \
+         ordinary Kerberos traffic",
+    ),
+    (
+        "threat_hunt",
+        BlueAgentRole::ThreatHunter,
+        "UPSTREAM ADCS cert path for the critical user: run detect_esc1_attack + \
+         detect_adcs_exploitation; 4886/4887 where requester != SubjectUserName; PKINIT 4768",
+    ),
+    (
+        "threat_hunt",
+        BlueAgentRole::ThreatHunter,
+        "UPSTREAM cross-realm forge: run detect_cross_realm_tgs + detect_sid_history_extrasid; \
+         krbtgt/<foreign_realm> TGS, ExtraSids with -519/-512 RIDs",
+    ),
+];
+
+/// Resolve the follow-up hunts implied by a result payload, honoring the
+/// per-investigation dedup set (`"{evidence_type}:{task_type}"` entries).
 ///
-/// Returns the list of newly dispatched task IDs (may be empty).
-///
-/// `dispatched_chains` is the per-investigation dedup set: each entry
-/// is `"{evidence_type}:{task_type}"`. The caller must persist this
-/// set across calls for the same investigation.
-pub async fn process_task_result(
-    result: &BlueTaskResult,
-    task_queue: &mut BlueTaskQueue,
-    investigation_id: &str,
+/// Pure and synchronous — it does not dispatch. The caller runs the returned
+/// hunts. `dispatched_chains` is mutated so repeated calls for the same
+/// investigation don't re-plan the same follow-up.
+pub fn plan_chain_actions(
+    payload: &Value,
     dispatched_chains: &mut HashSet<String>,
-) -> Result<Vec<String>> {
-    let (true, Some(payload)) = (&result.success, &result.result) else {
-        return Ok(Vec::new());
-    };
-
-    let mut new_task_ids = Vec::new();
-
-    // 1. Extract evidence types from the result payload.
-    let evidence_types = extract_evidence_types(payload);
-
-    for ev_type in &evidence_types {
+) -> Vec<PlannedChain> {
+    let mut planned = Vec::new();
+    for ev_type in extract_evidence_types(payload) {
         if let Some(actions) = EVIDENCE_CHAIN_MAP.get(ev_type.as_str()) {
             for action in actions {
                 let dedup_key = format!("{ev_type}:{}", action.task_type);
-                if dispatched_chains.contains(&dedup_key) {
-                    debug!(
-                        investigation_id,
-                        evidence_type = ev_type.as_str(),
-                        task_type = action.task_type,
-                        "Skipping duplicate chain dispatch"
-                    );
-                    continue;
+                if dispatched_chains.insert(dedup_key) {
+                    planned.push(PlannedChain {
+                        evidence_type: ev_type.clone(),
+                        task_type: action.task_type,
+                        role: action.role,
+                        focus: action.focus,
+                    });
                 }
-
-                let task_id =
-                    dispatch_chain_task(task_queue, investigation_id, action, ev_type).await?;
-
-                dispatched_chains.insert(dedup_key);
-                new_task_ids.push(task_id);
             }
         }
     }
+    planned
+}
 
-    // 2. Check for critical user escalation.
+/// Plan all follow-up hunts for a completed task result: evidence-driven
+/// chains plus critical-user escalation hunts. Returns the deduped set of
+/// hunts to run.
+pub fn plan_task_result(
+    result: &BlueTaskResult,
+    dispatched_chains: &mut HashSet<String>,
+) -> Vec<PlannedChain> {
+    let (true, Some(payload)) = (&result.success, &result.result) else {
+        return Vec::new();
+    };
+
+    let mut planned = plan_chain_actions(payload, dispatched_chains);
+
+    // Critical-user escalation: look upstream (golden/DCSync + ADCS + cross-realm).
     if let Some(reason) = should_escalate(result) {
-        let escalation_dedup = "escalation:critical_user".to_string();
-        if !dispatched_chains.contains(&escalation_dedup) {
+        if dispatched_chains.insert("escalation:critical_user".to_string()) {
             info!(
-                investigation_id,
                 reason = reason.as_str(),
-                "Auto-escalating: critical user detected"
+                "Auto-escalation: planning upstream hunts"
             );
-
-            // Dispatch both golden ticket detection and DCSync detection.
-            for (task_type, focus) in [
-                (
-                    "threat_hunt",
-                    "golden ticket detection for critical user activity",
-                ),
-                ("threat_hunt", "DCSync detection for critical user activity"),
-            ] {
+            for &(task_type, role, focus) in ESCALATION_HUNTS {
                 let sub_dedup = format!("escalation:{task_type}:{focus}");
-                if dispatched_chains.contains(&sub_dedup) {
-                    continue;
+                if dispatched_chains.insert(sub_dedup) {
+                    planned.push(PlannedChain {
+                        evidence_type: "critical_user".to_string(),
+                        task_type,
+                        role,
+                        focus,
+                    });
                 }
-
-                let action = ChainAction {
-                    task_type,
-                    role: BlueAgentRole::ThreatHunter,
-                    focus,
-                };
-                let task_id =
-                    dispatch_chain_task(task_queue, investigation_id, &action, "critical_user")
-                        .await?;
-                dispatched_chains.insert(sub_dedup);
-                new_task_ids.push(task_id);
             }
-
-            dispatched_chains.insert(escalation_dedup);
         }
     }
 
-    if !new_task_ids.is_empty() {
-        info!(
-            investigation_id,
-            count = new_task_ids.len(),
-            task_ids = ?new_task_ids,
-            "Auto-chained follow-up tasks"
-        );
-    }
-
-    Ok(new_task_ids)
+    planned
 }
 
 /// Check whether a task result warrants automatic escalation.
@@ -224,7 +280,6 @@ pub async fn process_task_result(
 pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
     let payload = result.result.as_ref()?;
 
-    // Check users_investigated array for critical user names.
     if let Some(users) = payload.get("users_investigated").and_then(|v| v.as_array()) {
         for user in users {
             if let Some(name) = user.as_str() {
@@ -237,7 +292,6 @@ pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
         }
     }
 
-    // Check evidence_highlights for critical user mentions.
     if let Some(highlights) = payload
         .get("evidence_highlights")
         .and_then(|v| v.as_array())
@@ -254,7 +308,6 @@ pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
         }
     }
 
-    // Check for high-severity indicators in the result.
     if let Some(severity) = payload.get("severity").and_then(|v| v.as_str()) {
         let sev_lower = severity.to_lowercase();
         if sev_lower == "critical" || sev_lower == "high" {
@@ -262,7 +315,6 @@ pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
         }
     }
 
-    // Check findings text for critical user mentions.
     if let Some(findings) = payload.get("findings").and_then(|v| v.as_str()) {
         let lower = findings.to_lowercase();
         for &critical in CRITICAL_USERS.iter() {
@@ -275,8 +327,6 @@ pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
     None
 }
 
-// ── Internals ──────────────────────────────────────────────────────
-
 /// Extract evidence type strings from a result payload.
 ///
 /// Looks for:
@@ -286,7 +336,6 @@ pub fn should_escalate(result: &BlueTaskResult) -> Option<String> {
 fn extract_evidence_types(payload: &Value) -> Vec<String> {
     let mut types = Vec::new();
 
-    // Direct evidence_types array
     if let Some(arr) = payload.get("evidence_types").and_then(|v| v.as_array()) {
         for item in arr {
             if let Some(s) = item.as_str() {
@@ -295,7 +344,6 @@ fn extract_evidence_types(payload: &Value) -> Vec<String> {
         }
     }
 
-    // Evidence objects with a "type" field
     if let Some(arr) = payload.get("evidence").and_then(|v| v.as_array()) {
         for item in arr {
             if let Some(ev_type) = item.get("type").and_then(|v| v.as_str()) {
@@ -304,12 +352,27 @@ fn extract_evidence_types(payload: &Value) -> Vec<String> {
         }
     }
 
-    // MITRE technique mapping
     if let Some(arr) = payload.get("techniques_found").and_then(|v| v.as_array()) {
         for tech in arr {
             if let Some(tech_str) = tech.as_str() {
                 let lower = tech_str.to_lowercase();
-                if lower.contains("t1558") {
+                // Specific sub-techniques MUST be matched before their generic
+                // parents (e.g. t1558.004 before t1558) so the crown-jewel paths
+                // route to their dedicated chains instead of the generic bucket.
+                if lower.contains("t1558.004") {
+                    // AS-REP Roasting -> asrep_roast (preauth-disabled hunt)
+                    types.push("asrep_roast".to_string());
+                } else if lower.contains("t1134.005") {
+                    // SID-History (inter-realm / child->parent forge) -> sid_history
+                    types.push("sid_history".to_string());
+                } else if lower.contains("t1649")
+                    || lower.contains("adcs")
+                    || lower.contains("certipy")
+                    || lower.contains("certificate")
+                {
+                    // ADCS / certificate abuse (ESC1/4/8) -> certificate_abuse
+                    types.push("certificate_abuse".to_string());
+                } else if lower.contains("t1558") {
                     // Kerberoasting -> credential_access
                     types.push("credential_access".to_string());
                 } else if lower.contains("t1003") {
@@ -340,50 +403,6 @@ fn extract_evidence_types(payload: &Value) -> Vec<String> {
     types.retain(|t| seen.insert(t.clone()));
 
     types
-}
-
-/// Dispatch a single chained follow-up task to the blue task queue.
-async fn dispatch_chain_task(
-    task_queue: &mut BlueTaskQueue,
-    investigation_id: &str,
-    action: &ChainAction,
-    evidence_type: &str,
-) -> Result<String> {
-    let task_id = format!(
-        "chain_{}_{}_{}_{}",
-        action.task_type,
-        evidence_type,
-        investigation_id.chars().take(8).collect::<String>(),
-        &uuid::Uuid::new_v4().simple().to_string()[..8]
-    );
-
-    let params = serde_json::json!({
-        "chained_from_evidence": evidence_type,
-        "focus": action.focus,
-        "auto_chained": true,
-    });
-
-    let task = BlueTaskMessage {
-        task_id: task_id.clone(),
-        investigation_id: investigation_id.to_string(),
-        task_type: action.task_type.to_string(),
-        role: action.role.as_str().to_string(),
-        params,
-        created_at: Utc::now().to_rfc3339(),
-    };
-
-    task_queue.submit_task(&task).await?;
-
-    info!(
-        task_id = %task_id,
-        task_type = action.task_type,
-        evidence_type,
-        focus = action.focus,
-        investigation_id,
-        "Dispatched chained follow-up task"
-    );
-
-    Ok(task_id)
 }
 
 #[cfg(test)]
@@ -599,7 +618,7 @@ mod additional_tests {
     use super::*;
     use serde_json::json;
 
-    // --- extract_evidence_types MITRE technique paths ---
+    // extract_evidence_types MITRE technique paths
 
     #[test]
     fn technique_t1003_maps_to_credential_access() {
@@ -712,5 +731,143 @@ mod additional_tests {
         });
         let types = extract_evidence_types(&payload);
         assert!(types.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod crown_jewel_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn result_with(payload: serde_json::Value) -> BlueTaskResult {
+        BlueTaskResult {
+            task_id: "t".into(),
+            investigation_id: "inv".into(),
+            success: true,
+            result: Some(payload),
+            error: None,
+            completed_at: "2026-07-07T00:00:00Z".into(),
+            worker_agent: Some("hunter".into()),
+        }
+    }
+
+    // extract_evidence_types: crown-jewel technique routing
+
+    #[test]
+    fn t1649_maps_to_certificate_abuse() {
+        let types = extract_evidence_types(&json!({ "techniques_found": ["T1649"] }));
+        assert_eq!(types, vec!["certificate_abuse"]);
+    }
+
+    #[test]
+    fn adcs_keyword_maps_to_certificate_abuse() {
+        let types = extract_evidence_types(&json!({ "techniques_found": ["ADCS ESC1 abuse"] }));
+        assert_eq!(types, vec!["certificate_abuse"]);
+    }
+
+    #[test]
+    fn t1134_005_maps_to_sid_history_not_priv_esc() {
+        // The specific sub-technique must beat the generic t1134 parent.
+        let types = extract_evidence_types(&json!({ "techniques_found": ["T1134.005"] }));
+        assert_eq!(types, vec!["sid_history"]);
+    }
+
+    #[test]
+    fn generic_t1134_still_maps_to_privilege_escalation() {
+        let types = extract_evidence_types(&json!({ "techniques_found": ["T1134.001"] }));
+        assert_eq!(types, vec!["privilege_escalation"]);
+    }
+
+    #[test]
+    fn t1558_004_maps_to_asrep_roast_not_credential_access() {
+        let types = extract_evidence_types(&json!({ "techniques_found": ["T1558.004"] }));
+        assert_eq!(types, vec!["asrep_roast"]);
+    }
+
+    #[test]
+    fn generic_t1558_still_maps_to_credential_access() {
+        let types = extract_evidence_types(&json!({ "techniques_found": ["T1558.003"] }));
+        assert_eq!(types, vec!["credential_access"]);
+    }
+
+    // chain map has the crown-jewel entries
+
+    #[test]
+    fn chain_map_has_crown_jewel_entries() {
+        for ev in [
+            "certificate_abuse",
+            "sid_history",
+            "cross_forest",
+            "asrep_roast",
+        ] {
+            assert!(
+                EVIDENCE_CHAIN_MAP.contains_key(ev),
+                "chain map missing crown-jewel evidence type: {ev}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_chain_actions_for_certificate_abuse() {
+        let mut seen = HashSet::new();
+        let planned = plan_chain_actions(&json!({ "techniques_found": ["T1649"] }), &mut seen);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].evidence_type, "certificate_abuse");
+        assert_eq!(planned[0].role, BlueAgentRole::ThreatHunter);
+        assert!(planned[0].focus.contains("detect_esc1_attack"));
+    }
+
+    #[test]
+    fn plan_chain_actions_cross_forest_direct_evidence_type() {
+        let mut seen = HashSet::new();
+        let planned = plan_chain_actions(&json!({ "evidence_types": ["cross_forest"] }), &mut seen);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].role, BlueAgentRole::LateralAnalyst);
+    }
+
+    #[test]
+    fn plan_chain_actions_dedups_across_calls() {
+        let mut seen = HashSet::new();
+        let p1 = plan_chain_actions(&json!({ "techniques_found": ["T1134.005"] }), &mut seen);
+        assert_eq!(p1.len(), 1, "first call plans sid_history hunt");
+        let p2 = plan_chain_actions(&json!({ "techniques_found": ["T1134.005"] }), &mut seen);
+        assert!(p2.is_empty(), "second call is deduped by dispatched_chains");
+    }
+
+    #[test]
+    fn plan_task_result_escalation_includes_adcs_upstream() {
+        let mut seen = HashSet::new();
+        let result = result_with(json!({ "users_investigated": ["krbtgt"] }));
+        let planned = plan_task_result(&result, &mut seen);
+        // Escalation must fire an upstream ADCS hunt, not only golden/DCSync.
+        assert!(
+            planned
+                .iter()
+                .any(|p| p.focus.contains("ADCS") && p.focus.contains("detect_esc1_attack")),
+            "escalation should plan an upstream ADCS hunt, got: {:?}",
+            planned.iter().map(|p| p.focus).collect::<Vec<_>>()
+        );
+        // And a cross-realm forge hunt.
+        assert!(
+            planned
+                .iter()
+                .any(|p| p.focus.contains("detect_cross_realm_tgs")),
+            "escalation should plan a cross-realm hunt"
+        );
+    }
+
+    #[test]
+    fn plan_task_result_ignores_failed_result() {
+        let mut seen = HashSet::new();
+        let result = BlueTaskResult {
+            task_id: "t".into(),
+            investigation_id: "inv".into(),
+            success: false,
+            result: None,
+            error: Some("boom".into()),
+            completed_at: "2026-07-07T00:00:00Z".into(),
+            worker_agent: None,
+        };
+        assert!(plan_task_result(&result, &mut seen).is_empty());
     }
 }

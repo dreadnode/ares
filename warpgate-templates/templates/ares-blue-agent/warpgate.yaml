@@ -30,7 +30,7 @@ base:
 sources:
   - name: ares
     git:
-      repository: https://github.com/dreadnode/ares.git
+      repository: https://github.com/l50/ares.git
       ref: main
       depth: 1
       auth:
@@ -46,7 +46,7 @@ provisioners:
     inline:
       - rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
       - apt-get update
-      - apt-get install -y --no-install-recommends ca-certificates curl build-essential pkg-config libssl-dev
+      - apt-get install -y --no-install-recommends ca-certificates curl procps build-essential pkg-config libssl-dev
       - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
       - export PATH="/root/.cargo/bin:$PATH"
       - ln -sf /usr/bin/gcc /usr/local/bin/x86_64-unknown-linux-gnu-gcc

@@ -17,7 +17,6 @@ pub(crate) async fn ops_report(
 
     let reader = RedisStateReader::new(op_id.clone());
 
-    // Check for cached report first (unless regenerating)
     if !regenerate {
         if let Ok(Some(cached)) = reader.get_report(&mut conn).await {
             let report_path = save_report(&output_dir, &op_id, &cached)?;
@@ -66,6 +65,11 @@ pub(crate) async fn generate_and_cache_report(
         .set(&key, &report)
         .await
         .with_context(|| format!("Failed to cache report at {key}"))?;
+    // Written after finalize_operation's retention sweep, so bound its lifetime
+    // directly with the same TTL. Best-effort: caching succeeded either way.
+    let _: redis::RedisResult<i64> = conn
+        .expire(&key, ares_core::state::OP_RETENTION_TTL_SECS)
+        .await;
 
     Ok(report)
 }

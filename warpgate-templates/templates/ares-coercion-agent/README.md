@@ -39,7 +39,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-This builds **Ares Coercion Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares Coercion Agent** Docker images for `amd64` and `arm64` architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -66,13 +66,13 @@ After building the Docker image, you can push it to GHCR:
 
 ```bash
 # Tag the image
-docker tag ares-coercion-agent:latest ghcr.io/dreadnode/ares-coercion-agent:latest
+docker tag ares-coercion-agent:latest ghcr.io/l50/ares-coercion-agent:latest
 
 # Authenticate with GHCR
 echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
 
 # Push the image
-docker push ghcr.io/dreadnode/ares-coercion-agent:latest
+docker push ghcr.io/l50/ares-coercion-agent:latest
 ```
 
 ---
@@ -101,8 +101,9 @@ warpgate validate ares-coercion-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_coercion_tools` - Responder, mitm6, Coercer, PetitPotam
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-- Installed to `/usr/local/bin/ares`- **Installed Tools:**
+  - Compiled from the `main` branch with PyO3 Python bindings
+  - Installed to `/usr/local/bin/ares`
+- **Installed Tools:**
   - **Responder** - LLMNR/NBT-NS/mDNS poisoning for credential capture
   - **mitm6** - DHCPv6 poisoning for IPv6 MITM attacks
   - **Coercer** - Authentication coercion framework (multiple protocols)
@@ -112,7 +113,8 @@ warpgate validate ares-coercion-agent
   - `/ares/.venv/` - Python virtual environment
   - `/opt/Responder/` - Responder installation
   - `/opt/PetitPotam/` - PetitPotam installation
-- `/usr/local/bin/ares` - Compiled Ares binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+  - `/usr/local/bin/ares` - Compiled Ares binary
+- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

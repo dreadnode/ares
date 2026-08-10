@@ -18,7 +18,12 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "analyze_mode": {
                         "type": "boolean",
-                        "description": "Run in analyze-only mode without poisoning responses (default: false)",
+                        "description": "Run in analyze-only mode without poisoning responses (default: false). Passive: captures nothing — do NOT combine with force_ntlmv1.",
+                        "default": false
+                    },
+                    "force_ntlmv1": {
+                        "type": "boolean",
+                        "description": "Force a NetNTLMv1 downgrade by adding Responder's --lm --disable-ess flags. Clients with LmCompatibilityLevel <= 2 then negotiate NetNTLMv1 instead of v2. Paired with the static server challenge the coercion_tools role pins in Responder.conf (1122334455667788), captured v1 hashes are crack.sh rainbow-table candidates (hashcat mode 5500). Targets enforcing NTLMv2 ignore the downgrade and still yield v2. Default: false.",
                         "default": false
                     }
                 },

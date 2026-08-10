@@ -4,7 +4,9 @@ use anyhow::Result;
 use chrono::Utc;
 use tracing::info;
 
-use ares_core::models::{Credential, Hash, Host, TrustInfo, VulnerabilityInfo};
+use ares_core::models::{
+    Credential, ForceInterRealmForgeRequest, Hash, Host, TrustInfo, VulnerabilityInfo,
+};
 use ares_core::state::{self, RedisStateReader};
 
 use crate::redis_conn::connect_redis;
@@ -51,6 +53,80 @@ pub(crate) async fn ops_inject_credential(
         info!("Credential already exists: {}\\{}", domain, username);
     }
 
+    Ok(())
+}
+
+pub(crate) struct OpsForceInterRealmForgeParams {
+    pub redis_url: Option<String>,
+    pub operation_id: String,
+    pub source: String,
+    pub target: String,
+    pub trust_key: String,
+    pub aes_key: Option<String>,
+    pub source_sid: Option<String>,
+    pub target_sid: Option<String>,
+    pub target_dc_ip: Option<String>,
+    pub target_dc_fqdn: Option<String>,
+}
+
+/// Queue an operator escape-hatch inter-realm forge request.
+///
+/// This CLI runs out-of-process from the orchestrator, so it cannot dispatch
+/// the forge itself. It RPUSHes a [`ForceInterRealmForgeRequest`] onto
+/// `ares:op:{id}:force_forge_requests`, which `auto_trust_follow` drains each
+/// tick and hands to `dispatch_create_inter_realm_ticket` — bypassing the
+/// SID-filter check and trust_follow dedup that suppress the auto path. Watch
+/// the orchestrator log for `ARES_TICKET_PATH` to confirm the ccache landed.
+pub(crate) async fn ops_force_inter_realm_forge(
+    params: OpsForceInterRealmForgeParams,
+) -> Result<()> {
+    let OpsForceInterRealmForgeParams {
+        redis_url,
+        operation_id,
+        source,
+        target,
+        trust_key,
+        aes_key,
+        source_sid,
+        target_sid,
+        target_dc_ip,
+        target_dc_fqdn,
+    } = params;
+
+    let mut conn = connect_redis(redis_url).await?;
+    let reader = RedisStateReader::new(operation_id.clone());
+    if !reader.exists(&mut conn).await? {
+        anyhow::bail!("No state found for operation: {operation_id}");
+    }
+
+    let request = ForceInterRealmForgeRequest {
+        source_domain: source.clone(),
+        target_domain: target.clone(),
+        trust_key,
+        aes_key,
+        source_sid,
+        target_sid,
+        target_dc_ip,
+        target_dc_fqdn,
+    };
+    let payload = serde_json::to_string(&request)?;
+    let key = state::build_key(&operation_id, state::KEY_FORCE_FORGE_REQUESTS);
+    let _: i64 = redis::cmd("RPUSH")
+        .arg(&key)
+        .arg(&payload)
+        .query_async(&mut conn)
+        .await?;
+    let n = state::publish_state_update(&mut conn, &operation_id)
+        .await
+        .unwrap_or(0);
+    info!(
+        "Queued force-inter-realm-forge {source} -> {target} for {operation_id} \
+         (orchestrator dispatches on next trust tick; {n} subscribers notified)"
+    );
+    println!(
+        "Queued inter-realm forge request: {source} -> {target}\n\
+         Watch the orchestrator log for ARES_TICKET_PATH to confirm the ccache."
+    );
     Ok(())
 }
 
@@ -273,7 +349,6 @@ pub(crate) async fn ops_inject_hash(p: OpsInjectHashParams) -> Result<()> {
     let added = reader.add_hash(&mut conn, &hash).await?;
 
     if added {
-        // If username is krbtgt or Administrator, set has_domain_admin=True
         let username_lower = username.trim().to_lowercase();
         if username_lower == "krbtgt" || username_lower == "administrator" {
             reader
@@ -339,7 +414,6 @@ pub(crate) async fn ops_inject_trust(
         anyhow::bail!("No state found for operation: {operation_id}");
     }
 
-    // Derive flat_name from domain if not provided
     let flat_name = if flat_name.is_empty() {
         domain.split('.').next().unwrap_or(&domain).to_uppercase()
     } else {

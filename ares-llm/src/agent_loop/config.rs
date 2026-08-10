@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
+use tracing::warn;
+
 /// Configuration for an agent loop execution.
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
-    /// LLM model identifier (e.g. "claude-sonnet-4-20250514").
+    /// LLM model identifier (e.g. "claude-sonnet-4-6").
     pub model: String,
     /// Maximum number of LLM steps before forcefully ending.
     pub max_steps: u32,
@@ -11,6 +13,14 @@ pub struct AgentLoopConfig {
     pub max_tokens: u32,
     /// Optional temperature override.
     pub temperature: Option<f32>,
+    /// Optional sampling seed. Threaded into `LlmRequest.seed`; providers
+    /// that don't support seeded sampling silently drop it.
+    pub seed: Option<u64>,
+    /// Optional reasoning effort (`minimal`/`low`/`medium`/`high`) for
+    /// reasoning models. Threaded into `LlmRequest.reasoning_effort`;
+    /// providers and models that do not support it drop it. `None` leaves the
+    /// provider default in place.
+    pub reasoning_effort: Option<String>,
     /// Retry configuration for transient LLM errors (rate limits, network).
     pub retry: RetryConfig,
     /// Context window management configuration.
@@ -28,21 +38,27 @@ pub struct AgentLoopConfig {
     /// Whether to attach Anthropic prompt-cache breakpoints to the stable
     /// prefix (system + tool definitions). No-op for non-Anthropic providers.
     pub enable_prompt_cache: bool,
+    /// Retries allowed for a truncated completion (`MaxTokens` with no tool
+    /// call) before the loop ends. Zero terminates on first truncation.
+    pub max_token_retries: u32,
 }
 
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             max_steps: 75,
             max_tokens: 4096,
             temperature: None,
+            seed: None,
+            reasoning_effort: None,
             retry: RetryConfig::default(),
             context: ContextConfig::default(),
             budget: BudgetConfig::default(),
             session_log: SessionLogConfig::default(),
             max_tool_calls_per_name: 10,
             enable_prompt_cache: true,
+            max_token_retries: 2,
         }
     }
 }
@@ -55,7 +71,10 @@ impl AgentLoopConfig {
     /// - `ARES_AGENT_MAX_STEPS`
     /// - `ARES_AGENT_MAX_TOKENS`
     /// - `ARES_AGENT_MAX_TOOL_CALLS_PER_NAME`
+    /// - `ARES_AGENT_MAX_TOKEN_RETRIES`
     /// - `ARES_AGENT_ENABLE_PROMPT_CACHE` (`true`/`false`/`1`/`0`)
+    /// - `ARES_LLM_SEED` — sampling seed passed to providers that honour it
+    ///   (OpenAI). Undefined → no seed (provider default).
     /// - everything from `ContextConfig::from_env`, `BudgetConfig::from_env`,
     ///   `SessionLogConfig::from_env`
     pub fn from_env(model: String, temperature: Option<f32>) -> Self {
@@ -63,6 +82,10 @@ impl AgentLoopConfig {
         Self {
             model,
             temperature,
+            seed: parse_env_u64_opt("ARES_LLM_SEED"),
+            reasoning_effort: std::env::var("ARES_AGENT_REASONING_EFFORT")
+                .ok()
+                .and_then(|v| normalize_reasoning_effort(&v)),
             max_steps: parse_env_u32("ARES_AGENT_MAX_STEPS", defaults.max_steps),
             max_tokens: parse_env_u32("ARES_AGENT_MAX_TOKENS", defaults.max_tokens),
             max_tool_calls_per_name: parse_env_u32(
@@ -73,12 +96,67 @@ impl AgentLoopConfig {
                 "ARES_AGENT_ENABLE_PROMPT_CACHE",
                 defaults.enable_prompt_cache,
             ),
+            max_token_retries: parse_env_u32(
+                "ARES_AGENT_MAX_TOKEN_RETRIES",
+                defaults.max_token_retries,
+            ),
             retry: defaults.retry,
             context: ContextConfig::from_env(),
             budget: BudgetConfig::from_env(),
             session_log: SessionLogConfig::from_env(),
         }
     }
+
+    /// Layer a per-role `max_steps` from YAML under the env override:
+    /// `ARES_AGENT_MAX_STEPS` > YAML > [`Self::default`]. `None`/zero is ignored.
+    pub fn with_config_max_steps(mut self, max_steps: Option<u32>) -> Self {
+        if std::env::var("ARES_AGENT_MAX_STEPS").is_ok() {
+            return self;
+        }
+        if let Some(steps) = max_steps.filter(|s| *s > 0) {
+            self.max_steps = steps;
+        }
+        self
+    }
+
+    /// Layer a per-role `max_tokens` from YAML under the env override:
+    /// `ARES_AGENT_MAX_TOKENS` > YAML > [`Self::default`]. `None`/zero is ignored.
+    pub fn with_config_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
+        if std::env::var("ARES_AGENT_MAX_TOKENS").is_ok() {
+            return self;
+        }
+        if let Some(tokens) = max_tokens.filter(|t| *t > 0) {
+            self.max_tokens = tokens;
+        }
+        self
+    }
+
+    /// Layer a per-role `reasoning_effort` from YAML under the env override:
+    /// `ARES_AGENT_REASONING_EFFORT` > YAML > provider default. An
+    /// unrecognised value is dropped rather than forwarded, so a typo cannot
+    /// 400 every call the role makes.
+    pub fn with_config_reasoning_effort(mut self, reasoning_effort: Option<&str>) -> Self {
+        if std::env::var("ARES_AGENT_REASONING_EFFORT").is_ok() {
+            return self;
+        }
+        if let Some(raw) = reasoning_effort {
+            match normalize_reasoning_effort(raw) {
+                Some(effort) => self.reasoning_effort = Some(effort),
+                None => warn!(
+                    value = raw,
+                    "Ignoring unrecognised reasoning_effort; expected minimal, low, medium or high"
+                ),
+            }
+        }
+        self
+    }
+}
+
+/// Accept only the efforts the OpenAI reasoning models define, lowercased and
+/// trimmed. Returns `None` for anything else.
+fn normalize_reasoning_effort(raw: &str) -> Option<String> {
+    let effort = raw.trim().to_ascii_lowercase();
+    matches!(effort.as_str(), "minimal" | "low" | "medium" | "high").then_some(effort)
 }
 
 /// Context window management to prevent unbounded message growth.
@@ -212,10 +290,28 @@ impl BudgetConfig {
 /// tool result, terminal outcome) is appended as a JSON line under
 /// `dir/{op_id}/{task_id}.jsonl`. The log is the primary source of truth
 /// for crash recovery / `--resume` and post-hoc debugging.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SessionLogConfig {
     /// Root directory for session logs. `None` disables logging.
     pub dir: Option<PathBuf>,
+    /// Team owning this session (`red` | `blue`). Stamped on every record so red
+    /// and blue activity are separable in the analytical DB.
+    pub team: String,
+    /// Overrides the op_id used for the log path + records (env
+    /// `ARES_SESSION_OP_ID`). Lets the blue benchmark file its transcript under
+    /// the replayed operation id without reusing `investigation.operation_id`
+    /// (which would trigger red-state correlation).
+    pub op_id: Option<String>,
+}
+
+impl Default for SessionLogConfig {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            team: "red".to_string(),
+            op_id: None,
+        }
+    }
 }
 
 impl SessionLogConfig {
@@ -225,11 +321,28 @@ impl SessionLogConfig {
     ///
     /// When enabled with no explicit dir, defaults to `~/.ares/sessions`.
     pub fn from_env() -> Self {
+        let team = std::env::var("ARES_SESSION_TEAM")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "red".to_string());
+        let op_id = std::env::var("ARES_SESSION_OP_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        Self {
+            dir: Self::resolve_dir(),
+            team,
+            op_id,
+        }
+    }
+
+    /// Resolve the session-log root: explicit `ARES_SESSION_LOG_DIR` wins, else
+    /// `~/.ares/sessions` when logging is enabled, else `None` (disabled).
+    fn resolve_dir() -> Option<PathBuf> {
         if let Ok(dir) = std::env::var("ARES_SESSION_LOG_DIR") {
             if !dir.trim().is_empty() {
-                return Self {
-                    dir: Some(PathBuf::from(dir)),
-                };
+                return Some(PathBuf::from(dir));
             }
         }
         if parse_env_bool("ARES_SESSION_LOG_ENABLED", true) {
@@ -237,10 +350,10 @@ impl SessionLogConfig {
                 let mut p = PathBuf::from(home);
                 p.push(".ares");
                 p.push("sessions");
-                return Self { dir: Some(p) };
+                return Some(p);
             }
         }
-        Self { dir: None }
+        None
     }
 
     /// Default session-log root used when `ARES_SESSION_LOG_DIR` is unset.
@@ -293,6 +406,15 @@ fn parse_env_u32(key: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+/// Parse an optional u64 env var, returning `None` if unset or unparsable.
+/// Used for opt-in knobs like sampling seeds where "absent" and "explicit
+/// zero" carry different meanings.
+fn parse_env_u64_opt(key: &str) -> Option<u64> {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+}
+
 fn parse_env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
         .ok()
@@ -330,7 +452,7 @@ mod tests {
     #[test]
     fn agent_loop_config_defaults() {
         let cfg = AgentLoopConfig::default();
-        assert_eq!(cfg.model, "claude-sonnet-4-20250514");
+        assert_eq!(cfg.model, "claude-sonnet-4-6");
         assert_eq!(cfg.max_steps, 75);
         assert_eq!(cfg.max_tokens, 4096);
         assert!(cfg.temperature.is_none());
@@ -566,7 +688,108 @@ mod tests {
     }
 
     #[test]
+    fn with_config_max_steps_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ARES_AGENT_MAX_STEPS");
+
+        let base = AgentLoopConfig::from_env("m".into(), None);
+        assert_eq!(base.max_steps, 75);
+
+        let from_yaml =
+            AgentLoopConfig::from_env("m".into(), None).with_config_max_steps(Some(300));
+        assert_eq!(from_yaml.max_steps, 300);
+
+        let zero = AgentLoopConfig::from_env("m".into(), None).with_config_max_steps(Some(0));
+        assert_eq!(zero.max_steps, 75);
+
+        let absent = AgentLoopConfig::from_env("m".into(), None).with_config_max_steps(None);
+        assert_eq!(absent.max_steps, 75);
+
+        std::env::set_var("ARES_AGENT_MAX_STEPS", "13");
+        let env_wins = AgentLoopConfig::from_env("m".into(), None).with_config_max_steps(Some(300));
+        assert_eq!(env_wins.max_steps, 13);
+        std::env::remove_var("ARES_AGENT_MAX_STEPS");
+    }
+
+    #[test]
+    fn with_config_reasoning_effort_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ARES_AGENT_REASONING_EFFORT");
+
+        let base = AgentLoopConfig::from_env("m".into(), None);
+        assert_eq!(
+            base.reasoning_effort, None,
+            "unset must leave the provider default alone, not invent an effort"
+        );
+
+        let from_yaml =
+            AgentLoopConfig::from_env("m".into(), None).with_config_reasoning_effort(Some("low"));
+        assert_eq!(from_yaml.reasoning_effort.as_deref(), Some("low"));
+
+        let cased = AgentLoopConfig::from_env("m".into(), None)
+            .with_config_reasoning_effort(Some(" HIGH "));
+        assert_eq!(cased.reasoning_effort.as_deref(), Some("high"));
+
+        let bogus = AgentLoopConfig::from_env("m".into(), None)
+            .with_config_reasoning_effort(Some("supersonic"));
+        assert_eq!(
+            bogus.reasoning_effort, None,
+            "a typo must fall back to the provider default, not 400 every call the role makes"
+        );
+
+        std::env::set_var("ARES_AGENT_REASONING_EFFORT", "minimal");
+        let env_wins =
+            AgentLoopConfig::from_env("m".into(), None).with_config_reasoning_effort(Some("high"));
+        assert_eq!(env_wins.reasoning_effort.as_deref(), Some("minimal"));
+        std::env::remove_var("ARES_AGENT_REASONING_EFFORT");
+    }
+
+    #[test]
+    fn with_config_max_tokens_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ARES_AGENT_MAX_TOKENS");
+
+        let base = AgentLoopConfig::from_env("m".into(), None);
+        assert_eq!(base.max_tokens, 4096);
+
+        let from_yaml =
+            AgentLoopConfig::from_env("m".into(), None).with_config_max_tokens(Some(16_384));
+        assert_eq!(from_yaml.max_tokens, 16_384);
+
+        let zero = AgentLoopConfig::from_env("m".into(), None).with_config_max_tokens(Some(0));
+        assert_eq!(zero.max_tokens, 4096);
+
+        let absent = AgentLoopConfig::from_env("m".into(), None).with_config_max_tokens(None);
+        assert_eq!(absent.max_tokens, 4096);
+
+        std::env::set_var("ARES_AGENT_MAX_TOKENS", "1234");
+        let env_wins =
+            AgentLoopConfig::from_env("m".into(), None).with_config_max_tokens(Some(16_384));
+        assert_eq!(env_wins.max_tokens, 1234);
+        std::env::remove_var("ARES_AGENT_MAX_TOKENS");
+    }
+
+    #[test]
+    fn max_token_retries_defaults_and_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("ARES_AGENT_MAX_TOKEN_RETRIES");
+        assert_eq!(AgentLoopConfig::default().max_token_retries, 2);
+        assert_eq!(
+            AgentLoopConfig::from_env("m".into(), None).max_token_retries,
+            2
+        );
+
+        std::env::set_var("ARES_AGENT_MAX_TOKEN_RETRIES", "0");
+        assert_eq!(
+            AgentLoopConfig::from_env("m".into(), None).max_token_retries,
+            0
+        );
+        std::env::remove_var("ARES_AGENT_MAX_TOKEN_RETRIES");
+    }
+
+    #[test]
     fn agent_loop_config_from_env_layers_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ARES_AGENT_MAX_STEPS", "13");
         std::env::set_var("ARES_AGENT_MAX_TOKENS", "8192");
         std::env::set_var("ARES_AGENT_MAX_TOOL_CALLS_PER_NAME", "3");

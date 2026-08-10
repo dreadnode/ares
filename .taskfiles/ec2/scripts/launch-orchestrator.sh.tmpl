@@ -6,6 +6,12 @@
 # resulting in CONSTRAINT_MEMCG OOM-kills regardless of OOMScoreAdjust.
 set -euo pipefail
 
+# Pick up static box config (SESSION_LOG_DIR, OTEL endpoints, etc.) and
+# runtime-resolved secrets (ARES_DATABASE_URL from Secrets Manager) before
+# any per-op overrides below.
+if [ -f /etc/ares/env ]; then set -a; . /etc/ares/env; set +a; fi
+if [ -f /run/ares/env ]; then set -a; . /run/ares/env; set +a; fi
+
 export ARES_REDIS_URL=redis://127.0.0.1:6379
 export NATS_URL=nats://127.0.0.1:4222
 export RUST_LOG=info
@@ -24,7 +30,8 @@ _llm_model='__ARES_LLM_MODEL__'
 if [ -n "$_llm_model" ] && [ "$_llm_model" = "${_llm_model#__}" ]; then
   export ARES_LLM_MODEL="$_llm_model"
 fi
-export ARES_TOOL_DISPATCH=local
+# ARES_TOOL_DISPATCH intentionally unset: tools route via NATS to ares@<role>.service
+# so hashcat/netexec spawn under the worker's 3G cgroup, not the orchestrator's.
 export ARES_BLUE_ENABLED='__ARES_BLUE_ENABLED__'
 _blue_model='__ARES_BLUE_LLM_MODEL__'
 if [ -n "$_blue_model" ] && [ "$_blue_model" = "${_blue_model#__}" ]; then
@@ -42,11 +49,23 @@ fi
 
 mkdir -p /var/log/ares
 
-# Stop any prior orchestrator (transient unit or stray nohup process).
+ORCH_STOP_TIMEOUT="${ORCH_STOP_TIMEOUT:-180}"
+ORCH_PAT="^/usr/local/bin/ares orchestrator"
 systemctl stop ares-orchestrator.service 2>/dev/null || true
 systemctl reset-failed ares-orchestrator.service 2>/dev/null || true
-pkill -f 'ares orchestrator' 2>/dev/null || true
-sleep 1
+if PIDS=$(pgrep -f "$ORCH_PAT" 2>/dev/null) && [ -n "$PIDS" ]; then
+  echo "stopping prior orchestrator ($PIDS) — waiting up to ${ORCH_STOP_TIMEOUT}s for its teardown pass"
+  kill -TERM $PIDS 2>/dev/null || true
+  for _ in $(seq 1 "$ORCH_STOP_TIMEOUT"); do
+    sleep 1
+    pgrep -f "$ORCH_PAT" >/dev/null 2>&1 || break
+  done
+  if LEFT=$(pgrep -f "$ORCH_PAT" 2>/dev/null) && [ -n "$LEFT" ]; then
+    echo "WARNING: orchestrator $LEFT ignored SIGTERM for ${ORCH_STOP_TIMEOUT}s — SIGKILLing; its target mutations will NOT be reverted"
+    kill -KILL $LEFT 2>/dev/null || true
+    sleep 2
+  fi
+fi
 
 # Spawn as a transient systemd service in system-ares.slice. --setenv=NAME
 # (no value) inherits from current environment, preserving quoting that
@@ -57,6 +76,7 @@ exec systemd-run \
   --description="Ares Orchestrator (transient)" \
   --collect \
   --setenv=ARES_REDIS_URL \
+  --setenv=ARES_DATABASE_URL \
   --setenv=RUST_LOG \
   --setenv=ARES_OPERATION_ID \
   --setenv=OPENAI_API_KEY \
@@ -70,12 +90,12 @@ exec systemd-run \
   --setenv=GRAFANA_URL \
   --setenv=LOKI_URL \
   --setenv=ARES_LLM_MODEL \
-  --setenv=ARES_TOOL_DISPATCH \
   --setenv=ARES_BLUE_ENABLED \
   --setenv=ARES_BLUE_LLM_MODEL \
   --setenv=ARES_DEPLOYMENT \
   --setenv=ARES_CONFIG \
   --setenv=ARES_MAX_CONCURRENT_TASKS \
+  --setenv=ARES_ALLOW_IRREVERSIBLE_MUTATION \
   --setenv=OTEL_EXPORTER_OTLP_TRACES_ENDPOINT \
   --setenv=OTEL_EXPORTER_OTLP_PROTOCOL \
   --setenv=OTEL_RESOURCE_ATTRIBUTES \

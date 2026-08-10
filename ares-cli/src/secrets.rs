@@ -24,6 +24,14 @@ const OP_SECRETS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// AWS Secrets Manager key mappings: env vars the secret's JSON body is
+/// expected to hold. Used when `op` isn't available (e.g. the `benchmark run`
+/// investigation re-exec'd onto an EC2 box), so keys still get injected before
+/// the LLM provider is constructed. Keep in sync with the entries in the lab's
+/// `ares/api-keys` secret.
+pub(crate) const SM_SECRETS: &[&str] =
+    &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"];
+
 /// Pre-scan argv for `--env-file` and `--secrets-from` before clap runs.
 ///
 /// Returns the values found (if any) so the caller can act on them.
@@ -101,11 +109,74 @@ pub(crate) fn try_load_default_env() -> usize {
     }
 }
 
+/// Fetch a secret from AWS Secrets Manager and inject its `SM_SECRETS` keys
+/// as environment variables. No-op for keys already set. Used by the
+/// benchmark replay path when it's re-exec'd onto an EC2 box where `op` is
+/// unavailable but AWS instance credentials are.
+///
+/// `secret_id` defaults to `ares/api-keys` when None; `region` falls back to
+/// `AWS_REGION` when None.
+pub(crate) fn load_secrets_manager_secrets(
+    secret_id: Option<&str>,
+    region: Option<&str>,
+) -> Result<usize> {
+    let secret_id = secret_id.unwrap_or("ares/api-keys");
+    let resolved_region = region
+        .map(String::from)
+        .or_else(|| std::env::var("AWS_REGION").ok())
+        .unwrap_or_else(|| "us-west-1".to_string());
+
+    info!("Secrets Manager: fetching {secret_id} in {resolved_region}");
+    let output = std::process::Command::new("aws")
+        .args([
+            "secretsmanager",
+            "get-secret-value",
+            "--secret-id",
+            secret_id,
+            "--region",
+            &resolved_region,
+            "--query",
+            "SecretString",
+            "--output",
+            "text",
+        ])
+        .output()
+        .with_context(|| format!("failed to run aws for {secret_id}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "aws secretsmanager get-secret-value failed for {secret_id}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let secret_str = String::from_utf8_lossy(&output.stdout);
+    let secrets: serde_json::Value = serde_json::from_str(secret_str.trim())
+        .with_context(|| format!("parse Secrets Manager JSON for {secret_id}"))?;
+
+    let mut count = 0;
+    for env_var in SM_SECRETS {
+        if std::env::var(env_var).is_ok() {
+            debug!("Secrets Manager: skipping {env_var} (already set)");
+            continue;
+        }
+        let Some(value) = secrets.get(env_var).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        // SAFETY: single-threaded at this point (called before tokio spawns)
+        unsafe { std::env::set_var(env_var, value) };
+        info!("Secrets Manager: loaded {env_var}");
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// Fetch secrets from 1Password CLI and inject them as environment variables.
 ///
 /// Only fetches secrets that are not already set in the environment.
 pub(crate) fn load_1password_secrets() -> Result<usize> {
-    // Check that `op` is available
     let check = std::process::Command::new("op").arg("--version").output();
 
     match check {
@@ -120,7 +191,6 @@ pub(crate) fn load_1password_secrets() -> Result<usize> {
 
     let mut count = 0;
     for (env_var, item_name, field_name) in OP_SECRETS {
-        // Skip if already set
         if std::env::var(env_var).is_ok() {
             debug!("1password: skipping {env_var} (already set)");
             continue;

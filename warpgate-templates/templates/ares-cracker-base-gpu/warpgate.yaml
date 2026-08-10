@@ -57,6 +57,7 @@ provisioners:
       ansible_shell_executable: /bin/bash
       cracking_tools_gpu_support: true
       cracking_tools_hashcat_from_source: true
+      cracking_tools_hashcat_version: 994014c7faebe1b55f31f7f1b5a7d7c6fb151d8a
       cracking_tools_nvidia_opencl_icd: true
     ansible_env_vars:
       - ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER

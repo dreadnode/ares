@@ -9,16 +9,14 @@ mod cve_exploits;
 mod delegation;
 mod gmsa;
 mod trust;
+mod windows_payload;
 
 pub use adcs::*;
 pub use cve_exploits::*;
 pub use delegation::*;
 pub use gmsa::*;
 pub use trust::*;
-
-// ===========================================================================
-// Tests
-// ===========================================================================
+pub use windows_payload::*;
 
 #[cfg(test)]
 mod tests {

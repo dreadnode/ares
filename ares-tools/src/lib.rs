@@ -14,11 +14,16 @@ pub mod cracker;
 pub mod credential_access;
 pub mod credentials;
 pub mod executor;
+
+pub use executor::{spawn_error_kind, SpawnErrorKind};
 pub mod filter;
 pub mod lateral;
+pub mod mutation;
 pub mod parsers;
 pub mod privesc;
 pub mod recon;
+pub mod redact;
+pub mod sanitize;
 pub mod scope;
 
 use anyhow::Result;
@@ -73,6 +78,7 @@ impl ToolOutput {
 pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> {
     credentials::validate_arguments(tool_name, arguments)?;
     scope::validate_in_scope(tool_name, arguments)?;
+    mutation::validate_mutation_allowed(tool_name)?;
 
     // Cap concurrent spider_plus dispatches process-wide to prevent the
     // netexec fork-storm OOM observed on EC2.
@@ -85,7 +91,6 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
     };
 
     match tool_name {
-        // ── Reconnaissance ──────────────────────────────────────────
         "nmap_scan" => recon::nmap_scan(arguments).await,
         "smb_sweep" => recon::smb_sweep(arguments).await,
         "enumerate_users" => recon::enumerate_users(arguments).await,
@@ -104,7 +109,6 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "smbclient_kerberos_shares" => recon::smbclient_kerberos_shares(arguments).await,
         "ldap_acl_enumeration" => recon::ldap_acl_enumeration(arguments).await,
 
-        // ── Credential Access ───────────────────────────────────────
         "kerberoast" => credential_access::kerberoast(arguments).await,
         "asrep_roast" => credential_access::asrep_roast(arguments).await,
         "kerberos_user_enum_noauth" => {
@@ -113,6 +117,7 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "secretsdump" => credential_access::secretsdump(arguments).await,
         "lsassy" => credential_access::lsassy(arguments).await,
         "smb_login_check" => credential_access::smb_login_check(arguments).await,
+        "smb_local_auth_check" => credential_access::smb_local_auth_check(arguments).await,
         "domain_admin_checker" => credential_access::domain_admin_checker(arguments).await,
         "gpp_password_finder" => credential_access::gpp_password_finder(arguments).await,
         "sysvol_script_search" => credential_access::sysvol_script_search(arguments).await,
@@ -125,12 +130,11 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "username_as_password" => credential_access::username_as_password(arguments).await,
         "check_credman_entries" => credential_access::check_credman_entries(arguments).await,
         "check_autologon_registry" => credential_access::check_autologon_registry(arguments).await,
+        "netexec_auth_check" => credential_access::netexec_auth_check(arguments).await,
 
-        // ── Cracking ────────────────────────────────────────────────
         "crack_with_hashcat" => cracker::crack_with_hashcat(arguments).await,
         "crack_with_john" => cracker::crack_with_john(arguments).await,
 
-        // ── Lateral Movement ────────────────────────────────────────
         "psexec" => lateral::psexec(arguments).await,
         "psexec_kerberos" => lateral::psexec_kerberos(arguments).await,
         "wmiexec" => lateral::wmiexec(arguments).await,
@@ -157,9 +161,9 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         }
         "mssql_linked_xpcmdshell" => lateral::mssql_linked_xpcmdshell(arguments).await,
         "mssql_openquery" => lateral::mssql_openquery(arguments).await,
+        "mssql_far_host_secretsdump" => lateral::mssql_far_host_secretsdump(arguments).await,
         "mssql_ntlm_coerce" => lateral::mssql_ntlm_coerce(arguments).await,
 
-        // ── Privilege Escalation ────────────────────────────────────
         "certipy_find" => privesc::certipy_find(arguments).await,
         "certipy_request" => privesc::certipy_request(arguments).await,
         "certipy_auth" => privesc::certipy_auth(arguments).await,
@@ -169,19 +173,21 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "certipy_esc4_full_chain" => privesc::certipy_esc4_full_chain(arguments).await,
         "certipy_esc3_full_chain" => privesc::certipy_esc3_full_chain(arguments).await,
         "certipy_esc1_full_chain" => privesc::certipy_esc1_full_chain(arguments).await,
+        "certipy_esc13_full_chain" => privesc::certipy_esc13_full_chain(arguments).await,
         "certipy_ca" => privesc::certipy_ca(arguments).await,
         "certipy_forge" => privesc::certipy_forge(arguments).await,
         "certipy_retrieve" => privesc::certipy_retrieve(arguments).await,
         "certipy_esc7_full_chain" => privesc::certipy_esc7_full_chain(arguments).await,
         "certipy_relay" => privesc::certipy_relay(arguments).await,
+        "esc8_relay_probe" => privesc::esc8_relay_probe(arguments).await,
+        "certipy_find_anon" => privesc::certipy_find_anon(arguments).await,
         "find_delegation" => privesc::find_delegation(arguments).await,
         "s4u_attack" => privesc::s4u_attack(arguments).await,
         "generate_golden_ticket" => privesc::generate_golden_ticket(arguments).await,
+        "generate_silver_ticket" => privesc::generate_silver_ticket(arguments).await,
         "add_computer" => privesc::add_computer(arguments).await,
         "addspn" => privesc::addspn(arguments).await,
         "rbcd_write" => privesc::rbcd_write(arguments).await,
-        "krbrelayup" => privesc::krbrelayup(arguments).await,
-        "raise_child" => privesc::raise_child(arguments).await,
         "extract_trust_key" => privesc::extract_trust_key(arguments).await,
         "create_inter_realm_ticket" => privesc::create_inter_realm_ticket(arguments).await,
         "forge_inter_realm_and_dump" => privesc::forge_inter_realm_and_dump(arguments).await,
@@ -195,9 +201,10 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "nopac" => privesc::nopac(arguments).await,
         "printnightmare" => privesc::printnightmare(arguments).await,
         "petitpotam_unauth" => privesc::petitpotam_unauth(arguments).await,
+        "windows_stage_and_run" => privesc::windows_stage_and_run(arguments).await,
 
-        // ── ACL Exploitation ────────────────────────────────────────
         "bloodyad_add_group_member" => acl::bloodyad_add_group_member(arguments).await,
+        "bloodyad_get_object" => acl::bloodyad_get_object(arguments).await,
         "bloodyad_set_password" => acl::bloodyad_set_password(arguments).await,
         "bloodyad_add_genericall" => acl::bloodyad_add_genericall(arguments).await,
         "bloodyad_set_object_attr" => acl::bloodyad_set_object_attr(arguments).await,
@@ -208,8 +215,8 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
         "sharpgpoabuse" => acl::sharpgpoabuse(arguments).await,
         "pygpoabuse_immediate_task" => acl::pygpoabuse_immediate_task(arguments).await,
         "dacl_edit" => acl::dacl_edit(arguments).await,
+        "owner_edit" => acl::owner_edit(arguments).await,
 
-        // ── Coercion & Relay ────────────────────────────────────────
         "start_responder" => coercion::start_responder(arguments).await,
         "start_mitm6" => coercion::start_mitm6(arguments).await,
         "coercer" => coercion::coercer(arguments).await,
@@ -229,7 +236,7 @@ pub async fn dispatch(tool_name: &str, arguments: &Value) -> Result<ToolOutput> 
 mod tests {
     use super::*;
 
-    // ── ToolOutput::combined ─────────────────────────────────────────────────
+    // ToolOutput::combined
 
     #[test]
     fn combined_stdout_and_stderr_joined_with_separator() {
@@ -243,7 +250,6 @@ mod tests {
         // Both pieces must appear in the merged output
         assert!(combined.contains("scan results here"), "stdout missing");
         assert!(combined.contains("some warning"), "stderr missing");
-        // Separator between them
         assert!(combined.contains("--- stderr ---"), "separator missing");
     }
 
@@ -288,7 +294,7 @@ mod tests {
         assert_eq!(out.combined(), "");
     }
 
-    // ── ToolOutput::combined_raw ─────────────────────────────────────────────
+    // ToolOutput::combined_raw
 
     #[test]
     fn combined_raw_stdout_and_stderr_joined() {
@@ -332,8 +338,6 @@ mod tests {
         assert!(out.combined_raw().contains("Last login"));
     }
 
-    // ── dispatch ─────────────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn dispatch_unknown_tool_returns_error() {
         let args = serde_json::json!({});
@@ -354,6 +358,29 @@ mod tests {
         assert!(
             msg.contains("definitely_not_real"),
             "expected tool name in error message, got: {msg}"
+        );
+    }
+
+    /// The gate has to hold at [`dispatch`], not just in the classifier: every
+    /// automation path and every direct LLM tool call funnels through here, and
+    /// a classifier nothing consults is the bug this was written to prevent.
+    #[tokio::test]
+    async fn dispatch_refuses_irreversible_tool_without_opt_in() {
+        let args = serde_json::json!({
+            "domain": "contoso.local",
+            "dc_ip": "192.168.58.10",
+            "username": "alice",
+            "password": "P@ssw0rd!",
+            "target_user": "bob",
+            "new_password": "NewP@ss123!"
+        });
+        let msg = match dispatch("bloodyad_set_password", &args).await {
+            Ok(_) => panic!("dispatch must refuse an irreversible tool without opt-in"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("irreversibly") && msg.contains(mutation::ALLOW_IRREVERSIBLE_ENV),
+            "expected the irreversible-mutation refusal, got: {msg}"
         );
     }
 }

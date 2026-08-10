@@ -154,8 +154,6 @@ mod tests {
         }
     }
 
-    // ─── build_credential_dedup_key ──────────────────────────────────────
-
     #[test]
     fn cred_dedup_key_format() {
         let cred = make_cred("admin", "contoso.local", "P@ss1");
@@ -199,8 +197,6 @@ mod tests {
         let key = build_credential_dedup_key(&cred);
         assert!(key.starts_with("cred:contoso.local:admin:"));
     }
-
-    // ─── build_hash_dedup_key ────────────────────────────────────────────
 
     #[test]
     fn hash_dedup_key_ntlm() {
@@ -322,8 +318,6 @@ mod tests {
         assert_eq!(build_hash_dedup_key(&h1), build_hash_dedup_key(&h2));
     }
 
-    // ─── extract_kerberoast_spn_key ──────────────────────────────────────
-
     #[test]
     fn extract_kerberoast_spn_key_valid() {
         let hash = "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$cifs/dc01.contoso.local*$checksum$encrypted";
@@ -342,8 +336,6 @@ mod tests {
     fn extract_kerberoast_spn_key_too_few_parts() {
         assert!(extract_kerberoast_spn_key("$krb5tgs$").is_none());
     }
-
-    // ─── parse_ntlm_dedup_key ────────────────────────────────────────────
 
     #[test]
     fn parse_ntlm_dedup_key_qualified() {

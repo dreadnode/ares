@@ -1,0 +1,96 @@
+# kubectl port-forward the observability stack (Loki + Grafana) to localhost
+# so blue-team tooling on this laptop can query them via LOKI_URL /
+# GRAFANA_URL. The ingress ELB is typically VPC-private, so port-forward
+# through the EKS API is the practical path in.
+#
+# Requires:
+#   * An observability cluster context in kubeconfig, aliased to OBS_CONTEXT
+#     (default `obs`; set OBS_CONTEXT in .env to match your own alias)
+#     aws eks update-kubeconfig --name <your-obs-cluster> \
+#       --profile <your-obs-profile> --region <your-obs-region> --alias obs
+#   * Fresh SSO token for that profile: `aws sso login --profile <profile>`
+#
+# Once running:
+#   export LOKI_URL=http://localhost:3100
+#   export GRAFANA_URL=http://localhost:3000
+# (or use scripts/env-from-secrets.sh which pins the secret to these URLs).
+---
+version: "3"
+set: [errexit, pipefail]
+
+vars:
+  INFO: '\033[0;34m[INFO]\033[0m'
+  SUCCESS: '\033[0;32m[SUCCESS]\033[0m'
+  WARN: '\033[0;33m[WARN]\033[0m'
+  ERROR: '\033[0;31m[ERROR]\033[0m'
+
+  OBS_CONTEXT: '{{.OBS_CONTEXT | default "obs"}}'
+  OBS_NAMESPACE: '{{.OBS_NAMESPACE | default "observability"}}'
+  LOKI_SVC: '{{.LOKI_SVC | default "loki-gateway"}}'
+  LOKI_SVC_PORT: '{{.LOKI_SVC_PORT | default "80"}}'
+  LOKI_LOCAL_PORT: '{{.LOKI_LOCAL_PORT | default "3100"}}'
+  GRAFANA_SVC: '{{.GRAFANA_SVC | default "grafana"}}'
+  GRAFANA_SVC_PORT: '{{.GRAFANA_SVC_PORT | default "80"}}'
+  GRAFANA_LOCAL_PORT: '{{.GRAFANA_LOCAL_PORT | default "3000"}}'
+  # Unique substring for pgrep/pkill. Includes the context+namespace so we
+  # don't stomp unrelated `kubectl port-forward` sessions the user is running.
+  PF_MATCH: 'kubectl.*--context {{.OBS_CONTEXT | default "obs"}}.*-n {{.OBS_NAMESPACE | default "observability"}}.*port-forward'
+
+tasks:
+  forward:
+    desc: "Port-forward Loki+Grafana to localhost:3100/3000 (Ctrl+C to stop)"
+    silent: true
+    cmds:
+      - task: stop
+      - |
+        echo -e "{{.INFO}} Loki    localhost:{{.LOKI_LOCAL_PORT}}    -> {{.OBS_CONTEXT}}/{{.OBS_NAMESPACE}}/svc/{{.LOKI_SVC}}:{{.LOKI_SVC_PORT}}"
+        echo -e "{{.INFO}} Grafana localhost:{{.GRAFANA_LOCAL_PORT}}    -> {{.OBS_CONTEXT}}/{{.OBS_NAMESPACE}}/svc/{{.GRAFANA_SVC}}:{{.GRAFANA_SVC_PORT}}"
+        echo -e "{{.INFO}} export LOKI_URL=http://localhost:{{.LOKI_LOCAL_PORT}}"
+        echo -e "{{.INFO}} export GRAFANA_URL=http://localhost:{{.GRAFANA_LOCAL_PORT}}"
+        echo ""
+
+        # task's built-in shell (mvdan/sh) only recognizes EXIT in trap and
+        # returns fake job IDs from $!, so we track processes by pattern
+        # instead of PID. EXIT still fires on Ctrl+C.
+        trap 'pkill -f "{{.PF_MATCH}}" 2>/dev/null || true' EXIT
+
+        kubectl --context {{.OBS_CONTEXT}} -n {{.OBS_NAMESPACE}} \
+          port-forward svc/{{.LOKI_SVC}} {{.LOKI_LOCAL_PORT}}:{{.LOKI_SVC_PORT}} &
+        kubectl --context {{.OBS_CONTEXT}} -n {{.OBS_NAMESPACE}} \
+          port-forward svc/{{.GRAFANA_SVC}} {{.GRAFANA_LOCAL_PORT}}:{{.GRAFANA_SVC_PORT}} &
+
+        for _ in $(seq 1 20); do
+          if nc -z localhost {{.LOKI_LOCAL_PORT}} 2>/dev/null \
+             && nc -z localhost {{.GRAFANA_LOCAL_PORT}} 2>/dev/null; then
+            echo -e "{{.SUCCESS}} both port-forwards ready"
+            break
+          fi
+          sleep 1
+        done
+
+        wait
+
+  stop:
+    desc: "Kill any obs:forward port-forwards"
+    silent: true
+    cmds:
+      - |
+        pkill -f "{{.PF_MATCH}}" 2>/dev/null || true
+        lsof -ti:{{.LOKI_LOCAL_PORT}} 2>/dev/null | xargs kill 2>/dev/null || true
+        lsof -ti:{{.GRAFANA_LOCAL_PORT}} 2>/dev/null | xargs kill 2>/dev/null || true
+
+  status:
+    desc: "Show obs:forward status + probe Loki/Grafana"
+    silent: true
+    cmds:
+      - |
+        RUNNING=$(pgrep -f "{{.PF_MATCH}}" | wc -l | tr -d ' ')
+        if [ "$RUNNING" -ge 2 ]; then
+          echo -e "{{.SUCCESS}} $RUNNING obs port-forward(s) running"
+        else
+          echo -e "{{.WARN}} $RUNNING obs port-forward(s) running (expected 2)"
+        fi
+        printf "loki    http://localhost:%s/loki/api/v1/labels -> " "{{.LOKI_LOCAL_PORT}}"
+        curl -sS --max-time 3 -o /dev/null -w "%{http_code}\n" "http://localhost:{{.LOKI_LOCAL_PORT}}/loki/api/v1/labels" || echo "unreachable"
+        printf "grafana http://localhost:%s/api/health          -> " "{{.GRAFANA_LOCAL_PORT}}"
+        curl -sS --max-time 3 -o /dev/null -w "%{http_code}\n" "http://localhost:{{.GRAFANA_LOCAL_PORT}}/api/health" || echo "unreachable"

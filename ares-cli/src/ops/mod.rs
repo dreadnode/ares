@@ -1,10 +1,11 @@
 mod backfill;
 #[cfg(feature = "blue")]
 mod correlate;
-mod delete;
+pub(crate) mod delete;
 #[cfg(feature = "blue")]
 mod evaluate;
 mod inject;
+mod inspect;
 mod kill;
 mod list;
 mod loot;
@@ -13,11 +14,13 @@ mod replay;
 pub(crate) mod report;
 pub(crate) mod resolve;
 mod runtime;
+mod sanitize;
 mod sessions;
 mod status;
 mod stop;
 pub(crate) mod submit;
 mod tasks;
+mod teardown;
 
 use anyhow::Result;
 
@@ -48,6 +51,11 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             status,
             role,
         } => tasks::ops_tasks(redis_url, operation_id, latest, status, role).await,
+        OpsCommands::InspectVulns {
+            operation_id,
+            latest,
+            json,
+        } => inspect::ops_inspect_vulns(redis_url, operation_id, latest, json).await,
         OpsCommands::Queue => queue::ops_queue(redis_url).await,
         OpsCommands::ClaimNext { timeout } => queue::ops_claim_next(redis_url, timeout).await,
         OpsCommands::InjectCredential {
@@ -102,6 +110,13 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             operation_id,
             latest,
         } => stop::ops_stop(redis_url, operation_id, latest).await,
+        OpsCommands::Teardown {
+            operation_id,
+            latest,
+            dry_run,
+            only,
+        } => teardown::ops_teardown(redis_url, operation_id, latest, dry_run, only).await,
+        OpsCommands::Sanitize {} => sanitize::ops_sanitize().await,
         OpsCommands::Delete {
             operation_id,
             force,
@@ -152,6 +167,31 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
                 flat_name,
                 sid_filtering,
             )
+            .await
+        }
+        OpsCommands::ForceInterRealmForge {
+            operation_id,
+            source,
+            target,
+            trust_key,
+            aes_key,
+            source_sid,
+            target_sid,
+            target_dc_ip,
+            target_dc_fqdn,
+        } => {
+            inject::ops_force_inter_realm_forge(inject::OpsForceInterRealmForgeParams {
+                redis_url,
+                operation_id,
+                source,
+                target,
+                trust_key,
+                aes_key,
+                source_sid,
+                target_sid,
+                target_dc_ip,
+                target_dc_fqdn,
+            })
             .await
         }
         OpsCommands::BackfillDomains { operation_id } => {
@@ -229,7 +269,6 @@ pub(crate) async fn run_ops(cmd: OpsCommands, redis_url: Option<String>) -> Resu
             auto_report,
             report_dir,
         } => {
-            // Resolve targets from EC2 if requested and no IPs provided
             if ips.is_empty() {
                 if resolve_targets || !resolve::looks_like_ip(&target) {
                     ips = resolve::resolve_ec2_targets(&target, &aws_profile, &aws_region)?;

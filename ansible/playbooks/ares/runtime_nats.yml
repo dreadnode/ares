@@ -1,0 +1,18 @@
+---
+# Runtime NATS install for a live Ares attack box.
+#
+# Targets a running EC2 instance via the community.aws.aws_ssm connection
+# plugin — no SSH, no bastion. Reuses the same dreadnode.nimbus_range.nats
+# role that goad_attack_box.yml applies at AMI bake time, so the bake-time
+# and runtime installs cannot drift.
+#
+# Driven by: task ec2:setup:nats EC2_NAME=kali-ares
+- name: Install NATS JetStream on Ares attack box (runtime)
+  hosts: ares_attack_box
+  gather_facts: true
+  become: true
+
+  roles:
+    - role: dreadnode.nimbus_range.nats
+      vars:
+        nats_verify_install: true

@@ -1,0 +1,896 @@
+---
+# Benchmark replay-stack provisioning tasks.
+#
+# `ares benchmark run` is the multi-agent runtime — it submits an investigation
+# to NATS, polls Redis for completion, and computes the score. It does NOT
+# provision, verify, or tear down the replay stack; that AWS-CLI orchestration
+# lives here so the boundary matches the rest of the repo (ec2, k8s, remote).
+#
+# The AMI is produced by the ares-replay-stack warpgate template
+# (warpgate-templates/templates/ares-replay-stack/). It comes pre-loaded with
+# Docker, all 6 replay-stack images, and the stack config at /opt/replay-stack/.
+#
+# Tuning vs. generalization split:
+#   The corpus of ops used for tuning (prompt search, config iteration, Vibe
+#   Gepa, RL rollouts) is whatever the tuning driver picks — this Taskfile does
+#   not enumerate it. `benchmark:generalize` reads a separate, hand-curated
+#   held-out set from `benchmarks/holdout.yaml` that no tuning process is
+#   allowed to touch. Overall generalization score comes from that held-out
+#   sweep only; the tuning sweep is for gradient signal, not for reporting.
+#   Keep the two lists physically separate so nobody accidentally trains on
+#   the eval corpus.
+#
+# Usage:
+#   task benchmark:replay OP_ID=op-20260706-1200 SNAPSHOT_DIR=./snapshots
+#     provision → ares benchmark run --stack-ip <ip> → teardown (deferred)
+#
+#   task benchmark:replay:provision OP_ID=op-20260706-1200
+#     just provisions and prints the stack IP + instance ID (for manual use)
+#
+#   task benchmark:replay:run STACK_IP=192.168.58.5 OP_ID=op-20260706-1200
+#     runs one investigation against an already-provisioned stack — no teardown.
+#     Use this when a tuning driver (e.g. Vibe Gepa) wants to keep the stack
+#     warm across many `ares benchmark run` invocations.
+#
+#     For noise control, pass SEED=<u64>, TEMPERATURE=<f32>, REPLICATES=<K>;
+#     they forward to `ares benchmark run --seed / --temperature / --replicates`.
+#
+#   task benchmark:replay:loop OP_ID=op-20260706-1200 ITERATIONS=10
+#     provision → N x (run [→ HOOK]) → teardown. The optional HOOK= command
+#     runs between iterations with STACK_IP, OP_ID, and ITERATION exported,
+#     so a tuning driver can rewrite prompts / config in place. Omit HOOK to
+#     just repeat the same investigation N times (useful for K-of-N averaging).
+#     SEED / TEMPERATURE / REPLICATES forward through to each iteration's run.
+#
+#     Example (Vibe Gepa driver):
+#       task benchmark:replay:loop OP_ID=op-... ITERATIONS=8 \
+#         HOOK='python -m vibe_gepa.update --op-id "$OP_ID" --iter "$ITERATION"'
+#
+#   task benchmark:replay:teardown INSTANCE_ID=i-abc123
+#     terminates a provisioned stack
+#
+#   task benchmark:generalize [HOLDOUT=benchmarks/holdout.yaml] [OUTPUT_DIR=./reports/generalize] [FAIL_UNDER=0.0]
+#     replays every op in the held-out set, aggregates scores, writes a
+#     generalize-summary.json — continues past per-op failures
+#
+#   task benchmark:diversity-sweep N=10 TARGET=dreadgoad [RESET=true]
+#     Sequential N-op red-team sweep with the attack-path diversity knobs on.
+#     Preflight-checks that `selection_temperature > 0` in the deployed config,
+#     optionally wipes novelty memory, then loops `red:ec2:multi` N times and
+#     pulls `ares:op:<op>:path_record` into
+#     `reports/diversity/<campaign>/coverage.csv`. See
+#     docs/attack-path-diversity.md and
+#     .claude/skills/attack-path-diversity-sweep/SKILL.md.
+#
+#   task benchmark:diversity-diff BEFORE=reports/red AFTER=reports/diversity/<campaign>
+#     Compare two op directories (sweep CSV or reports/red-style markdown).
+#     Prints technique set-diff, (technique,target) pair coverage delta, path
+#     length distribution, and a top-technique ranked table.
+version: "3"
+
+set: [errexit, pipefail]
+
+vars:
+  ARES_CLI: '{{.ARES_CLI | default "./target/release/ares"}}'
+  INFO: '\033[0;34m[INFO]\033[0m'
+  SUCCESS: '\033[0;32m[SUCCESS]\033[0m'
+  ERROR: '\033[0;31m[ERROR]\033[0m'
+  WARN: '\033[1;33m[WARN]\033[0m'
+  AWS_PROFILE: '{{.AWS_PROFILE | default (env "AWS_PROFILE") | default "lab"}}'
+  AWS_REGION: '{{.AWS_REGION | default (env "AWS_REGION") | default (env "AWS_DEFAULT_REGION") | default "us-west-1"}}'
+  INSTANCE_TYPE: '{{.BENCHMARK_INSTANCE_TYPE | default (env "BENCHMARK_INSTANCE_TYPE") | default "t3.medium"}}'
+  # Required for provisioning; see .env.example.
+  SECURITY_GROUP_ID: '{{.BENCHMARK_SECURITY_GROUP_ID | default (env "BENCHMARK_SECURITY_GROUP_ID") | default ""}}'
+  INSTANCE_PROFILE: '{{.BENCHMARK_INSTANCE_PROFILE | default (env "BENCHMARK_INSTANCE_PROFILE") | default ""}}'
+  SUBNET_ID: '{{.BENCHMARK_SUBNET_ID | default (env "BENCHMARK_SUBNET_ID") | default ""}}'
+  # S3 bucket for snapshot data. No default — set BENCHMARK_S3_BUCKET in .env.
+  S3_BUCKET: '{{.BENCHMARK_S3_BUCKET | default (env "BENCHMARK_S3_BUCKET") | default ""}}'
+  # Set BENCHMARK_REQUIRE_BAKED_AMI=1 to error out if no ares-replay-stack AMI
+  # is published (skips the stock-AL2023 fallback path).
+  REQUIRE_BAKED_AMI: '{{.BENCHMARK_REQUIRE_BAKED_AMI | default (env "BENCHMARK_REQUIRE_BAKED_AMI") | default "0"}}'
+
+tasks:
+  replay:
+    desc: End-to-end replay — provision stack, run investigation, tear down.
+    requires:
+      vars: [OP_ID]
+    vars:
+      SNAPSHOT_DIR: '{{.SNAPSHOT_DIR | default ""}}'
+      MODEL: '{{.MODEL | default ""}}'
+      MAX_STEPS: '{{.MAX_STEPS | default "50"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+      QUIET_PERIOD: '{{.QUIET_PERIOD | default ""}}'
+      CLOCK: '{{.CLOCK | default "step"}}'
+      REPLAY_MODE: '{{.REPLAY_MODE | default "timeline"}}'
+      TRIGGER_MODE: '{{.TRIGGER_MODE | default "alert-replay"}}'
+      SEED: '{{.SEED | default ""}}'
+      TEMPERATURE: '{{.TEMPERATURE | default ""}}'
+      REPLICATES: '{{.REPLICATES | default ""}}'
+    cmds:
+      - |
+        echo -e "{{.INFO}} provisioning replay stack for {{.OP_ID}}..."
+        PROV_OUT=$(task benchmark:replay:provision OP_ID={{.OP_ID}})
+        STACK_IP=$(echo "$PROV_OUT" | awk -F= '/^STACK_IP=/{print $2}')
+        INSTANCE_ID=$(echo "$PROV_OUT" | awk -F= '/^INSTANCE_ID=/{print $2}')
+        if [ -z "$STACK_IP" ] || [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} provision did not produce STACK_IP/INSTANCE_ID"
+          exit 1
+        fi
+        echo -e "{{.SUCCESS}} stack up at $STACK_IP (instance $INSTANCE_ID)"
+
+        cleanup() {
+          echo -e "{{.INFO}} tearing down $INSTANCE_ID..."
+          task benchmark:replay:teardown INSTANCE_ID="$INSTANCE_ID" || \
+            echo -e "{{.WARN}} teardown failed for $INSTANCE_ID — sweep for ares:component=benchmark-replay"
+        }
+        trap cleanup EXIT
+
+        task benchmark:replay:run \
+          STACK_IP="$STACK_IP" \
+          OP_ID="{{.OP_ID}}" \
+          REPLAY_MODE="{{.REPLAY_MODE}}" \
+          TRIGGER_MODE="{{.TRIGGER_MODE}}" \
+          OUTPUT_DIR="{{.OUTPUT_DIR}}" \
+          MAX_STEPS="{{.MAX_STEPS}}" \
+          CLOCK="{{.CLOCK}}" \
+          SNAPSHOT_DIR="{{.SNAPSHOT_DIR}}" \
+          MODEL="{{.MODEL}}" \
+          QUIET_PERIOD="{{.QUIET_PERIOD}}" \
+          SEED="{{.SEED}}" \
+          TEMPERATURE="{{.TEMPERATURE}}" \
+          REPLICATES="{{.REPLICATES}}"
+
+  replay:run:
+    desc: Run one benchmark investigation against an already-provisioned stack (no teardown).
+    requires:
+      vars: [STACK_IP, OP_ID]
+    vars:
+      SNAPSHOT_DIR: '{{.SNAPSHOT_DIR | default ""}}'
+      MODEL: '{{.MODEL | default ""}}'
+      MAX_STEPS: '{{.MAX_STEPS | default "50"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+      QUIET_PERIOD: '{{.QUIET_PERIOD | default ""}}'
+      CLOCK: '{{.CLOCK | default "step"}}'
+      REPLAY_MODE: '{{.REPLAY_MODE | default "timeline"}}'
+      TRIGGER_MODE: '{{.TRIGGER_MODE | default "alert-replay"}}'
+      # LLM sampling knobs — noise control for tuning loops. Empty ⇒ CLI defaults.
+      SEED: '{{.SEED | default ""}}'
+      TEMPERATURE: '{{.TEMPERATURE | default ""}}'
+      REPLICATES: '{{.REPLICATES | default ""}}'
+    cmds:
+      - |
+        echo -e "{{.INFO}} running investigation against {{.STACK_IP}} for {{.OP_ID}}..."
+        {{.ARES_CLI}} benchmark run "{{.OP_ID}}" \
+          --stack-ip "{{.STACK_IP}}" \
+          --replay-mode "{{.REPLAY_MODE}}" \
+          --trigger-mode "{{.TRIGGER_MODE}}" \
+          --output-dir "{{.OUTPUT_DIR}}" \
+          --max-steps "{{.MAX_STEPS}}" \
+          --clock "{{.CLOCK}}" \
+          {{if .SNAPSHOT_DIR}}--snapshot-dir "{{.SNAPSHOT_DIR}}"{{end}} \
+          {{if .MODEL}}--model "{{.MODEL}}"{{end}} \
+          {{if .QUIET_PERIOD}}--quiet-period "{{.QUIET_PERIOD}}"{{end}} \
+          {{if .SEED}}--seed "{{.SEED}}"{{end}} \
+          {{if .TEMPERATURE}}--temperature "{{.TEMPERATURE}}"{{end}} \
+          {{if .REPLICATES}}--replicates "{{.REPLICATES}}"{{end}}
+
+  replay:loop:
+    desc: Provision once, run N investigations reusing the stack, tear down. For tuning loops (Vibe Gepa) and K-of-N averaging.
+    requires:
+      vars: [OP_ID]
+    vars:
+      ITERATIONS: '{{.ITERATIONS | default "1"}}'
+      HOOK: '{{.HOOK | default ""}}'
+      SNAPSHOT_DIR: '{{.SNAPSHOT_DIR | default ""}}'
+      MODEL: '{{.MODEL | default ""}}'
+      MAX_STEPS: '{{.MAX_STEPS | default "50"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+      QUIET_PERIOD: '{{.QUIET_PERIOD | default ""}}'
+      CLOCK: '{{.CLOCK | default "step"}}'
+      REPLAY_MODE: '{{.REPLAY_MODE | default "timeline"}}'
+      TRIGGER_MODE: '{{.TRIGGER_MODE | default "alert-replay"}}'
+      SEED: '{{.SEED | default ""}}'
+      TEMPERATURE: '{{.TEMPERATURE | default ""}}'
+      REPLICATES: '{{.REPLICATES | default ""}}'
+    cmds:
+      - |
+        echo -e "{{.INFO}} provisioning replay stack for {{.OP_ID}} (loop x{{.ITERATIONS}})..."
+        PROV_OUT=$(task benchmark:replay:provision OP_ID={{.OP_ID}})
+        STACK_IP=$(echo "$PROV_OUT" | awk -F= '/^STACK_IP=/{print $2}')
+        INSTANCE_ID=$(echo "$PROV_OUT" | awk -F= '/^INSTANCE_ID=/{print $2}')
+        if [ -z "$STACK_IP" ] || [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} provision did not produce STACK_IP/INSTANCE_ID"
+          exit 1
+        fi
+        echo -e "{{.SUCCESS}} stack up at $STACK_IP (instance $INSTANCE_ID)"
+
+        cleanup() {
+          echo -e "{{.INFO}} tearing down $INSTANCE_ID..."
+          task benchmark:replay:teardown INSTANCE_ID="$INSTANCE_ID" || \
+            echo -e "{{.WARN}} teardown failed for $INSTANCE_ID — sweep for ares:component=benchmark-replay"
+        }
+        trap cleanup EXIT
+
+        FAILURES=0
+        for i in $(seq 1 {{.ITERATIONS}}); do
+          echo -e "{{.INFO}} iteration $i/{{.ITERATIONS}} against $STACK_IP..."
+          if ! task benchmark:replay:run \
+              STACK_IP="$STACK_IP" \
+              OP_ID="{{.OP_ID}}" \
+              REPLAY_MODE="{{.REPLAY_MODE}}" \
+              TRIGGER_MODE="{{.TRIGGER_MODE}}" \
+              OUTPUT_DIR="{{.OUTPUT_DIR}}" \
+              MAX_STEPS="{{.MAX_STEPS}}" \
+              CLOCK="{{.CLOCK}}" \
+              SNAPSHOT_DIR="{{.SNAPSHOT_DIR}}" \
+              MODEL="{{.MODEL}}" \
+              QUIET_PERIOD="{{.QUIET_PERIOD}}" \
+              SEED="{{.SEED}}" \
+              TEMPERATURE="{{.TEMPERATURE}}" \
+              REPLICATES="{{.REPLICATES}}"; then
+            FAILURES=$((FAILURES + 1))
+            echo -e "{{.WARN}} iteration $i failed — continuing loop"
+          fi
+          if [ -n "{{.HOOK}}" ] && [ "$i" -lt "{{.ITERATIONS}}" ]; then
+            echo -e "{{.INFO}} running HOOK between iteration $i and $((i + 1))..."
+            STACK_IP="$STACK_IP" OP_ID="{{.OP_ID}}" ITERATION="$i" bash -c '{{.HOOK}}' || {
+              echo -e "{{.ERROR}} HOOK failed after iteration $i — aborting loop"
+              exit 1
+            }
+          fi
+        done
+
+        if [ "$FAILURES" -gt 0 ]; then
+          echo -e "{{.WARN}} {{.ITERATIONS}} iteration(s) complete — $FAILURES failed"
+        else
+          echo -e "{{.SUCCESS}} {{.ITERATIONS}} iteration(s) complete for {{.OP_ID}}"
+        fi
+
+  replay:provision:
+    desc: Launch and set up a replay stack EC2 — prints STACK_IP=<ip> INSTANCE_ID=<id>.
+    requires:
+      vars: [OP_ID]
+    preconditions:
+      - sh: '[ -n "{{.SECURITY_GROUP_ID}}" ]'
+        msg: "BENCHMARK_SECURITY_GROUP_ID is required (see .env.example)"
+      - sh: '[ -n "{{.INSTANCE_PROFILE}}" ]'
+        msg: "BENCHMARK_INSTANCE_PROFILE is required (see .env.example)"
+      - sh: '[ -n "{{.SUBNET_ID}}" ]'
+        msg: "BENCHMARK_SUBNET_ID is required (see .env.example)"
+      - sh: '[ -n "{{.S3_BUCKET}}" ]'
+        msg: "BENCHMARK_S3_BUCKET is required (see .env.example)"
+    cmds:
+      - |
+        export AWS_PROFILE={{.AWS_PROFILE}}
+        export AWS_REGION={{.AWS_REGION}}
+
+        # Resolve the AMI: prefer a pre-baked ares-replay-stack AMI (built via
+        # `warpgate build ares-replay-stack`), fall back to stock AL2023 unless
+        # BENCHMARK_REQUIRE_BAKED_AMI=1.
+        if [ -n "${BENCHMARK_AMI_ID:-}" ]; then
+          AMI_ID="$BENCHMARK_AMI_ID"
+          echo -e "{{.INFO}} using BENCHMARK_AMI_ID override: $AMI_ID" >&2
+        else
+          AMI_ID=$(aws ec2 describe-images \
+            --owners self \
+            --filters "Name=tag:ares:component,Values=benchmark-replay-stack" "Name=state,Values=available" \
+            --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+            --output text 2>/dev/null || echo "None")
+          if [ "$AMI_ID" = "None" ] || [ -z "$AMI_ID" ]; then
+            if [ "{{.REQUIRE_BAKED_AMI}}" = "1" ]; then
+              echo -e "{{.ERROR}} no pre-baked ares-replay-stack AMI found and BENCHMARK_REQUIRE_BAKED_AMI=1" >&2
+              echo -e "{{.ERROR}} run: warpgate build ares-replay-stack --only 'ami.*'" >&2
+              exit 1
+            fi
+            echo -e "{{.WARN}} no pre-baked AMI — falling back to stock AL2023 (~10 min slower)" >&2
+            AMI_ID=$(aws ssm get-parameter \
+              --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
+              --query Parameter.Value --output text)
+          else
+            echo -e "{{.INFO}} using pre-baked replay-stack AMI: $AMI_ID" >&2
+          fi
+        fi
+
+        # Root volume must be >= the AMI's baked snapshot size. The bake grew it
+        # to 40 GB (Docker + the 6 images), so a hardcoded 20 is rejected with
+        # InvalidBlockDeviceMapping. Derive the size from the AMI so it never
+        # drifts across re-bakes; floor at 40 for the stock-AL2023 fallback path.
+        AMI_ROOT_GB=$(aws ec2 describe-images --image-ids "$AMI_ID" \
+          --query 'Images[0].BlockDeviceMappings[0].Ebs.VolumeSize' --output text 2>/dev/null || echo 40)
+        ROOT_GB=$AMI_ROOT_GB
+        if [ -z "$ROOT_GB" ] || [ "$ROOT_GB" = "None" ] || { [ "$ROOT_GB" -lt 40 ] 2>/dev/null; }; then ROOT_GB=40; fi
+
+        # Launch. gp3 root sized to the AMI (>=40 GB) fits Docker + the 6 images + snapshot data.
+        INSTANCE_ID=$(aws ec2 run-instances \
+          --image-id "$AMI_ID" \
+          --instance-type "{{.INSTANCE_TYPE}}" \
+          --subnet-id "{{.SUBNET_ID}}" \
+          --security-group-ids "{{.SECURITY_GROUP_ID}}" \
+          --iam-instance-profile "Name={{.INSTANCE_PROFILE}}" \
+          --block-device-mappings "DeviceName=/dev/xvda,Ebs={VolumeSize=${ROOT_GB},VolumeType=gp3}" \
+          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=ares-replay-{{.OP_ID}}},{Key=ares:component,Value=benchmark-replay},{Key=ares:operation,Value={{.OP_ID}}}]" \
+          --count 1 \
+          --query 'Instances[0].InstanceId' --output text)
+        echo -e "{{.INFO}} launched $INSTANCE_ID; waiting for status-ok..." >&2
+        aws ec2 wait instance-status-ok --instance-ids "$INSTANCE_ID"
+
+        STACK_IP=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+          --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
+
+        # Setup script: sync the snapshot data + run the baked-in /opt/replay-stack/setup.sh.
+        # If we fell back to stock AL2023, /opt/replay-stack won't exist — install Docker,
+        # pull from S3 as a fallback.
+        SETUP_SCRIPT=$(cat <<EOF
+        #!/bin/bash
+        set -euo pipefail
+        mkdir -p /opt/snap
+        if [ ! -d /opt/replay-stack ]; then
+          echo "[stack] /opt/replay-stack missing — falling back to stock provisioning"
+          (dnf install -y docker jq python3 tar >/dev/null 2>&1) || (yum install -y docker jq python3 tar >/dev/null 2>&1)
+          systemctl enable --now docker
+          if ! docker compose version >/dev/null 2>&1; then
+            mkdir -p /usr/local/lib/docker/cli-plugins
+            curl -sL https://github.com/docker/compose/releases/download/v2.32.4/docker-compose-linux-x86_64 \\
+              -o /usr/local/lib/docker/cli-plugins/docker-compose
+            chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+          fi
+          aws s3 cp s3://{{.S3_BUCKET}}/benchmark-stack/replay-stack.tar.gz /tmp/replay-stack.tar.gz --region {{.AWS_REGION}} --quiet
+          mkdir -p /opt/replay-stack
+          tar -xzf /tmp/replay-stack.tar.gz -C /opt/replay-stack
+        else
+          systemctl enable --now docker
+        fi
+        aws s3 sync s3://{{.S3_BUCKET}}/snapshots/{{.OP_ID}}/ /opt/snap/ --region {{.AWS_REGION}} --quiet
+        SNAPSHOT_DIR=/opt/snap GRAFANA_URL=http://localhost:3000 bash /opt/replay-stack/setup.sh
+        EOF
+        )
+
+        echo -e "{{.INFO}} running SSM setup on $INSTANCE_ID (up to 30 min)..." >&2
+        . .taskfiles/ec2/scripts/run-ssm.sh
+        if ! run_ssm_cmd "$INSTANCE_ID" "$SETUP_SCRIPT" 1800 >&2; then
+          task benchmark:replay:teardown INSTANCE_ID="$INSTANCE_ID" || \
+            aws ec2 create-tags --resources "$INSTANCE_ID" \
+              --tags Key=ares:orphan,Value=true Key=ares:orphan-reason,Value=ssm-setup-failed || true
+          exit 1
+        fi
+
+        # Verify stack readiness. Set BENCHMARK_SKIP_STACK_VERIFY=1 to skip
+        # (useful when the caller — e.g. a laptop — can't reach the private stack).
+        if [ "${BENCHMARK_SKIP_STACK_VERIFY:-0}" != "1" ]; then
+          echo -e "{{.INFO}} verifying Grafana/Loki/Prometheus on $STACK_IP..." >&2
+          for URL in "http://$STACK_IP:3000/api/health" "http://$STACK_IP:3100/ready" "http://$STACK_IP:9090/-/ready"; do
+            READY=0
+            for _ in $(seq 1 30); do
+              if curl -sf --max-time 5 "$URL" >/dev/null 2>&1; then READY=1; break; fi
+              sleep 2
+            done
+            if [ "$READY" != "1" ]; then
+              echo -e "{{.ERROR}} $URL not ready after 60s" >&2
+              task benchmark:replay:teardown INSTANCE_ID="$INSTANCE_ID" || true
+              exit 1
+            fi
+          done
+        fi
+
+        echo -e "{{.SUCCESS}} replay stack ready" >&2
+        echo "STACK_IP=$STACK_IP"
+        echo "INSTANCE_ID=$INSTANCE_ID"
+
+  replay:teardown:
+    desc: Terminate a provisioned replay stack EC2.
+    requires:
+      vars: [INSTANCE_ID]
+    cmds:
+      - |
+        export AWS_PROFILE={{.AWS_PROFILE}}
+        export AWS_REGION={{.AWS_REGION}}
+        echo -e "{{.INFO}} terminating {{.INSTANCE_ID}}..."
+        aws ec2 terminate-instances --instance-ids "{{.INSTANCE_ID}}" --output text >/dev/null
+
+  replay:ami:current:
+    desc: Show which replay-stack AMI resolve would pick (for debugging bakes).
+    cmds:
+      - |
+        export AWS_PROFILE={{.AWS_PROFILE}}
+        export AWS_REGION={{.AWS_REGION}}
+        aws ec2 describe-images \
+          --owners self \
+          --filters "Name=tag:ares:component,Values=benchmark-replay-stack" "Name=state,Values=available" \
+          --query 'sort_by(Images, &CreationDate)[-1].[ImageId,Name,CreationDate]' \
+          --output table
+
+  generalize:
+    desc: "Replay every op in the held-out set and report per-op + aggregate score (usage: task benchmark:generalize [HOLDOUT=path] [OUTPUT_DIR=./reports/generalize] [FAIL_UNDER=0.0])."
+    vars:
+      HOLDOUT: '{{.HOLDOUT | default "benchmarks/holdout.yaml"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports/generalize"}}'
+      FAIL_UNDER: '{{.FAIL_UNDER | default "0.0"}}'
+      SNAPSHOT_DIR: '{{.SNAPSHOT_DIR | default ""}}'
+      MODEL: '{{.MODEL | default ""}}'
+      MAX_STEPS: '{{.MAX_STEPS | default "50"}}'
+      CLOCK: '{{.CLOCK | default "step"}}'
+      REPLAY_MODE: '{{.REPLAY_MODE | default "timeline"}}'
+      TRIGGER_MODE: '{{.TRIGGER_MODE | default "alert-replay"}}'
+      QUIET_PERIOD: '{{.QUIET_PERIOD | default ""}}'
+    preconditions:
+      - sh: 'test -f "{{.HOLDOUT}}"'
+        msg: "held-out set not found at {{.HOLDOUT}} — see benchmarks/holdout.yaml"
+      - sh: 'command -v yq >/dev/null 2>&1'
+        msg: "yq is required to parse the held-out YAML (brew install yq)"
+      - sh: 'command -v jq >/dev/null 2>&1'
+        msg: "jq is required to read per-op benchmark result JSONs"
+    cmds:
+      - |
+        set -euo pipefail
+        mkdir -p "{{.OUTPUT_DIR}}"
+        SUMMARY="{{.OUTPUT_DIR}}/generalize-summary.json"
+
+        # Parse held-out set. Each row is <op_id>\t<attack_class>\t<description>.
+        # tsv handles descriptions with spaces cleanly; op_id and attack_class
+        # never contain whitespace so this parses without quoting hell.
+        MAPFILE=$(yq -r '.holdout[] | [.op_id, .attack_class, .description] | @tsv' "{{.HOLDOUT}}")
+        if [ -z "$MAPFILE" ]; then
+          echo -e "{{.ERROR}} {{.HOLDOUT}} has no .holdout entries" >&2
+          exit 1
+        fi
+
+        # Header. Note: tuning code MUST NOT read {{.HOLDOUT}} — see Taskfile
+        # header for the split rationale.
+        echo -e "{{.INFO}} held-out sweep: $(echo "$MAPFILE" | wc -l | tr -d ' ') op(s) from {{.HOLDOUT}}"
+
+        RESULTS_JSON="[]"
+        while IFS=$'\t' read -r OP_ID ATTACK_CLASS DESCRIPTION; do
+          [ -z "$OP_ID" ] && continue
+          OP_OUT_DIR="{{.OUTPUT_DIR}}/${OP_ID}"
+          mkdir -p "$OP_OUT_DIR"
+          echo -e "{{.INFO}} replaying $OP_ID (class=$ATTACK_CLASS) → $OP_OUT_DIR"
+
+          STATUS="ok"
+          SCORE="null"
+          ERROR=""
+
+          if task benchmark:replay \
+              OP_ID="$OP_ID" \
+              OUTPUT_DIR="$OP_OUT_DIR" \
+              {{if .SNAPSHOT_DIR}}SNAPSHOT_DIR="{{.SNAPSHOT_DIR}}"{{end}} \
+              {{if .MODEL}}MODEL="{{.MODEL}}"{{end}} \
+              MAX_STEPS="{{.MAX_STEPS}}" \
+              CLOCK="{{.CLOCK}}" \
+              REPLAY_MODE="{{.REPLAY_MODE}}" \
+              TRIGGER_MODE="{{.TRIGGER_MODE}}" \
+              {{if .QUIET_PERIOD}}QUIET_PERIOD="{{.QUIET_PERIOD}}"{{end}} \
+              > "$OP_OUT_DIR/replay.log" 2>&1; then
+            RESULT_FILE=$(ls -1t "$OP_OUT_DIR"/inv-*.json 2>/dev/null | head -1 || true)
+            if [ -n "$RESULT_FILE" ]; then
+              SCORE=$(jq -r '.evaluation.overall_score // empty' "$RESULT_FILE" 2>/dev/null || true)
+              if [ -z "$SCORE" ] || [ "$SCORE" = "null" ]; then
+                STATUS="no-score"
+                SCORE="null"
+                ERROR="benchmark result has no evaluation.overall_score"
+              fi
+            else
+              STATUS="no-result"
+              ERROR="no inv-*.json produced in $OP_OUT_DIR"
+            fi
+          else
+            STATUS="failed"
+            ERROR="task benchmark:replay exited non-zero — see $OP_OUT_DIR/replay.log"
+            echo -e "{{.WARN}} $OP_ID failed; continuing"
+          fi
+
+          RESULTS_JSON=$(jq \
+            --arg op_id "$OP_ID" \
+            --arg attack_class "$ATTACK_CLASS" \
+            --arg description "$DESCRIPTION" \
+            --arg status "$STATUS" \
+            --arg error "$ERROR" \
+            --argjson score "${SCORE:-null}" \
+            '. + [{op_id: $op_id, attack_class: $attack_class, description: $description,
+                   status: $status, score: $score,
+                   error: (if $error == "" then null else $error end)}]' \
+            <<< "$RESULTS_JSON")
+        done <<< "$MAPFILE"
+
+        # Aggregate: mean/median over successful scored ops only.
+        MEAN=$(jq -r '
+          [.[] | select(.score != null) | .score] as $s
+          | if ($s | length) == 0 then null else ($s | add) / ($s | length) end
+        ' <<< "$RESULTS_JSON")
+        MEDIAN=$(jq -r '
+          [.[] | select(.score != null) | .score] | sort as $s
+          | if ($s | length) == 0 then null
+            elif ($s | length) % 2 == 1 then $s[($s | length) / 2 | floor]
+            else (($s[($s | length) / 2 - 1] + $s[($s | length) / 2]) / 2)
+            end
+        ' <<< "$RESULTS_JSON")
+        SCORED=$(jq '[.[] | select(.score != null)] | length' <<< "$RESULTS_JSON")
+        TOTAL=$(jq 'length' <<< "$RESULTS_JSON")
+
+        jq -n \
+          --arg holdout_file "{{.HOLDOUT}}" \
+          --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --argjson mean "${MEAN:-null}" \
+          --argjson median "${MEDIAN:-null}" \
+          --argjson scored "$SCORED" \
+          --argjson total "$TOTAL" \
+          --argjson results "$RESULTS_JSON" \
+          '{holdout_file: $holdout_file, generated_at: $generated_at,
+            total_ops: $total, scored_ops: $scored,
+            mean_score: $mean, median_score: $median,
+            per_op: $results}' > "$SUMMARY"
+
+        # Human-readable table on stdout.
+        echo ""
+        printf "%-22s  %-24s  %-10s  %s\n" "op_id" "attack_class" "status" "score"
+        printf "%-22s  %-24s  %-10s  %s\n" "----------------------" "------------------------" "----------" "-----"
+        jq -r '.per_op[] | [.op_id, .attack_class, .status,
+                            (if .score == null then "-" else (.score * 100 | tostring + "%") end)]
+                          | @tsv' "$SUMMARY" \
+          | while IFS=$'\t' read -r OP CLS ST SC; do
+              printf "%-22s  %-24s  %-10s  %s\n" "$OP" "$CLS" "$ST" "$SC"
+            done
+        echo ""
+        echo -e "{{.INFO}} summary → $SUMMARY"
+        if [ "$MEAN" != "null" ] && [ -n "$MEAN" ]; then
+          MEAN_PCT=$(printf "%.1f" "$(echo "$MEAN * 100" | bc -l)")
+          echo -e "{{.INFO}} mean overall_score: ${MEAN_PCT}% (scored=$SCORED / total=$TOTAL)"
+        else
+          echo -e "{{.WARN}} no scored ops (scored=0 / total=$TOTAL) — nothing to aggregate"
+        fi
+
+        # Gate: FAIL_UNDER lets CI fail the sweep if the mean drops.
+        FU="{{.FAIL_UNDER}}"
+        if [ "$FU" != "0.0" ] && [ "$FU" != "0" ]; then
+          if [ "$MEAN" = "null" ] || [ -z "$MEAN" ]; then
+            echo -e "{{.ERROR}} FAIL_UNDER=$FU set but no mean score computed" >&2
+            exit 1
+          fi
+          FAIL=$(awk -v m="$MEAN" -v t="$FU" 'BEGIN{print (m < t) ? 1 : 0}')
+          if [ "$FAIL" = "1" ]; then
+            echo -e "{{.ERROR}} mean overall_score $MEAN < FAIL_UNDER $FU" >&2
+            exit 1
+          fi
+        fi
+  diversity-sweep:
+    desc: "Loop N red ops with diversity knobs on and dump a per-step coverage CSV (usage: task benchmark:diversity-sweep N=10 TARGET=dreadgoad [CAMPAIGN=name] [RESET=true] [EC2_NAME=kali-ares])"
+    requires:
+      vars: [N, TARGET]
+    vars:
+      EC2_NAME: '{{.EC2_NAME | default "kali-ares"}}'
+      RESET: '{{.RESET | default "false"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports/diversity"}}'
+      POLL_INTERVAL: '{{.POLL_INTERVAL | default "60"}}'
+      MAX_WAIT: '{{.MAX_WAIT | default "7200"}}'
+      CAMPAIGN_COMPUTED:
+        sh: |
+          if [ -n "{{.CAMPAIGN}}" ]; then
+            echo "{{.CAMPAIGN}}"
+          else
+            echo "diversity-$(date +%Y%m%d-%H%M%S)"
+          fi
+    cmds:
+      - |
+        set -euo pipefail
+        CAMPAIGN="{{.CAMPAIGN_COMPUTED}}"
+        SWEEP_DIR="{{.OUTPUT_DIR}}/${CAMPAIGN}"
+        mkdir -p "${SWEEP_DIR}"
+        CSV="${SWEEP_DIR}/coverage.csv"
+        MANIFEST="${SWEEP_DIR}/ops.txt"
+        echo "op_id,step_index,technique,target" > "${CSV}"
+        : > "${MANIFEST}"
+        echo -e "{{.INFO}} campaign=${CAMPAIGN} N={{.N}} target={{.TARGET}}"
+        echo -e "{{.INFO}} output=${SWEEP_DIR}"
+
+      # Preflight: verify the four diversity knobs are actually on in the
+      # deployed config. Runs blind to what's in git — checks the live box.
+      - |
+        set -euo pipefail
+        export AWS_PROFILE="{{.AWS_PROFILE}}"
+        export AWS_REGION="{{.AWS_REGION}}"
+        . .taskfiles/ec2/scripts/run-ssm.sh
+        INSTANCE_ID=$(resolve_instance_id "{{.EC2_NAME}}") || exit 1
+        if [ -z "$INSTANCE_ID" ]; then
+          echo -e "{{.ERROR}} no running EC2 matching {{.EC2_NAME}}"; exit 1
+        fi
+        echo -e "{{.INFO}} preflight on $INSTANCE_ID"
+        OUT=$(run_ssm_cmd "$INSTANCE_ID" \
+          'grep -E "^  (selection_temperature|randomize_entry_foothold|emit_path_records):" /etc/ares/config.yaml || true; grep -E "^  novelty:|^    enabled:" /etc/ares/config.yaml || true' \
+          60) || exit 1
+        echo "$OUT" | sed 's/^/    /'
+        if ! echo "$OUT" | grep -qE '^  selection_temperature: 0*\.[1-9]|^  selection_temperature: [1-9]'; then
+          echo -e "{{.ERROR}} selection_temperature is 0 or missing on box — sweep would run deterministic."
+          echo -e "{{.ERROR}} Uncomment the diversity knobs in config/ares.yaml then run: task ec2:deploy"
+          exit 1
+        fi
+        if ! echo "$OUT" | grep -q 'enabled: true'; then
+          echo -e "{{.WARN}} novelty.enabled != true — sweep will still run but coverage will be lower."
+        fi
+        echo -e "{{.SUCCESS}} diversity knobs active on {{.EC2_NAME}}"
+
+        # Workers must already be up: launch-orchestrator.sh.tmpl leaves
+        # ARES_TOOL_DISPATCH unset so every tool call routes over NATS to an
+        # ares@<role>.service. With none running, ops launch fine and then
+        # stall with no consumer — an entire sweep burns with nothing to show.
+        # ec2:deploy does not cover this: its restart step only bounces units
+        # that are ALREADY active and prints "skipping" otherwise.
+        WORKERS=$(run_ssm_cmd "$INSTANCE_ID" 'pgrep -cf "ares worker" || true' 60) || exit 1
+        WORKERS=$(echo "$WORKERS" | tr -dc '0-9')
+        if [ -z "${WORKERS}" ] || [ "${WORKERS}" -eq 0 ]; then
+          echo -e "{{.ERROR}} no 'ares worker' processes on {{.EC2_NAME}} — every op would stall with no NATS consumer."
+          echo -e "{{.ERROR}} Start them: task ec2:exec EC2_NAME={{.EC2_NAME}} CMD='for r in recon credential_access lateral privesc acl coercion cracker; do systemctl start ares@\$r; done'"
+          exit 1
+        fi
+        echo -e "{{.SUCCESS}} ${WORKERS} ares worker process(es) live"
+
+        # A leftover lock makes `ares ops status` report `running` for an op
+        # that is already dead, which the sweep loop would wait out.
+        LOCKS=$(run_ssm_cmd "$INSTANCE_ID" 'redis-cli --scan --pattern "ares:lock:*" | head -5' 60) || exit 1
+        if [ -n "$(echo "$LOCKS" | tr -d '[:space:]')" ]; then
+          echo -e "{{.WARN}} operation lock(s) still held — a prior op may still be live:"
+          echo "$LOCKS" | sed 's/^/    /'
+          echo -e "{{.WARN}} locks carry a ~5m TTL; re-run once they clear, or stop the op first."
+        fi
+
+      # Optionally wipe novelty memory so the sweep starts fresh.
+      - |
+        set -euo pipefail
+        if [ "{{.RESET}}" != "true" ]; then
+          echo -e "{{.INFO}} RESET=false — reusing existing novelty memory (set RESET=true to start fresh)"
+          exit 0
+        fi
+        export AWS_PROFILE="{{.AWS_PROFILE}}"
+        export AWS_REGION="{{.AWS_REGION}}"
+        . .taskfiles/ec2/scripts/run-ssm.sh
+        INSTANCE_ID=$(resolve_instance_id "{{.EC2_NAME}}") || exit 1
+        echo -e "{{.INFO}} wiping novelty memory (all scopes)"
+        run_ssm_cmd "$INSTANCE_ID" \
+          'redis-cli --scan --pattern "ares:novelty:*:steps" | xargs -r redis-cli del' \
+          30 >/dev/null || exit 1
+
+      # Sequential loop — novelty memory needs prior runs' prefixes to bias
+      # against, so DO NOT parallelize.
+      #
+      # `red:ec2:multi` is submit-only: it has no FOLLOW/MAX_WAIT/OUTPUT_DIR var
+      # and its submit step carries `ignore_error: true`, so it returns 0 in
+      # ~13s whether or not the op started. Passing FOLLOW=true to it did
+      # nothing, which made this "sequential" loop fire every op concurrently
+      # and record all of them as successes. The wait and the success test
+      # therefore live here.
+      #
+      # Success is `Status: completed` (ares derives that from completed_at /
+      # red_completed_at). `stopped` means the op is neither live nor finished —
+      # a failure, and also exactly what a never-started op looks like. That is
+      # why `ec2:watch` is not usable here: it breaks on `completed|stopped`
+      # alike and exits 0 for both.
+      - |
+        set -euo pipefail
+        CAMPAIGN="{{.CAMPAIGN_COMPUTED}}"
+        SWEEP_DIR="{{.OUTPUT_DIR}}/${CAMPAIGN}"
+        MANIFEST="${SWEEP_DIR}/ops.txt"
+        export AWS_PROFILE="{{.AWS_PROFILE}}"
+        export AWS_REGION="{{.AWS_REGION}}"
+        . .taskfiles/ec2/scripts/run-ssm.sh
+        INSTANCE_ID=$(resolve_instance_id "{{.EC2_NAME}}") || exit 1
+
+        for i in $(seq 1 {{.N}}); do
+          OP_ID="op-$(date +%Y%m%d-%H%M%S)"
+          echo -e "{{.INFO}} [${i}/{{.N}}] launching ${OP_ID}"
+
+          if ! task red:ec2:multi \
+              TARGET="{{.TARGET}}" \
+              EC2_NAME="{{.EC2_NAME}}" \
+              OPERATION_ID="${OP_ID}"; then
+            echo -e "{{.WARN}} [${i}/{{.N}}] ${OP_ID} submit failed — continuing sweep"
+            echo "${OP_ID} FAILED submit" >> "${MANIFEST}"
+            continue
+          fi
+
+          START=$(date +%s)
+          STATUS=""
+          while true; do
+            ELAPSED=$(( $(date +%s) - START ))
+            if [ "${ELAPSED}" -gt {{.MAX_WAIT}} ]; then
+              STATUS="timeout"
+              break
+            fi
+            STATUS=$(run_ssm_cmd "$INSTANCE_ID" \
+              "RUST_LOG=error ares ops status ${OP_ID} 2>&1 | sed -n 's/^Status: //p' | head -1" \
+              60 2>/dev/null | tr -d '\r' | tr -d '[:space:]') || STATUS=""
+            case "${STATUS}" in
+              completed|stopped) break ;;
+              running) echo -e "{{.INFO}} [${i}/{{.N}}] [${ELAPSED}s] ${OP_ID} running" ;;
+              *)       echo -e "{{.WARN}} [${i}/{{.N}}] [${ELAPSED}s] ${OP_ID} no status yet" ;;
+            esac
+            sleep {{.POLL_INTERVAL}}
+          done
+
+          if [ "${STATUS}" = "completed" ]; then
+            echo "${OP_ID}" >> "${MANIFEST}"
+            echo -e "{{.SUCCESS}} [${i}/{{.N}}] ${OP_ID} completed in $(( $(date +%s) - START ))s"
+            task ec2:report EC2_NAME="{{.EC2_NAME}}" OPERATION_ID="${OP_ID}" \
+              LATEST=false OUTPUT_DIR="${SWEEP_DIR}" || \
+              echo -e "{{.WARN}} report fetch failed for ${OP_ID}"
+          else
+            echo -e "{{.WARN}} [${i}/{{.N}}] ${OP_ID} ended ${STATUS} — continuing sweep"
+            echo "${OP_ID} FAILED ${STATUS}" >> "${MANIFEST}"
+          fi
+
+          # Never let op N+1 start while N is still live — concurrent ops share
+          # one novelty memory and one ares:operation:active pointer.
+          LIVE=$(run_ssm_cmd "$INSTANCE_ID" \
+            "RUST_LOG=error ares ops status ${OP_ID} 2>&1 | sed -n 's/^Status: //p' | head -1" \
+            60 2>/dev/null | tr -d '\r' | tr -d '[:space:]') || LIVE=""
+          if [ "${LIVE}" = "running" ]; then
+            echo -e "{{.WARN}} ${OP_ID} still running — stopping it before the next op"
+            task ec2:stop-op EC2_NAME="{{.EC2_NAME}}" OPERATION_ID="${OP_ID}" || true
+          fi
+          sleep 5
+        done
+        OK=$(grep -cv 'FAILED' "${MANIFEST}" || true)
+        echo -e "{{.SUCCESS}} sweep complete — ${OK}/{{.N}} ops reached completed"
+
+      # Pull path_record lists for every op and emit CSV rows.
+      - |
+        set -euo pipefail
+        CAMPAIGN="{{.CAMPAIGN_COMPUTED}}"
+        SWEEP_DIR="{{.OUTPUT_DIR}}/${CAMPAIGN}"
+        CSV="${SWEEP_DIR}/coverage.csv"
+        MANIFEST="${SWEEP_DIR}/ops.txt"
+        export AWS_PROFILE="{{.AWS_PROFILE}}"
+        export AWS_REGION="{{.AWS_REGION}}"
+        . .taskfiles/ec2/scripts/run-ssm.sh
+        INSTANCE_ID=$(resolve_instance_id "{{.EC2_NAME}}") || exit 1
+        while read -r op; do
+          op=${op%% *}
+          [ -z "$op" ] && continue
+          echo -e "{{.INFO}} pulling path_record for ${op}"
+          OUT=$(run_ssm_cmd "$INSTANCE_ID" \
+            "redis-cli --no-raw LRANGE ares:op:${op}:path_record 0 -1" 60) || continue
+          # Strip redis-cli's leading "N) " list markers, keep JSON, one per line.
+          idx=0
+          while IFS= read -r line; do
+            json=$(echo "$line" | sed -E 's/^[[:space:]]*[0-9]+\)[[:space:]]*"?//; s/"?[[:space:]]*$//; s/\\"/"/g')
+            [ -z "$json" ] && continue
+            tech=$(echo "$json" | jq -r '.technique // empty' 2>/dev/null || true)
+            tgt=$(echo "$json"  | jq -r '.target // empty'    2>/dev/null || true)
+            [ -z "$tech" ] && continue
+            echo "${op},${idx},${tech},${tgt}" >> "${CSV}"
+            idx=$((idx + 1))
+          done <<< "$OUT"
+        done < "${MANIFEST}"
+        echo -e "{{.SUCCESS}} coverage written to ${CSV}"
+        echo -e "{{.INFO}} summary:"
+        UNIQ=$(awk -F, 'NR>1 {print $3":"$4}' "${CSV}" | sort -u | wc -l | tr -d ' ')
+        OPS=$(awk -F, 'NR>1 {print $1}' "${CSV}" | sort -u | wc -l | tr -d ' ')
+        TOTAL=$(($(wc -l < "${CSV}") - 1))
+        # A header-only CSV is not a sweep with no findings, it is a sweep that
+        # did not happen. Say so rather than printing zeros and exiting 0.
+        if [ "${TOTAL}" -eq 0 ]; then
+          echo -e "{{.ERROR}} coverage.csv is header-only — no op wrote a path_record."
+          echo -e "{{.ERROR}} Check: ops actually reached 'completed' (see ops.txt),"
+          echo -e "{{.ERROR}} and emit_path_records is true in /etc/ares/config.yaml."
+          exit 1
+        fi
+        echo "    ops with path records: ${OPS}"
+        echo "    total steps recorded:  ${TOTAL}"
+        echo "    unique (technique,target) pairs: ${UNIQ}"
+        echo -e "{{.INFO}} top techniques:"
+        awk -F, 'NR>1 {print $3}' "${CSV}" | sort | uniq -c | sort -rn | head -10 | sed 's/^/    /'
+
+  diversity-diff:
+    desc: "Compare two directories of ops (sweep campaigns or reports/red-style dirs) — shows technique overlap and coverage delta (usage: task benchmark:diversity-diff BEFORE=reports/red AFTER=reports/diversity/sweep-1)"
+    requires:
+      vars: [BEFORE, AFTER]
+    cmds:
+      - |
+        set -euo pipefail
+        if [ ! -d "{{.BEFORE}}" ]; then
+          echo -e "{{.ERROR}} BEFORE={{.BEFORE}} is not a directory"; exit 1
+        fi
+        if [ ! -d "{{.AFTER}}" ]; then
+          echo -e "{{.ERROR}} AFTER={{.AFTER}} is not a directory"; exit 1
+        fi
+
+        # Extract (op, technique, target) rows from a directory. Prefers
+        # coverage.csv when present (full path_record); falls back to grepping
+        # EXPLOITED markers out of reports/*.md.
+        extract() {
+          local dir="$1" out="$2"
+          if [ -f "${dir}/coverage.csv" ]; then
+            awk -F, 'NR>1 {print $1","$3","$4}' "${dir}/coverage.csv" > "$out"
+            return
+          fi
+          # Search reports/*.md at $dir root and one level down (covers both
+          # reports/red/*.md and reports/diversity/<camp>/red/*.md).
+          : > "$out"
+          for md in "$dir"/*.md "$dir"/red/*.md; do
+            [ -f "$md" ] || continue
+            op=$(basename "$md" .md)
+            awk -v op="$op" '
+              /^#### / { v=$2; sub(/ on .*/, "", v); tgt="unknown" }
+              /^- \*\*IP\*\*:/ { tgt=$3 }
+              /^- \*\*Status\*\*: EXPLOITED/ { print op","v","tgt }
+            ' "$md" >> "$out"
+          done
+        }
+
+        WORK=$(mktemp -d)
+        trap 'rm -rf "$WORK"' EXIT
+        extract "{{.BEFORE}}" "$WORK/before.csv"
+        extract "{{.AFTER}}"  "$WORK/after.csv"
+
+        if [ ! -s "$WORK/before.csv" ] || [ ! -s "$WORK/after.csv" ]; then
+          echo -e "{{.ERROR}} one side extracted 0 rows — check the input dirs contain coverage.csv or *.md reports"
+          echo "    BEFORE rows: $(wc -l < $WORK/before.csv)"
+          echo "    AFTER rows:  $(wc -l < $WORK/after.csv)"
+          exit 1
+        fi
+
+        # Op counts
+        B_OPS=$(cut -d, -f1 "$WORK/before.csv" | sort -u | wc -l | tr -d ' ')
+        A_OPS=$(cut -d, -f1 "$WORK/after.csv"  | sort -u | wc -l | tr -d ' ')
+
+        # Technique sets
+        cut -d, -f2 "$WORK/before.csv" | sort -u > "$WORK/before.tech"
+        cut -d, -f2 "$WORK/after.csv"  | sort -u > "$WORK/after.tech"
+
+        # (technique,target) coverage pairs
+        awk -F, '{print $2":"$3}' "$WORK/before.csv" | sort -u > "$WORK/before.pairs"
+        awk -F, '{print $2":"$3}' "$WORK/after.csv"  | sort -u > "$WORK/after.pairs"
+
+        # Steps per op — path length distribution (CSV side only; markdown has no
+        # step order, so we count distinct techniques per op as a proxy).
+        awk -F, '{c[$1]++} END {for (o in c) print c[o]}' "$WORK/before.csv" | sort -n > "$WORK/before.lens"
+        awk -F, '{c[$1]++} END {for (o in c) print c[o]}' "$WORK/after.csv"  | sort -n > "$WORK/after.lens"
+        stat() {
+          awk 'BEGIN{n=0} {a[n++]=$1; s+=$1} END{
+            if (n==0){print "0/0/0"; exit}
+            med = (n%2 ? a[int(n/2)] : (a[n/2-1]+a[n/2])/2);
+            printf "%d/%.1f/%d", med, s/n, a[n-1];
+          }' "$1"
+        }
+
+        BOTH=$(comm -12 "$WORK/before.tech" "$WORK/after.tech")
+        BONLY=$(comm -23 "$WORK/before.tech" "$WORK/after.tech")
+        AONLY=$(comm -13 "$WORK/before.tech" "$WORK/after.tech")
+        PAIRS_BOTH=$(comm -12 "$WORK/before.pairs" "$WORK/after.pairs" | wc -l | tr -d ' ')
+        PAIRS_BONLY=$(comm -23 "$WORK/before.pairs" "$WORK/after.pairs" | wc -l | tr -d ' ')
+        PAIRS_AONLY=$(comm -13 "$WORK/before.pairs" "$WORK/after.pairs" | wc -l | tr -d ' ')
+
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════"
+        echo "  BEFORE: {{.BEFORE}}  (${B_OPS} ops)"
+        echo "  AFTER:  {{.AFTER}}   (${A_OPS} ops)"
+        echo "═══════════════════════════════════════════════════════════════"
+        echo ""
+        echo "─── Technique classes ────────────────────────────────────────"
+        printf "  In both:      "; echo "$BOTH"  | tr '\n' ' ' | fmt -w 60 | sed 's/^/                /' | sed 's/^ *$//'
+        [ -n "$BONLY" ] && { printf "  BEFORE only:  "; echo "$BONLY" | tr '\n' ' ' | fmt -w 60 | sed 's/^/                /' | sed 's/^ *$//'; }
+        if [ -n "$AONLY" ]; then
+          echo ""
+          echo -e "  {{.SUCCESS}} AFTER only (NEW coverage from diversity):"
+          echo "$AONLY" | sed 's/^/    + /'
+        else
+          echo ""
+          echo -e "  {{.WARN}} AFTER unlocked nothing new — diversity knobs are not producing novel techniques"
+        fi
+        echo ""
+        echo "─── (technique, target) pair coverage ────────────────────────"
+        printf "  BEFORE unique pairs:      %d\n" "$(wc -l < $WORK/before.pairs | tr -d ' ')"
+        printf "  AFTER unique pairs:       %d\n" "$(wc -l < $WORK/after.pairs  | tr -d ' ')"
+        printf "  Overlap:                  %d\n" "$PAIRS_BOTH"
+        printf "  BEFORE-only pairs:        %d\n" "$PAIRS_BONLY"
+        printf "  AFTER-only pairs (novel): %d\n" "$PAIRS_AONLY"
+        echo ""
+        echo "─── Techniques per op (median/mean/max) ──────────────────────"
+        printf "  BEFORE: %s\n" "$(stat $WORK/before.lens)"
+        printf "  AFTER:  %s\n" "$(stat $WORK/after.lens)"
+        echo ""
+        echo "─── Top techniques (op count) ────────────────────────────────"
+        printf "  %-30s  %8s  %8s\n" "technique" "BEFORE" "AFTER"
+        (cut -d, -f2 "$WORK/before.csv"; cut -d, -f2 "$WORK/after.csv") | sort -u | while read -r t; do
+          b=$(awk -F, -v t="$t" '$2==t {print $1}' "$WORK/before.csv" | sort -u | wc -l | tr -d ' ')
+          a=$(awk -F, -v t="$t" '$2==t {print $1}' "$WORK/after.csv"  | sort -u | wc -l | tr -d ' ')
+          printf "  %-30s  %8d  %8d\n" "$t" "$b" "$a"
+        done | sort -k3 -rn | head -20
+        echo ""

@@ -41,10 +41,8 @@ impl LateralMovementAnalyzer {
         let result_str = result_data.to_string();
         let mut hosts: HashSet<String> = HashSet::new();
 
-        // Extract values that look like hostnames
         Self::extract_searchable_values(result_data, &mut hosts);
 
-        // Also scan raw string for hostnames
         for cap in HOSTNAME_RE.captures_iter(&result_str) {
             let candidate = &cap[1];
             if looks_like_hostname(candidate) {
@@ -111,7 +109,6 @@ impl LateralMovementAnalyzer {
                 let conn_types: HashSet<&str> =
                     conns.iter().map(|c| c.connection_type.as_str()).collect();
 
-                // Derive relevant detection templates from connection types
                 let detection_templates: Vec<&str> = conn_types
                     .iter()
                     .flat_map(|ct| crate::detection::templates_for_connection_type(ct))

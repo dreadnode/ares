@@ -17,6 +17,7 @@ pub struct TraceToolCallParams<'a> {
     pub task_id: Option<&'a str>,
     pub is_error: bool,
     pub error_message: Option<&'a str>,
+    pub defer_status: bool,
 }
 
 /// Create a tool call span (point-in-time recording).
@@ -43,6 +44,9 @@ pub fn trace_tool_call(p: TraceToolCallParams<'_>) -> tracing::Span {
     }
     if p.is_error {
         builder = builder.error(p.error_message.unwrap_or("unknown error"));
+    }
+    if p.defer_status {
+        builder = builder.defer_status();
     }
 
     builder.build()
@@ -182,34 +186,52 @@ pub fn extract_target_from_args(
     (target, user, domain)
 }
 
+/// Parameters for the service-graph span helpers.
+///
+/// `target_service` populates `peer.service` (the far side of the edge) and is
+/// `None` for spans that have no known peer. `defer_status` leaves the status
+/// fields unset so the caller can report the real outcome with
+/// [`crate::telemetry::spans::record_span_status`] once the wrapped work
+/// finishes; without it the span records success at construction.
+pub struct ServiceSpanParams<'a> {
+    pub name: &'a str,
+    pub role: &'a str,
+    pub team: Team,
+    pub target_service: Option<&'a str>,
+    pub defer_status: bool,
+}
+
+fn service_span(p: ServiceSpanParams<'_>, kind: SpanKind) -> tracing::Span {
+    let mut builder = AgentSpanBuilder::new(p.name, p.role, p.team).kind(kind);
+
+    if let Some(service) = p.target_service {
+        builder = builder.target_service(service);
+    }
+    if p.defer_status {
+        builder = builder.defer_status();
+    }
+
+    builder.build()
+}
+
 /// Create a CLIENT span for outgoing service-to-service calls.
-pub fn client_span(name: &str, role: &str, team: Team, target_service: &str) -> tracing::Span {
-    AgentSpanBuilder::new(name, role, team)
-        .kind(SpanKind::Client)
-        .target_service(target_service)
-        .build()
+pub fn client_span(p: ServiceSpanParams<'_>) -> tracing::Span {
+    service_span(p, SpanKind::Client)
 }
 
 /// Create a SERVER span for incoming requests.
-pub fn server_span(name: &str, role: &str, team: Team) -> tracing::Span {
-    AgentSpanBuilder::new(name, role, team)
-        .kind(SpanKind::Server)
-        .build()
+pub fn server_span(p: ServiceSpanParams<'_>) -> tracing::Span {
+    service_span(p, SpanKind::Server)
 }
 
 /// Create a PRODUCER span for async message publishing.
-pub fn producer_span(name: &str, role: &str, team: Team, target_service: &str) -> tracing::Span {
-    AgentSpanBuilder::new(name, role, team)
-        .kind(SpanKind::Producer)
-        .target_service(target_service)
-        .build()
+pub fn producer_span(p: ServiceSpanParams<'_>) -> tracing::Span {
+    service_span(p, SpanKind::Producer)
 }
 
 /// Create a CONSUMER span for async message consumption.
-pub fn consumer_span(name: &str, role: &str, team: Team) -> tracing::Span {
-    AgentSpanBuilder::new(name, role, team)
-        .kind(SpanKind::Consumer)
-        .build()
+pub fn consumer_span(p: ServiceSpanParams<'_>) -> tracing::Span {
+    service_span(p, SpanKind::Consumer)
 }
 
 #[cfg(test)]

@@ -37,7 +37,7 @@ base:
 sources:
   - name: ares
     git:
-      repository: https://github.com/dreadnode/ares.git
+      repository: https://github.com/l50/ares.git
       ref: main
       depth: 1
       auth:

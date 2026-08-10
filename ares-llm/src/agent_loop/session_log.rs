@@ -29,6 +29,8 @@ pub struct SessionLogEntry<'a> {
     pub op_id: &'a str,
     /// Task ID within the operation.
     pub task_id: &'a str,
+    /// Owning team (`red` | `blue`) — lets the ingester tag rows for analysis.
+    pub team: &'a str,
     /// Agent role (recon, lateral, ...).
     pub role: &'a str,
     /// Step counter (0 for boot/start, increments per LLM iteration).
@@ -47,6 +49,7 @@ pub struct SessionLog {
     path: PathBuf,
     op_id: String,
     task_id: String,
+    team: String,
     role: String,
     model: String,
     enabled: bool,
@@ -62,31 +65,37 @@ impl SessionLog {
         role: &str,
         model: &str,
     ) -> Self {
+        // Config can override the op_id (blue benchmark files its transcript
+        // under the replayed operation) and always carries the owning team.
+        let op_id = config.op_id.as_deref().unwrap_or(op_id);
+        let team = config.team.as_str();
         let Some(root) = config.dir.as_ref() else {
-            return Self::disabled(op_id, task_id, role, model);
+            return Self::disabled(op_id, task_id, team, role, model);
         };
         let mut path = root.clone();
         path.push(sanitize(op_id));
         if let Err(e) = fs::create_dir_all(&path) {
             warn!(error = %e, dir = %path.display(), "failed to create session log dir");
-            return Self::disabled(op_id, task_id, role, model);
+            return Self::disabled(op_id, task_id, team, role, model);
         }
         path.push(format!("{}.jsonl", sanitize(task_id)));
         Self {
             path,
             op_id: op_id.to_string(),
             task_id: task_id.to_string(),
+            team: team.to_string(),
             role: role.to_string(),
             model: model.to_string(),
             enabled: true,
         }
     }
 
-    fn disabled(op_id: &str, task_id: &str, role: &str, model: &str) -> Self {
+    fn disabled(op_id: &str, task_id: &str, team: &str, role: &str, model: &str) -> Self {
         Self {
             path: PathBuf::new(),
             op_id: op_id.to_string(),
             task_id: task_id.to_string(),
+            team: team.to_string(),
             role: role.to_string(),
             model: model.to_string(),
             enabled: false,
@@ -109,6 +118,7 @@ impl SessionLog {
             ts: Utc::now().to_rfc3339(),
             op_id: &self.op_id,
             task_id: &self.task_id,
+            team: &self.team,
             role: &self.role,
             step,
             model: &self.model,
@@ -302,8 +312,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = SessionLogConfig {
             dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
         };
-        let log = SessionLog::open(&cfg, "op-1", "t-1", "recon", "claude-sonnet-4-20250514");
+        let log = SessionLog::open(&cfg, "op-1", "t-1", "recon", "claude-sonnet-4-6");
         assert!(log.enabled());
         log.record_start("system", "do recon", &["nmap_scan".into()]);
         log.record_message(1, &ChatMessage::text(Role::User, "go"));
@@ -328,7 +339,7 @@ mod tests {
             assert_eq!(v["op_id"], "op-1");
             assert_eq!(v["task_id"], "t-1");
             assert_eq!(v["role"], "recon");
-            assert_eq!(v["model"], "claude-sonnet-4-20250514");
+            assert_eq!(v["model"], "claude-sonnet-4-6");
             assert!(v.get("ts").is_some());
         }
         // Replay roundtrips just the message-shaped lines.
@@ -344,6 +355,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = SessionLogConfig {
             dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
         };
         let log = SessionLog::open(&cfg, "op-c", "t-c", "recon", "model");
         log.record_compaction(7, "proactive", 60_000, 30_000);
@@ -362,6 +374,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = SessionLogConfig {
             dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
         };
         let log = SessionLog::open(&cfg, "op-r", "t-r", "recon", "m");
         log.record_start("sys", "task", &[]);

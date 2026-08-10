@@ -21,7 +21,7 @@ Your role is to capture authentication traffic and coerce systems to authenticat
 
 1. **Network Coercion**
    - Run Responder for LLMNR/NBT-NS/mDNS spoofing
-   - Capture NetNTLMv2 hashes
+   - Capture NetNTLMv1 (preferred, rainbow-crack candidate) or NetNTLMv2 hashes
    - Run mitm6 for IPv6 attacks
 
 2. **Authentication Coercion**
@@ -40,16 +40,39 @@ Your role is to capture authentication traffic and coerce systems to authenticat
 ## Network Coercion
 
 ### Responder
-Primary tool for capturing hashes. Call `start_responder` with `analyze_mode=False`
-(or `True` for passive) and the `interface` value taken verbatim from the task
-prompt. The orchestrator dispatches each coercion task with the correct
-interface in the payload — never guess (eth0 is rarely correct), never invoke
-this without first confirming the task prompt named an interface.
+Primary tool for capturing hashes. Call `start_responder` with the `interface`
+value taken verbatim from the task prompt. The orchestrator dispatches each
+coercion task with the correct interface in the payload — never guess (eth0 is
+rarely correct), never invoke this without first confirming the task prompt
+named an interface.
 
-Captures:
-- NetNTLMv2 hashes from LLMNR queries
-- NetNTLMv2 hashes from NBT-NS queries
-- WPAD authentication
+Parameters:
+- `analyze_mode=True` — passive: observe LLMNR/NBT-NS/mDNS requests WITHOUT
+  poisoning. Captures no hashes; use it only to survey the segment. Default is
+  `False` (active poisoning).
+- `force_ntlmv1=True` — attempt a NetNTLMv1 downgrade. Adds Responder's
+  `--lm --disable-ess` flags at runtime, so targets with
+  `LmCompatibilityLevel <= 2` (or an explicit LM/NTLMv1 downgrade vuln)
+  negotiate NetNTLMv1 instead of v2. Targets that enforce NTLMv2 ignore the
+  downgrade and still yield v2. `analyze_mode` and `force_ntlmv1` are
+  independent knobs — never set both, because passive mode captures nothing to
+  downgrade.
+
+The `coercion_tools` ansible role pins Responder's server challenge to the
+static value `1122334455667788` in `Responder.conf`, so any NetNTLMv1 hash you
+capture with `force_ntlmv1=True` is a crack.sh rainbow-table candidate. Prefer
+coercion targets that accept the downgrade — v1 cracks orders of magnitude
+faster than v2.
+
+Captures (watch both files — machine accounts land on SMB, browsers on HTTP):
+- `SMB-NTLMv1-SSP-*.txt` / `HTTP-NTLMv1-*.txt` — downgrade succeeded, feed to
+  cracker as NetNTLMv1 (hashcat mode 5500). Fixed `1122334455667788` challenge
+  = crack.sh rainbow-table candidate.
+- `SMB-NTLMv2-SSP-*.txt` / `HTTP-NTLMv2-*.txt` — target refused the downgrade
+  (or `force_ntlmv1` was not set), crack as NetNTLMv2 (5600).
+- WPAD authentication (either version)
+
+Always report the exact filename so the cracker picks the right mode.
 
 ### mitm6
 IPv6-based attacks. Call `start_mitm6(domain="{{ target_domain }}", interface=...)`

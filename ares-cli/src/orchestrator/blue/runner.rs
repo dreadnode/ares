@@ -11,6 +11,8 @@ use redis::AsyncCommands;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
 
+use ares_core::nats::NatsBroker;
+use ares_core::op_state_log::OpStateRecorder;
 use ares_core::state::blue_task_queue::BlueTaskQueue;
 use ares_llm::{LlmProvider, ToolDispatcher};
 
@@ -19,7 +21,10 @@ use super::investigation::{self, Investigation};
 /// Timeout for a single investigation run (45 minutes).
 /// Loki queries via the Grafana proxy take 30-40s each from EC2,
 /// so the agent needs more headroom to complete triage + hunting.
-const INVESTIGATION_TIMEOUT_SECS: u64 = 2700;
+pub(crate) const INVESTIGATION_TIMEOUT_SECS: u64 = 2700;
+
+/// How often a running investigation checks for a supersede request.
+const SUPERSEDE_POLL_SECS: u64 = 10;
 
 /// Threshold for considering a running investigation as stale (50 minutes).
 const STALE_INVESTIGATION_THRESHOLD_SECS: i64 = 3000;
@@ -62,8 +67,10 @@ impl BlueOrchestrator {
     /// status has been `in_progress` for longer than the threshold. Marks
     /// them as `failed` with an orphaned message and removes from the active set.
     async fn cleanup_stale_investigations(&self) {
+        let cm_config = redis::aio::ConnectionManagerConfig::new()
+            .set_response_timeout(Some(std::time::Duration::from_secs(30)));
         let conn = match redis::Client::open(self.redis_url.as_str()) {
-            Ok(client) => match client.get_connection_manager().await {
+            Ok(client) => match client.get_connection_manager_with_config(cm_config).await {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Stale cleanup: failed to connect to Redis: {e}");
@@ -77,7 +84,6 @@ impl BlueOrchestrator {
         };
         let mut conn = conn;
 
-        // Get all active investigation IDs
         let active_ids: Vec<String> = match conn
             .smembers::<_, Vec<String>>(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS)
             .await
@@ -132,7 +138,6 @@ impl BlueOrchestrator {
                     "Investigation orphaned after orchestrator restart (was running {hours:.1}h)"
                 );
 
-                // Update status to failed
                 let updated = serde_json::json!({
                     "status": "failed",
                     "started_at": status_obj.get("started_at").unwrap_or(&serde_json::Value::Null),
@@ -142,7 +147,6 @@ impl BlueOrchestrator {
                 let data = serde_json::to_string(&updated).unwrap_or_default();
                 let _: Result<(), _> = conn.set_ex::<_, _, ()>(&status_key, &data, 86400).await;
 
-                // Remove from active set
                 let _: Result<(), _> = conn
                     .srem::<_, _, ()>(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS, inv_id)
                     .await;
@@ -168,25 +172,54 @@ impl BlueOrchestrator {
     pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
         info!("Blue team orchestrator starting");
 
-        // Clean up stale investigations from previous runs
         self.cleanup_stale_investigations().await;
 
         let mut task_queue = BlueTaskQueue::connect_with_nats(&self.redis_url, &self.nats_url)
             .await
             .context("Failed to connect blue task queue (Redis + NATS)")?;
 
+        // Blue is DETECT-ONLY by default: it investigates and identifies red's
+        // activity but publishes no containment, so red runs its full attack
+        // while blue tracks it. Opt in to the red-facing containment loop
+        // (`confirm_escalation` with a containment action → ARES_OPSTATE event →
+        // red-side projector drops invalidated tasks) with
+        // ARES_BLUE_SIMULATED_CONTAINMENT=1. When off, a disabled recorder makes
+        // `publish_containment` a no-op; blue's investigation/detection output is
+        // unaffected either way.
+        let containment_enabled =
+            std::env::var("ARES_BLUE_SIMULATED_CONTAINMENT").as_deref() == Ok("1");
+        let op_state_recorder = if !containment_enabled {
+            info!(
+                "Blue orchestrator: detect-only (simulated containment OFF); set \
+                 ARES_BLUE_SIMULATED_CONTAINMENT=1 to feed containment observations to red"
+            );
+            OpStateRecorder::disabled()
+        } else {
+            match NatsBroker::connect(&self.nats_url).await {
+                Ok(broker) => {
+                    info!("Blue orchestrator: simulated containment ON — op-state recorder wired to NATS");
+                    OpStateRecorder::nats(Arc::new(broker))
+                }
+                Err(e) => {
+                    warn!(
+                        err = %e,
+                        "Blue orchestrator: could not connect NATS broker for op-state recorder — simulated-containment publish disabled"
+                    );
+                    OpStateRecorder::disabled()
+                }
+            }
+        };
+
         let mut retry_delay = Duration::from_secs(1);
         let max_retry_delay = Duration::from_secs(30);
         let mut last_stale_check = std::time::Instant::now();
 
         loop {
-            // Check shutdown
             if *shutdown_rx.borrow() {
                 info!("Blue orchestrator: shutdown signalled");
                 break;
             }
 
-            // Poll for investigation requests
             let poll_result = tokio::select! {
                 result = task_queue.pop_investigation_request(5.0) => result,
                 _ = shutdown_rx.changed() => {
@@ -241,7 +274,6 @@ impl BlueOrchestrator {
                         "Received investigation request"
                     );
 
-                    // Register the investigation
                     if let Err(e) = task_queue
                         .register_investigation(&investigation_id, &alert, &model)
                         .await
@@ -249,7 +281,6 @@ impl BlueOrchestrator {
                         warn!(err = %e, "Failed to register investigation");
                     }
 
-                    // Run the investigation
                     let investigation = Investigation::new(
                         investigation_id.clone(),
                         alert,
@@ -262,34 +293,73 @@ impl BlueOrchestrator {
                         .get_connection_manager()
                         .await?;
 
-                    match tokio::time::timeout(
-                        Duration::from_secs(INVESTIGATION_TIMEOUT_SECS),
-                        investigation::run_investigation(
-                            &investigation,
-                            Arc::clone(&self.provider),
-                            Arc::clone(&self.dispatcher),
-                            &mut task_queue,
-                            &self.redis_url,
-                            &mut conn,
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(Ok(outcome)) => {
+                    let mut supersede_conn = conn.clone();
+                    let watched_id = investigation_id.clone();
+                    let run_result = tokio::select! {
+                        result = tokio::time::timeout(
+                            Duration::from_secs(INVESTIGATION_TIMEOUT_SECS),
+                            investigation::run_investigation(
+                                &investigation,
+                                Arc::clone(&self.provider),
+                                Arc::clone(&self.dispatcher),
+                                &mut task_queue,
+                                &self.redis_url,
+                                &mut conn,
+                                op_state_recorder.clone(),
+                            ),
+                        ) => Some(result),
+                        () = await_supersede(&mut supersede_conn, &watched_id) => None,
+                    };
+
+                    match run_result {
+                        Some(Ok(Ok(outcome))) => {
                             info!(
                                 investigation_id = %investigation_id,
                                 outcome = ?outcome,
                                 "Investigation finished"
                             );
                         }
-                        Ok(Err(e)) => {
+                        Some(Ok(Err(e))) => {
                             error!(
                                 investigation_id = %investigation_id,
                                 err = %e,
                                 "Investigation failed with error"
                             );
                         }
-                        Err(_elapsed) => {
+                        None => {
+                            warn!(
+                                investigation_id = %investigation_id,
+                                "Investigation superseded — yielding the runner slot"
+                            );
+
+                            investigation
+                                .state_writer
+                                .set_status(
+                                    &mut conn,
+                                    "superseded",
+                                    Some("Superseded by a newer investigation"),
+                                )
+                                .await
+                                .ok();
+
+                            investigation
+                                .state_writer
+                                .release_lock(&mut conn)
+                                .await
+                                .ok();
+
+                            ares_core::state::clear_blue_supersede(&mut conn, &investigation_id)
+                                .await
+                                .ok();
+
+                            investigation::generate_report(
+                                &mut conn,
+                                &investigation.investigation_id,
+                                investigation.report_dir.as_deref(),
+                            )
+                            .await;
+                        }
+                        Some(Err(_elapsed)) => {
                             error!(
                                 investigation_id = %investigation_id,
                                 timeout_secs = INVESTIGATION_TIMEOUT_SECS,
@@ -328,7 +398,6 @@ impl BlueOrchestrator {
                         }
                     }
 
-                    // Clean up active investigation registration
                     let _: Result<(), _> = conn
                         .srem::<_, _, ()>(
                             ares_core::state::BLUE_ACTIVE_INVESTIGATIONS,
@@ -338,7 +407,6 @@ impl BlueOrchestrator {
                 }
                 Ok(None) => {
                     retry_delay = Duration::from_secs(1);
-                    // Periodic stale investigation cleanup
                     if last_stale_check.elapsed() >= Duration::from_secs(STALE_CHECK_INTERVAL_SECS)
                     {
                         self.cleanup_stale_investigations().await;
@@ -385,6 +453,29 @@ impl BlueOrchestrator {
 
         info!("Blue team orchestrator stopped");
         Ok(())
+    }
+}
+
+/// Resolve once a supersede request lands for `investigation_id`.
+///
+/// Never resolves otherwise, so it can sit in a `select!` against the
+/// investigation future without ever winning on its own. Redis errors are
+/// treated as "no request pending" — a transient read failure must not abandon
+/// a healthy investigation.
+async fn await_supersede(conn: &mut redis::aio::ConnectionManager, investigation_id: &str) {
+    loop {
+        match ares_core::state::is_blue_supersede_requested(conn, investigation_id).await {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => {
+                warn!(
+                    investigation_id = %investigation_id,
+                    err = %e,
+                    "Failed to read supersede flag"
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(SUPERSEDE_POLL_SECS)).await;
     }
 }
 

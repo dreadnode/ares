@@ -36,7 +36,6 @@ impl HistoricalQueryService {
             .await?
         };
 
-        // Aggregate by technique
         let mut technique_ops: HashMap<String, Vec<String>> = HashMap::new();
         for row in rows {
             if let Some(techniques) = row.mitre_techniques {
@@ -49,7 +48,6 @@ impl HistoricalQueryService {
             }
         }
 
-        // Deduplicate operations per technique
         let mut result: Vec<MitreCoverage> = technique_ops
             .into_iter()
             .map(|(technique_id, mut ops)| {
@@ -64,7 +62,6 @@ impl HistoricalQueryService {
             })
             .collect();
 
-        // Sort by occurrence count descending
         result.sort_by_key(|a| std::cmp::Reverse(a.occurrence_count));
 
         Ok(result)

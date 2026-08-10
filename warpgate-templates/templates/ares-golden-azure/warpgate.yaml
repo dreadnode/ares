@@ -41,7 +41,7 @@ provisioners:
       - pipx install --force uv
       - pipx install --force ansible-core
       - pipx ensurepath
-      - GITHUB_TOKEN=${GITHUB_TOKEN} git -c 'credential.helper=!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f' clone --depth 1 --branch feat/more-attack-cov https://github.com/dreadnode/ares.git /tmp/nimbus_range
+      - GITHUB_TOKEN=${GITHUB_TOKEN} git -c 'credential.helper=!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f' clone --depth 1 --branch feat/more-attack-cov https://github.com/l50/ares.git /tmp/nimbus_range
       - mkdir -p /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
       - cp -r /tmp/nimbus_range/ansible/. /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/
       - rm -rf /tmp/nimbus_range

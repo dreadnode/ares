@@ -193,6 +193,23 @@ tasks:
         {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}}
         {{if eq .LATEST "true"}}--latest{{end}}
 
+  multi:inspect-vulns:
+    desc: "Bucket discovered vs exploited vulns by type — vuln→exploit conversion diagnostic (usage: task red:multi:inspect-vulns [OPERATION_ID=op-xxx] [LATEST=true] [JSON=true])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      JSON: '{{.JSON | default "false"}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OPERATION_ID or LATEST=true is required"
+    cmds:
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} ops inspect-vulns
+        {{if ne .OPERATION_ID ""}}{{.OPERATION_ID}}{{end}}
+        {{if eq .LATEST "true"}}--latest{{end}}
+        {{if eq .JSON "true"}}--json{{end}}
+
   multi:tasks:list:
     desc: "List tasks for an operation (usage: task red:multi:tasks:list [OPERATION_ID=op-xxx] [LATEST=true] [ROLE=lateral] [STATUS=pending|in_progress|running|completed|failed|all])"
     silent: true
@@ -578,28 +595,60 @@ tasks:
         {{if ne .FLAT_NAME ""}}--flat-name "{{.FLAT_NAME}}"{{end}}
         {{if eq .SID_FILTERING "true"}}--sid-filtering{{end}}
 
+  multi:force-inter-realm-forge:
+    desc: "Operator escape hatch: force an inter-realm ticket forge, bypassing the SID-filter check and trust_follow dedup (usage: task red:multi:force-inter-realm-forge OPERATION_ID=op-xxx SOURCE=north.sevenkingdoms.local TARGET=essos.local TRUST_KEY=<nthash> [AES_KEY=<aes>] [SOURCE_SID=<sid>] [TARGET_SID=<sid>] [TARGET_DC_IP=10.4.6.159] [TARGET_DC_FQDN=meereen.essos.local])"
+    silent: true
+    vars:
+      OPERATION_ID: '{{.OPERATION_ID | default ""}}'
+      SOURCE: '{{.SOURCE | default ""}}'
+      TARGET: '{{.TARGET | default ""}}'
+      TRUST_KEY: '{{.TRUST_KEY | default ""}}'
+      AES_KEY: '{{.AES_KEY | default ""}}'
+      SOURCE_SID: '{{.SOURCE_SID | default ""}}'
+      TARGET_SID: '{{.TARGET_SID | default ""}}'
+      TARGET_DC_IP: '{{.TARGET_DC_IP | default ""}}'
+      TARGET_DC_FQDN: '{{.TARGET_DC_FQDN | default ""}}'
+    preconditions:
+      - sh: test -n "{{.OPERATION_ID}}"
+        msg: "OPERATION_ID variable is required"
+      - sh: test -n "{{.SOURCE}}"
+        msg: "SOURCE variable is required (source forest, e.g. north.sevenkingdoms.local)"
+      - sh: test -n "{{.TARGET}}"
+        msg: "TARGET variable is required (target forest, e.g. essos.local)"
+      - sh: test -n "{{.TRUST_KEY}}"
+        msg: "TRUST_KEY variable is required (NT hash of source\\TARGET$ trust account)"
+    cmds:
+      - >-
+        {{.ARES_CLI}} --k8s {{.K8S_NAMESPACE}} ops force-inter-realm-forge
+        "{{.OPERATION_ID}}"
+        --source "{{.SOURCE}}"
+        --target "{{.TARGET}}"
+        --trust-key "{{.TRUST_KEY}}"
+        {{if ne .AES_KEY ""}}--aes-key "{{.AES_KEY}}"{{end}}
+        {{if ne .SOURCE_SID ""}}--source-sid "{{.SOURCE_SID}}"{{end}}
+        {{if ne .TARGET_SID ""}}--target-sid "{{.TARGET_SID}}"{{end}}
+        {{if ne .TARGET_DC_IP ""}}--target-dc-ip "{{.TARGET_DC_IP}}"{{end}}
+        {{if ne .TARGET_DC_FQDN ""}}--target-dc-fqdn "{{.TARGET_DC_FQDN}}"{{end}}
+
   multi:inject-essos:
     desc: "Inject essos.local forest state into a running operation (usage: task red:multi:inject-essos OPERATION_ID=op-xxx)"
     silent: true
     vars:
       OPERATION_ID: '{{.OPERATION_ID | default ""}}'
-      # Resolve essos host IPs from AWS EC2 at runtime
+      # Resolve essos host IPs from AWS EC2 at runtime (deterministic — newest
+      # instance wins if the tag glob matches more than one).
       MEEREEN_IP:
         sh: |
-          aws ec2 describe-instances \
-            --profile "{{.TARGET_PROFILE}}" \
-            --region "{{.TARGET_REGION}}" \
-            --filters "Name=instance-state-name,Values=running" "Name=tag:Name,Values=*meereen*" \
-            --query "Reservations[*].Instances[*].PrivateIpAddress" \
-            --output text 2>/dev/null | head -1
+          export AWS_PROFILE="{{.TARGET_PROFILE}}"
+          export AWS_REGION="{{.TARGET_REGION}}"
+          . .taskfiles/ec2/scripts/run-ssm.sh
+          resolve_instance_ip meereen || true
       BRAAVOS_IP:
         sh: |
-          aws ec2 describe-instances \
-            --profile "{{.TARGET_PROFILE}}" \
-            --region "{{.TARGET_REGION}}" \
-            --filters "Name=instance-state-name,Values=running" "Name=tag:Name,Values=*braavos*" \
-            --query "Reservations[*].Instances[*].PrivateIpAddress" \
-            --output text 2>/dev/null | head -1
+          export AWS_PROFILE="{{.TARGET_PROFILE}}"
+          export AWS_REGION="{{.TARGET_REGION}}"
+          . .taskfiles/ec2/scripts/run-ssm.sh
+          resolve_instance_ip braavos || true
     preconditions:
       - sh: test -n "{{.OPERATION_ID}}"
         msg: "OPERATION_ID variable is required"
@@ -729,10 +778,15 @@ tasks:
       RESUME: '{{.RESUME | default "false"}}'
       TARGET_ENV: '{{.TARGET_ENV | default "staging"}}'
       EC2_NAME: '{{.EC2_NAME | default "kali-ares"}}'
-      EC2_PROFILE: '{{.EC2_PROFILE | default "lab"}}'
-      EC2_REGION: '{{.EC2_REGION | default "us-west-1"}}'
-      BLUE_ENABLED: '{{.BLUE_ENABLED | default "0"}}'
+      AWS_PROFILE: '{{.AWS_PROFILE | default (env "AWS_PROFILE") | default "lab"}}'
+      AWS_REGION: '{{.AWS_REGION | default (env "AWS_REGION") | default (env "AWS_DEFAULT_REGION") | default "us-west-1"}}'
+      BLUE_ENABLED: '{{.BLUE_ENABLED | default "1"}}'
       BLUE_LLM_MODEL: '{{.BLUE_LLM_MODEL | default ""}}'
+      # Box-context obs endpoints — set in .env to URLs the EC2 box itself can
+      # reach. Distinct from GRAFANA_URL/LOKI_URL, which remain the laptop's
+      # obs:forward localhost. Unset keeps the Secrets Manager values.
+      EC2_GRAFANA_URL: '{{.EC2_GRAFANA_URL}}'
+      EC2_LOKI_URL: '{{.EC2_LOKI_URL}}'
       EC2_DEPLOYMENT: '{{.EC2_DEPLOYMENT | default "alpha-operator-range"}}'
       STRATEGY: '{{.STRATEGY | default "comprehensive"}}'
       RESOLVED_TARGETS:
@@ -797,50 +851,19 @@ tasks:
       - cmd: |
           set -euo pipefail
 
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --filters "Name=instance-state-name,Values=running" \
-                      "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
-            --query "Reservations[*].Instances[*].InstanceId" \
-            --output text | head -1)
-
-          if [ -z "$INSTANCE_ID" ]; then
-            echo "ERROR: No running instance found matching: {{.EC2_NAME}}"
-            exit 1
-          fi
+          export AWS_PROFILE="{{.AWS_PROFILE}}"
+          export AWS_REGION="{{.AWS_REGION}}"
+          . .taskfiles/ec2/scripts/run-ssm.sh
+          INSTANCE_ID=$(resolve_instance_id "{{.EC2_NAME}}") || exit 1
           echo "EC2 instance: $INSTANCE_ID"
 
           # Set active operation pointer in Redis via SSM
           echo "Setting active operation pointer in Redis..."
-          PARAMS_FILE=$(mktemp)
-          jq -n --arg cmd "redis-cli set ares:operation:active {{.OPERATION_ID_COMPUTED}}" '{"commands": [$cmd]}' > "$PARAMS_FILE"
-          CMD_ID=$(aws ssm send-command \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters "file://$PARAMS_FILE" \
-            --query "Command.CommandId" --output text)
-          rm -f "$PARAMS_FILE"
-
-          for i in $(seq 1 15); do
-            STATUS=$(aws ssm get-command-invocation \
-              --profile "{{.EC2_PROFILE}}" \
-              --region "{{.EC2_REGION}}" \
-              --command-id "$CMD_ID" \
-              --instance-id "$INSTANCE_ID" \
-              --query "Status" --output text 2>/dev/null) || true
-            case "$STATUS" in
-              Success|Failed|Cancelled|TimedOut) break ;;
-            esac
-            sleep 1
-          done
-
-          if [ "$STATUS" != "Success" ]; then
+          run_ssm_cmd "$INSTANCE_ID" \
+            "redis-cli set ares:operation:active {{.OPERATION_ID_COMPUTED}}" 30 >/dev/null || {
             echo "ERROR: Failed to set active operation in Redis"
             exit 1
-          fi
+          }
           echo "Set ares:operation:active -> {{.OPERATION_ID_COMPUTED}}"
         silent: false
 
@@ -851,13 +874,10 @@ tasks:
           . ./.env
           set +a
 
-          INSTANCE_ID=$(aws ec2 describe-instances \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --filters "Name=instance-state-name,Values=running" \
-                      "Name=tag:Name,Values=*{{.EC2_NAME}}*" \
-            --query "Reservations[*].Instances[*].InstanceId" \
-            --output text | head -1)
+          export AWS_PROFILE="{{.AWS_PROFILE}}"
+          export AWS_REGION="{{.AWS_REGION}}"
+          . .taskfiles/ec2/scripts/run-ssm.sh
+          INSTANCE_ID=$(resolve_instance_id "{{.EC2_NAME}}") || exit 1
 
           echo "Submitting operation to EC2 orchestrator..."
 
@@ -868,7 +888,7 @@ tasks:
 
           # Build orchestrator launch script from template
           ORCH_SCRIPT=$(mktemp)
-          ORCH_PARAMS=$(mktemp)
+          trap 'rm -f "$ORCH_SCRIPT"' EXIT
           sed -e "s|__ARES_PAYLOAD__|${ORCH_PAYLOAD}|" \
               -e "s|__OPENAI_API_KEY__|${OPENAI_API_KEY:-}|" \
               -e "s|__ANTHROPIC_API_KEY__|${ANTHROPIC_API_KEY:-}|" \
@@ -878,64 +898,19 @@ tasks:
               -e "s|__DREADNODE_WORKSPACE__|{{.DREADNODE_WORKSPACE}}|" \
               -e "s|__DREADNODE_PROJECT__|{{.DREADNODE_PROJECT}}|" \
               -e "s|__GRAFANA_TOKEN__|${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}|" \
-              -e "s|__GRAFANA_URL__|{{.GRAFANA_URL}}|" \
-              -e "s|__LOKI_URL__|{{.LOKI_URL}}|" \
+              -e "s|__GRAFANA_URL__|{{.EC2_GRAFANA_URL}}|" \
+              -e "s|__LOKI_URL__|{{.EC2_LOKI_URL}}|" \
               -e "s|__ARES_LLM_MODEL__|{{.MODEL}}|" \
               -e "s|__ARES_BLUE_ENABLED__|{{.BLUE_ENABLED}}|" \
               -e "s|__ARES_BLUE_LLM_MODEL__|{{.BLUE_LLM_MODEL}}|" \
               -e "s|__ARES_DEPLOYMENT__|{{.EC2_DEPLOYMENT}}|" \
               -e "s|__OTEL_TRACES_ENDPOINT__|{{.OTEL_TRACES_ENDPOINT}}|" \
               .taskfiles/ec2/scripts/launch-orchestrator.sh.tmpl > "$ORCH_SCRIPT"
-          jq -Rs '{"commands": [.]}' < "$ORCH_SCRIPT" > "$ORCH_PARAMS"
 
-          CMD_ID=$(aws ssm send-command \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters "file://$ORCH_PARAMS" \
-            --query "Command.CommandId" --output text)
-          rm -f "$ORCH_SCRIPT" "$ORCH_PARAMS"
-
-          for i in $(seq 1 15); do
-            STATUS=$(aws ssm get-command-invocation \
-              --profile "{{.EC2_PROFILE}}" \
-              --region "{{.EC2_REGION}}" \
-              --command-id "$CMD_ID" \
-              --instance-id "$INSTANCE_ID" \
-              --query "Status" --output text 2>/dev/null) || true
-            case "$STATUS" in
-              Success|Failed|Cancelled|TimedOut) break ;;
-            esac
-            sleep 1
-          done
-
-          OUTPUT=$(aws ssm get-command-invocation \
-            --profile "{{.EC2_PROFILE}}" \
-            --region "{{.EC2_REGION}}" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query "StandardOutputContent" --output text)
-          echo "$OUTPUT" | tee -a "{{.LOGFILE}}"
-
-          if [ "$STATUS" != "Success" ]; then
-            DETAILS=$(aws ssm get-command-invocation \
-              --profile "{{.EC2_PROFILE}}" \
-              --region "{{.EC2_REGION}}" \
-              --command-id "$CMD_ID" \
-              --instance-id "$INSTANCE_ID" \
-              --query "StatusDetails" --output text 2>/dev/null)
-            echo "ERROR: Failed to start orchestrator (status: $STATUS, details: $DETAILS)"
-            if [ "$DETAILS" = "Undeliverable" ]; then
-              echo "ERROR: SSM could not deliver the command to $INSTANCE_ID (PingStatus likely ConnectionLost)."
-              echo "ERROR: Recovery: reboot the instance ('aws ec2 reboot-instances --instance-ids $INSTANCE_ID')."
-            fi
-            aws ssm get-command-invocation \
-              --profile "{{.EC2_PROFILE}}" \
-              --region "{{.EC2_REGION}}" \
-              --command-id "$CMD_ID" \
-              --instance-id "$INSTANCE_ID" \
-              --query "StandardErrorContent" --output text
+          if OUTPUT=$(run_ssm_cmd "$INSTANCE_ID" "$(cat "$ORCH_SCRIPT")" 300); then
+            echo "$OUTPUT" | tee -a "{{.LOGFILE}}"
+          else
+            echo "ERROR: Failed to start orchestrator on $INSTANCE_ID" | tee -a "{{.LOGFILE}}" >&2
             exit 1
           fi
 
@@ -948,321 +923,3 @@ tasks:
           echo "  ARES_REDIS_URL=redis://localhost:16379 ares ops loot --latest"
         silent: false
         ignore_error: true
-
-  multi:redis:clear:
-    desc: "Clear multi-agent Redis operation cache (DANGEROUS: drops ops/locks/status)"
-    silent: true
-    cmds:
-      - |
-        set -euo pipefail
-        echo "Clearing Redis operation cache in namespace {{.K8S_NAMESPACE}}"
-
-        REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
-        if [ -z "$REDIS_POD" ]; then
-          echo "No Redis pod found in namespace {{.K8S_NAMESPACE}}"
-          exit 1
-        fi
-
-        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
-        REDIS_ENV=()
-        if [ -n "$REDIS_PASS" ]; then
-          REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
-        fi
-
-        # Helper function to run redis-cli commands
-        redis_cmd() {
-          kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_POD" -- "${REDIS_ENV[@]}" redis-cli "$@"
-        }
-
-        # Verify we can write to Redis before proceeding
-        TEST_KEY="ares:clear:test:$$"
-        if ! redis_cmd set "$TEST_KEY" "test" EX 5 >/dev/null 2>&1; then
-          echo "ERROR: Cannot write to Redis. Are we connected to a read-only replica?"
-          echo "Master host: ${REDIS_HOST:-direct}"
-          exit 1
-        fi
-        redis_cmd del "$TEST_KEY" >/dev/null 2>&1 || true
-
-        # Lua script: SCAN + UNLINK in a single Redis call (avoids per-key kubectl exec)
-        LUA_DEL='local cursor="0" local count=0 repeat local r=redis.call("SCAN",cursor,"MATCH",ARGV[1],"COUNT",200) cursor=r[1] if #r[2]>0 then redis.call("UNLINK",unpack(r[2])) count=count+#r[2] end until cursor=="0" return count'
-        for pattern in "ares:operation:*:state" "ares:operation:*:checkpoint_time" "ares:operations:*:status" "ares:lock:*" "ares:tasks:*" "ares:results:*"; do
-          count=$(redis_cmd eval "$LUA_DEL" 0 "$pattern" 2>/dev/null || echo "0")
-          echo "Cleared $pattern ($count keys)"
-        done
-
-        # Clear additional keys
-        for key in ares:operations ares:operation:active; do
-          redis_cmd del "$key" >/dev/null 2>&1 || true
-          echo "Cleared $key"
-        done
-
-        # Clear op-specific keys (meta, task queues, etc.)
-        for pattern in "ares:op:*" "ares:tool_exec:*"; do
-          count=$(redis_cmd eval "$LUA_DEL" 0 "$pattern" 2>/dev/null || echo "0")
-          if [ "$count" != "0" ]; then
-            echo "Cleared $pattern ($count keys)"
-          fi
-        done
-
-        echo "Redis cleared"
-
-  multi:redis:list:
-    desc: "List multi-agent Redis operations, statuses, and locks"
-    silent: true
-    cmds:
-      - |
-        set -euo pipefail
-        REDIS_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} -l app=redis -o name 2>/dev/null | head -1)
-        if [ -z "$REDIS_POD" ]; then
-          echo "No Redis pod found in namespace {{.K8S_NAMESPACE}}"
-          exit 1
-        fi
-
-        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
-        REDIS_ENV=()
-        if [ -n "$REDIS_PASS" ]; then
-          REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
-        fi
-
-        echo "ares:operations queue (operation_ids):"
-        queue=$(kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli lrange ares:operations 0 -1)
-        if [ -z "$queue" ]; then
-          echo "  (empty)"
-        else
-          echo "$queue" | sed -n 's/.*"operation_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/  \1/p'
-        fi
-
-        echo ""
-        echo "operation status keys:"
-        keys=$(kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli --scan --pattern "ares:operations:*:status")
-        if [ -z "$keys" ]; then
-          echo "  (none)"
-        else
-          for key in $keys; do
-            val=$(kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli get "$key")
-            echo "  $key -> $val"
-          done
-        fi
-
-        echo ""
-        echo "operation locks:"
-        kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli --scan --pattern "ares:lock:*" || true
-
-  multi:sync:align:
-    desc: "Build, rollout, deploy binaries+config, clear Redis (usage: task red:multi:sync:align [TEAM=red|blue|all])"
-    vars:
-      TEAM: '{{.TEAM | default "red"}}'
-    cmds:
-      - cmd: |
-          # Kill any running red:multi processes to prevent them from
-          # re-submitting operations after Redis is cleared
-          LOCAL_PIDS=$(pgrep -f "red:multi" 2>/dev/null || true)
-          if [ -n "$LOCAL_PIDS" ]; then
-            echo "=== STOPPING LOCAL CLI SESSIONS ==="
-            echo "Found running red:multi processes: $LOCAL_PIDS"
-            for pid in $LOCAL_PIDS; do
-              pkill -TERM -P "$pid" 2>/dev/null || true
-              kill -TERM "$pid" 2>/dev/null || true
-            done
-            sleep 1
-            for pid in $LOCAL_PIDS; do
-              if kill -0 "$pid" 2>/dev/null; then
-                kill -9 "$pid" 2>/dev/null || true
-              fi
-            done
-            echo "Local CLI sessions stopped"
-          fi
-      # 1. Build binaries locally
-      - cmd: echo "=== BUILDING RUST BINARIES ==="
-      - task: :remote:rust:build
-      # 2. Clear Redis (no longer rescales orchestrator)
-      - cmd: echo "=== CLEARING REDIS CACHE ==="
-      - task: multi:redis:clear
-      # 3. Patch orchestrator wrapper to use ares instead of redis-cli
-      - cmd: echo "=== PATCHING ORCHESTRATOR WRAPPER ==="
-      - task: :remote:orchestrator:patch-wrapper
-      # 4. Rollout pods (fresh containers)
-      - cmd: echo "=== ROLLING OUT (team={{.TEAM}}) ==="
-      - task: :remote:rollout
-        vars: { NAMESPACE: "{{.K8S_NAMESPACE}}", TEAM: "{{.TEAM}}" }
-      # 5. Deploy binaries to the NEW pods (after rollout)
-      - cmd: echo "=== DEPLOYING RUST BINARIES (team={{.TEAM}}) ==="
-      - task: :remote:rust:deploy
-        vars: { TEAM: "{{.TEAM}}" }
-      # 6. Sync config to the NEW pods (after rollout)
-      - cmd: echo "=== SYNCING CONFIG ==="
-      - task: multi:sync:config
-
-  multi:sync:config:
-    desc: "Sync config/ares.yaml to all pods"
-    silent: true
-    cmds:
-      - |
-        echo -e "{{.INFO}} Syncing config to pods in {{.K8S_NAMESPACE}}"
-
-        # Get orchestrator pod
-        ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-          -l app.kubernetes.io/name=ares-orchestrator \
-          --field-selector=status.phase=Running \
-          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-
-        # Get worker pods
-        PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
-          -l ares.dreadnode.io/component=red-team \
-          --field-selector=status.phase=Running \
-          -o json | jq -r --arg orch "$ORCH_POD" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
-
-        CONFIG_FILE="config/ares.yaml"
-        if [ ! -f "$CONFIG_FILE" ]; then
-          echo -e "{{.WARN}} Config file not found: $CONFIG_FILE"
-          exit 0
-        fi
-
-        # Sync to workers
-        for pod in $PODS; do
-          kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- mkdir -p /ares/config 2>/dev/null || true
-          if kubectl cp "$CONFIG_FILE" "{{.K8S_NAMESPACE}}/$pod:/ares/config/ares.yaml" 2>/dev/null; then
-            echo -e "{{.SUCCESS}} Config synced to $pod"
-          else
-            echo -e "{{.WARN}} Failed to sync config to $pod"
-          fi
-        done
-
-        # Sync to orchestrator
-        if [ -n "$ORCH_POD" ]; then
-          kubectl exec -n {{.K8S_NAMESPACE}} "$ORCH_POD" -c {{.ORCH_CONTAINER}} -- mkdir -p /ares/config 2>/dev/null || true
-          if kubectl cp "$CONFIG_FILE" "{{.K8S_NAMESPACE}}/$ORCH_POD:/ares/config/ares.yaml" -c {{.ORCH_CONTAINER}} 2>/dev/null; then
-            echo -e "{{.SUCCESS}} Config synced to orchestrator"
-          else
-            echo -e "{{.WARN}} Failed to sync config to orchestrator"
-          fi
-        fi
-
-        echo -e "{{.SUCCESS}} Config sync complete"
-
-  # ===========================================================================
-  # K8s Infrastructure Tasks
-  # ===========================================================================
-
-  # ===========================================================================
-  # Replay Recording Tasks
-  # ===========================================================================
-
-  multi:replay:copy:
-    desc: "Copy replay recordings from agent pods (usage: task red:multi:replay:copy [ROLE=recon] [OUTPUT_DIR=./recordings])"
-    silent: true
-    vars:
-      ROLE: '{{.ROLE | default ""}}'
-      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./recordings"}}'
-      AGENTS: "recon credential-access lateral-movement coercion acl cracker privesc"
-    cmds:
-      - |
-        mkdir -p "{{.OUTPUT_DIR}}"
-
-        if [ -n "{{.ROLE}}" ]; then
-          # Copy from specific agent
-          AGENT_NAME="{{.ROLE}}"
-          # Normalize role name to pod name format (e.g., credential_access -> credential-access)
-          POD_ROLE=$(echo "$AGENT_NAME" | tr '_' '-')
-          POD="ares-${POD_ROLE}-agent-0"
-
-          echo "Copying recording from $POD..."
-          if kubectl cp "{{.K8S_NAMESPACE}}/${POD}:/ares/replay/recording.jsonl" "{{.OUTPUT_DIR}}/${POD_ROLE}-recording.jsonl" 2>/dev/null; then
-            FILE_SIZE=$(ls -lh "{{.OUTPUT_DIR}}/${POD_ROLE}-recording.jsonl" 2>/dev/null | awk '{print $5}')
-            echo "  ✓ Copied ${POD_ROLE}-recording.jsonl ($FILE_SIZE)"
-          else
-            echo "  ✗ No recording found for ${POD_ROLE}"
-          fi
-        else
-          # Copy from all agents
-          echo "Copying recordings from all agents to {{.OUTPUT_DIR}}/"
-          echo ""
-
-          for agent in {{.AGENTS}}; do
-            POD="ares-${agent}-agent-0"
-            if kubectl cp "{{.K8S_NAMESPACE}}/${POD}:/ares/replay/recording.jsonl" "{{.OUTPUT_DIR}}/${agent}-recording.jsonl" 2>/dev/null; then
-              FILE_SIZE=$(ls -lh "{{.OUTPUT_DIR}}/${agent}-recording.jsonl" 2>/dev/null | awk '{print $5}')
-              echo "  ✓ Copied ${agent}-recording.jsonl ($FILE_SIZE)"
-            else
-              echo "  ✗ No recording for ${agent}"
-            fi
-          done
-        fi
-
-        echo ""
-        echo "Recordings saved to {{.OUTPUT_DIR}}/"
-
-  multi:replay:cat:
-    desc: "Stream replay recording contents from an agent pod (usage: task red:multi:replay:cat ROLE=recon)"
-    silent: true
-    vars:
-      ROLE: '{{.ROLE | default "recon"}}'
-    cmds:
-      - |
-        POD_ROLE=$(echo "{{.ROLE}}" | tr '_' '-')
-        POD="ares-${POD_ROLE}-agent-0"
-
-        echo "# Streaming recording from $POD..."
-        echo "# ========================================"
-        kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- cat /ares/replay/recording.jsonl 2>/dev/null || \
-          echo "No recording found for ${POD_ROLE}"
-
-  multi:replay:list:
-    desc: "List replay recordings available on agent pods"
-    silent: true
-    vars:
-      AGENTS: "recon credential-access lateral-movement coercion acl cracker privesc"
-    cmds:
-      - |
-        echo "Replay recordings in {{.K8S_NAMESPACE}}:"
-        echo "========================================"
-
-        for agent in {{.AGENTS}}; do
-          POD="ares-${agent}-agent-0"
-          INFO=$(kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- ls -lh /ares/replay/recording.jsonl 2>/dev/null || true)
-          if [ -n "$INFO" ]; then
-            SIZE=$(echo "$INFO" | awk '{print $5}')
-            DATE=$(echo "$INFO" | awk '{print $6, $7, $8}')
-            echo "  ✓ ${agent}: $SIZE ($DATE)"
-          else
-            echo "  - ${agent}: (no recording)"
-          fi
-        done
-
-  multi:replay:clear:
-    desc: "Clear replay recordings from agent pods (usage: task red:multi:replay:clear [ROLE=recon] [CONFIRM=true])"
-    silent: true
-    vars:
-      ROLE: '{{.ROLE | default ""}}'
-      CONFIRM: '{{.CONFIRM | default "false"}}'
-      AGENTS: "recon credential-access lateral-movement coercion acl cracker privesc"
-    preconditions:
-      - sh: test "{{.CONFIRM}}" = "true"
-        msg: "This will delete replay recordings. Re-run with CONFIRM=true to proceed."
-    cmds:
-      - |
-        if [ -n "{{.ROLE}}" ]; then
-          POD_ROLE=$(echo "{{.ROLE}}" | tr '_' '-')
-          POD="ares-${POD_ROLE}-agent-0"
-
-          echo "Clearing recording from $POD..."
-          if kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- rm -f /ares/replay/recording.jsonl 2>/dev/null; then
-            echo "  ✓ Cleared ${POD_ROLE}"
-          else
-            echo "  ✗ Failed to clear ${POD_ROLE}"
-          fi
-        else
-          echo "Clearing recordings from all agents..."
-
-          for agent in {{.AGENTS}}; do
-            POD="ares-${agent}-agent-0"
-            if kubectl exec -n {{.K8S_NAMESPACE}} "$POD" -- rm -f /ares/replay/recording.jsonl 2>/dev/null; then
-              echo "  ✓ Cleared ${agent}"
-            else
-              echo "  - ${agent}: (no recording or failed)"
-            fi
-          done
-        fi
-
-        echo ""
-        echo "Done."

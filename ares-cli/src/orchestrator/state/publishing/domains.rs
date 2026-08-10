@@ -115,6 +115,40 @@ impl SharedState {
         Ok(DomainPublishOutcome::Held)
     }
 
+    /// Record a hostname-derived FQDN as a probe-only candidate.
+    ///
+    /// Unlike [`publish_candidate_domain`], this never applies the
+    /// `parent_known` corroboration shortcut, so an ordinary host FQDN
+    /// (`dc01.contoso.local`) won't get falsely promoted just because its
+    /// parent domain is in `state.domains`. Used by [`publish_host`] when a
+    /// DC's reported hostname might *itself* be the domain (zone-apex
+    /// alias) — e.g. SMB hostname query returns `child.contoso.local`
+    /// for the IP of the `dc02` child DC. The DNS SRV probe is the only
+    /// path to promotion: real child domains pass, host FQDNs get rejected.
+    pub async fn record_hostname_candidate(
+        &self,
+        queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
+        fqdn: impl Into<String>,
+        source_host_ip: Option<String>,
+    ) -> Result<DomainPublishOutcome> {
+        let fqdn = fqdn.into().trim().trim_end_matches('.').to_lowercase();
+        if !looks_like_real_domain(&fqdn) {
+            return Ok(DomainPublishOutcome::Rejected("not a plausible AD domain"));
+        }
+        {
+            let state = self.inner.read().await;
+            if state.domains.iter().any(|d| d.eq_ignore_ascii_case(&fqdn)) {
+                return Ok(DomainPublishOutcome::Promoted);
+            }
+        }
+        let mut candidate = CandidateDomain::new(&fqdn, DomainEvidence::HostnameInference);
+        if let Some(ip) = source_host_ip {
+            candidate = candidate.with_source(ip);
+        }
+        self.record_candidate(queue, candidate).await?;
+        Ok(DomainPublishOutcome::Held)
+    }
+
     /// Insert the domain into authoritative state. Idempotent.
     pub(crate) async fn promote_domain(
         &self,

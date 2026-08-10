@@ -30,6 +30,8 @@ const DEFAULT_PATHS: &[&str] = &[
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AresConfig {
     pub operation: OperationConfig,
+    #[serde(default)]
+    pub orchestrator: OrchestratorConfig,
     pub agents: HashMap<String, AgentConfig>,
     pub timeouts: TimeoutConfig,
     pub recovery: RecoveryConfig,
@@ -43,6 +45,8 @@ pub struct AresConfig {
     pub grafana: Option<GrafanaConfig>,
     #[serde(default)]
     pub observability: Option<ObservabilityConfig>,
+    #[serde(default)]
+    pub benchmark: Option<BenchmarkConfig>,
 }
 
 impl AresConfig {
@@ -72,7 +76,8 @@ impl AresConfig {
     /// Resolution order:
     /// 1. `ARES_CONFIG` env var
     /// 2. `./config/ares.yaml`
-    /// 3. `/etc/ares/config.yaml`
+    /// 3. `/ares/config/ares.yaml`
+    /// 4. `/etc/ares/config.yaml`
     pub fn from_env() -> Result<Self> {
         let path = Self::resolve_path()?;
         Self::load(&path)
@@ -82,7 +87,6 @@ impl AresConfig {
     ///
     /// Same resolution order as [`from_env`].
     pub fn resolve_path() -> Result<PathBuf> {
-        // 1. Explicit env var
         if let Ok(env_path) = std::env::var("ARES_CONFIG") {
             let p = PathBuf::from(&env_path);
             if p.exists() {
@@ -91,7 +95,6 @@ impl AresConfig {
             bail!("ARES_CONFIG points to {env_path} but the file does not exist");
         }
 
-        // 2. Default search paths
         for candidate in DEFAULT_PATHS {
             let p = PathBuf::from(candidate);
             if p.exists() {
@@ -141,8 +144,8 @@ impl AresConfig {
                 AgentConfig {
                     model: model.to_string(),
                     max_steps: default_max_steps(),
-                    pod_selector: String::new(),
-                    capabilities: Vec::new(),
+                    max_tokens: None,
+                    reasoning_effort: None,
                     tools: Vec::new(),
                 },
             );
@@ -312,32 +315,55 @@ security: {}
 
     #[test]
     fn load_production_config() {
-        // Test against the actual production config if it exists at the expected relative path
         let prod_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .parent()
-            .unwrap()
             .join("config/ares.yaml");
+        assert!(
+            prod_path.exists(),
+            "shipped config not found at {} — this test silently passed for as long as \
+             the path was wrong, so keep the assertion",
+            prod_path.display()
+        );
 
-        if prod_path.exists() {
-            let cfg = AresConfig::load(&prod_path).unwrap();
-            assert_eq!(cfg.operation.name, "ares-multi-agent");
-            assert_eq!(cfg.operation.namespace, "attack-simulation");
-            // All 8 agent roles should be present
-            assert!(cfg.agents.contains_key("orchestrator"));
-            assert!(cfg.agents.contains_key("recon"));
-            assert!(cfg.agents.contains_key("credential_access"));
-            assert!(cfg.agents.contains_key("cracker"));
-            assert!(cfg.agents.contains_key("acl"));
-            assert!(cfg.agents.contains_key("privesc"));
-            assert!(cfg.agents.contains_key("lateral"));
-            assert!(cfg.agents.contains_key("coercion"));
-            assert_eq!(cfg.agents.len(), 8);
-            // Vulnerability priorities
-            assert_eq!(cfg.vulnerability_priority("adcs_esc1"), 1);
-            assert_eq!(cfg.vulnerability_priority("password_spray"), 50);
+        let cfg = AresConfig::load(&prod_path).unwrap();
+        assert_eq!(cfg.operation.name, "ares-multi-agent");
+        assert_eq!(cfg.operation.namespace, "attack-simulation");
+
+        let mut roles: Vec<&str> = cfg.agents.keys().map(String::as_str).collect();
+        roles.sort_unstable();
+        assert_eq!(
+            roles,
+            [
+                "acl",
+                "coercion",
+                "cracker",
+                "credential_access",
+                "lateral",
+                "orchestrator",
+                "privesc",
+                "recon",
+            ]
+        );
+
+        for (role, expected) in [
+            ("orchestrator", 200),
+            ("recon", 100),
+            ("credential_access", 100),
+            ("cracker", 150),
+            ("acl", 150),
+            ("privesc", 100),
+            ("lateral", 300),
+            ("coercion", 30),
+        ] {
+            assert_eq!(
+                cfg.agents[role].max_steps, expected,
+                "{role} max_steps drifted"
+            );
         }
+
+        assert_eq!(cfg.vulnerability_priority("adcs_esc1"), 1);
+        assert_eq!(cfg.vulnerability_priority("password_spray"), 50);
     }
 
     #[test]
@@ -397,12 +423,26 @@ security: {}
         assert!(cfg.grafana.is_none());
 
         let with_grafana = format!(
-            "{}\ngrafana:\n  enabled: true\n  base_url: http://grafana\n",
+            "{}\ngrafana:\n  enabled: true\n  dashboard_uid: ares-redteam\n",
             MINIMAL_YAML
         );
         let f2 = write_temp_yaml(&with_grafana);
         let cfg2 = AresConfig::load(f2.path()).unwrap();
-        assert!(cfg2.grafana.is_some());
-        assert!(cfg2.grafana.unwrap().enabled);
+        let grafana = cfg2.grafana.expect("grafana section should parse");
+        assert!(grafana.enabled);
+        assert_eq!(grafana.dashboard_uid, "ares-redteam");
+    }
+
+    #[test]
+    fn grafana_ignores_legacy_credential_keys() {
+        let legacy = format!(
+            "{}\ngrafana:\n  enabled: true\n  base_url: \"${{GRAFANA_URL}}\"\n  api_key: \"${{GRAFANA_SERVICE_ACCOUNT_TOKEN}}\"\n  dashboard_uid: ares-redteam\n",
+            MINIMAL_YAML
+        );
+        let f = write_temp_yaml(&legacy);
+        let cfg = AresConfig::load(f.path()).expect("legacy keys must not break loading");
+        let grafana = cfg.grafana.expect("grafana section should parse");
+        assert!(grafana.enabled);
+        assert_eq!(grafana.dashboard_uid, "ares-redteam");
     }
 }

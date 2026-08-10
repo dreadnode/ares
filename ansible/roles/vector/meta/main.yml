@@ -1,0 +1,28 @@
+---
+galaxy_info:
+  author: Dreadnode
+  namespace: dreadnode
+  description: Vector log shipper — file/syslog sources to an S3 store-and-forward sink for off-LAN ares boxes
+  company: dreadnode
+  license: MIT
+  role_name: vector
+  min_ansible_version: "2.18.4"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - all
+    - name: Debian
+      versions:
+        - all
+    - name: Kali
+      versions:
+        - all
+  galaxy_tags:
+    - ares
+    - vector
+    - logging
+    - observability
+    - s3
+    - loki
+
+dependencies: []

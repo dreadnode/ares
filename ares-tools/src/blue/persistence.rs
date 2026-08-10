@@ -142,7 +142,6 @@ impl InvestigationStore {
     /// Store a completed investigation.
     pub fn store_investigation(&self, investigation: StoredInvestigation) {
         let mut data = self.data.lock().unwrap();
-        // Replace if exists, otherwise append
         if let Some(pos) = data
             .investigations
             .iter()
@@ -520,8 +519,6 @@ mod tests {
         assert_eq!(effective[0].query_pattern, "detect_dcsync");
     }
 
-    // ── QueryEffectiveness pure methods ───────────────────────────────
-
     #[test]
     fn success_rate_nonzero() {
         let qe = QueryEffectiveness {
@@ -620,8 +617,6 @@ mod tests {
         assert_eq!(qe.evidence_rate(), 0.0);
     }
 
-    // ── InvestigationStatistics default ───────────────────────────────
-
     #[test]
     fn statistics_default_is_zeroed() {
         let stats = InvestigationStatistics::default();
@@ -646,7 +641,7 @@ mod tests {
         assert_eq!(stats.avg_duration_seconds, 0.0);
     }
 
-    // ── Store: deduplication on store_investigation ────────────────────
+    // Store: deduplication on store_investigation
 
     #[test]
     fn store_replaces_duplicate_investigation() {
@@ -666,7 +661,7 @@ mod tests {
         assert_eq!(stats.total_investigations, 1);
     }
 
-    // ── find_similar: fingerprint scoring ─────────────────────────────
+    // find_similar: fingerprint scoring
 
     #[test]
     fn find_similar_by_fingerprint() {
@@ -733,8 +728,6 @@ mod tests {
         assert!(results.is_empty());
     }
 
-    // ── update_query_effectiveness accumulation ───────────────────────
-
     #[test]
     fn query_effectiveness_accumulates() {
         let dir = tempfile::tempdir().unwrap();
@@ -777,8 +770,6 @@ mod tests {
         assert_eq!(qe.alert_types.len(), 1);
     }
 
-    // ── false positive patterns ───────────────────────────────────────
-
     #[test]
     fn false_positive_patterns_min_occurrences() {
         let dir = tempfile::tempdir().unwrap();
@@ -797,8 +788,6 @@ mod tests {
         assert_eq!(patterns.len(), 1);
     }
 
-    // ── label nonexistent investigation ───────────────────────────────
-
     #[test]
     fn label_nonexistent_returns_false() {
         let dir = tempfile::tempdir().unwrap();
@@ -806,8 +795,6 @@ mod tests {
         let store = InvestigationStore::open(path);
         assert!(!store.label_investigation("no-such-id", true, None));
     }
-
-    // ── get_effective_queries filtering ───────────────────────────────
 
     #[test]
     fn effective_queries_filters_by_alert_type() {

@@ -5,6 +5,13 @@ use std::collections::HashMap;
 
 use super::util::{default_blue_task_status, default_confidence, default_timeline_source};
 
+/// Prefix on the `source` of every timeline event written by the deterministic
+/// detection sweep, either bare or as `detection_sweep:<rule>`.
+///
+/// Scoring keys machine-produced events off this, so the sweep's writer and the
+/// scorer must agree on the literal — hence one const rather than two copies.
+pub const SWEEP_TIMELINE_SOURCE: &str = "detection_sweep";
+
 /// Levels of the Pyramid of Pain.
 ///
 /// Higher levels are harder for adversaries to change.
@@ -107,6 +114,23 @@ pub struct Evidence {
     pub validated: bool,
 }
 
+/// A lateral-movement connection observed during the investigation.
+///
+/// Redis serialization: stored as JSON in the `lateral` LIST.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LateralMovement {
+    #[serde(default)]
+    pub source_host: String,
+    #[serde(default)]
+    pub destination_host: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+}
+
 /// An event in the investigation timeline.
 ///
 /// Redis serialization: stored as JSON in timeline LIST.
@@ -201,6 +225,8 @@ pub struct SharedBlueTeamState {
     pub triage_records: Vec<TriageRecord>,
     pub pending_tasks: HashMap<String, BlueTaskInfo>,
     pub completed_tasks: HashMap<String, BlueTaskInfo>,
+    /// Lateral-movement connections observed during the investigation.
+    pub lateral: Vec<LateralMovement>,
 }
 
 impl SharedBlueTeamState {
@@ -227,6 +253,7 @@ impl SharedBlueTeamState {
             triage_records: Vec::new(),
             pending_tasks: HashMap::new(),
             completed_tasks: HashMap::new(),
+            lateral: Vec::new(),
         }
     }
 }
@@ -235,8 +262,6 @@ impl SharedBlueTeamState {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    // ─── PyramidLevel ────────────────────────────────────────────────────
 
     #[test]
     fn pyramid_level_display() {
@@ -257,8 +282,6 @@ mod tests {
         assert_eq!(PyramidLevel::Ttps as i32, 6);
     }
 
-    // ─── InvestigationStage ──────────────────────────────────────────────
-
     #[test]
     fn investigation_stage_display() {
         assert_eq!(InvestigationStage::Triage.to_string(), "triage");
@@ -275,8 +298,6 @@ mod tests {
         let back: InvestigationStage = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back, InvestigationStage::Causation);
     }
-
-    // ─── TriageDecision ──────────────────────────────────────────────────
 
     #[test]
     fn triage_decision_display() {
@@ -295,8 +316,6 @@ mod tests {
         let back: TriageDecision = serde_json::from_str(&json_str).unwrap();
         assert_eq!(back, TriageDecision::Confirmed);
     }
-
-    // ─── Evidence serde ──────────────────────────────────────────────────
 
     #[test]
     fn evidence_deserialize_minimal() {
@@ -333,8 +352,6 @@ mod tests {
         assert_eq!(ev.mitre_techniques, vec!["T1046"]);
     }
 
-    // ─── BlueTaskInfo serde ──────────────────────────────────────────────
-
     #[test]
     fn blue_task_info_defaults() {
         let j = json!({
@@ -349,8 +366,6 @@ mod tests {
         assert!(info.error.is_none());
     }
 
-    // ─── SharedBlueTeamState::new ────────────────────────────────────────
-
     #[test]
     fn shared_blue_team_state_new() {
         let state = SharedBlueTeamState::new("inv-001".to_string());
@@ -363,8 +378,6 @@ mod tests {
         assert!(state.attack_synopsis.is_none());
         assert!(state.triage_decision.is_none());
     }
-
-    // ─── TriageRecord serde ──────────────────────────────────────────────
 
     #[test]
     fn triage_record_deserialize() {
@@ -380,5 +393,68 @@ mod tests {
         assert_eq!(record.focus_areas.len(), 2);
         assert!(record.routed_to.is_none());
         assert_eq!(record.reinvestigation_cycle, 0);
+    }
+
+    #[test]
+    fn pyramid_level_serde_uses_variant_names() {
+        // The serde representation is the variant name — distinct from both the
+        // Display string ("ip_addresses") and the numeric discriminant (2).
+        let s = serde_json::to_string(&PyramidLevel::IpAddresses).unwrap();
+        assert_eq!(s, r#""IpAddresses""#);
+        let back: PyramidLevel = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, PyramidLevel::IpAddresses);
+    }
+
+    #[test]
+    fn pyramid_level_intermediate_discriminants() {
+        assert_eq!(PyramidLevel::IpAddresses as i32, 2);
+        assert_eq!(PyramidLevel::DomainNames as i32, 3);
+        assert_eq!(PyramidLevel::NetworkHostArtifacts as i32, 4);
+        assert_eq!(PyramidLevel::Tools as i32, 5);
+    }
+
+    #[test]
+    fn lateral_movement_serde_roundtrip() {
+        let lm = LateralMovement {
+            source_host: "192.168.58.10".to_string(),
+            destination_host: "192.168.58.20".to_string(),
+            user: "svc_sql".to_string(),
+            method: "wmiexec".to_string(),
+            timestamp: Some("2026-07-01T00:00:00Z".to_string()),
+        };
+        let s = serde_json::to_string(&lm).unwrap();
+        let back: LateralMovement = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.source_host, "192.168.58.10");
+        assert_eq!(back.destination_host, "192.168.58.20");
+        assert_eq!(back.user, "svc_sql");
+        assert_eq!(back.method, "wmiexec");
+        assert_eq!(back.timestamp.as_deref(), Some("2026-07-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn lateral_movement_deserialize_defaults() {
+        // Every field is `#[serde(default)]`, so an empty object deserializes.
+        let lm: LateralMovement = serde_json::from_value(json!({})).unwrap();
+        assert!(lm.source_host.is_empty());
+        assert!(lm.destination_host.is_empty());
+        assert!(lm.user.is_empty());
+        assert!(lm.method.is_empty());
+        assert!(lm.timestamp.is_none());
+    }
+
+    #[test]
+    fn lateral_movement_omits_timestamp_when_none() {
+        let lm = LateralMovement {
+            source_host: "192.168.58.10".to_string(),
+            destination_host: "192.168.58.20".to_string(),
+            user: "alice".to_string(),
+            method: "psexec".to_string(),
+            timestamp: None,
+        };
+        let v = serde_json::to_value(&lm).unwrap();
+        assert!(
+            v.get("timestamp").is_none(),
+            "None timestamp must be skipped in serialization"
+        );
     }
 }

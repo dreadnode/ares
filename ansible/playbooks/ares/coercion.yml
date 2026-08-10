@@ -13,9 +13,10 @@
       vars:
         base_update_cache: "{{ not _container_build }}"
 
-    - role: dreadnode.nimbus_range.coercion_tools
+    - role: l50.arsenal.coercion_tools
       vars:
         coercion_tools_update_cache: "{{ not _container_build }}"
+        coercion_tools_pip_break_system_packages: true
 
     - role: cowdogmoo.workstation.build_cleanup
       when: _container_build

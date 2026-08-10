@@ -30,13 +30,13 @@ This image is built on the NVIDIA CUDA runtime image and supports:
 To run the container with GPU access:
 
 ```bash
-docker run --gpus all -it ghcr.io/dreadnode/ares-cracker-agent-gpu:latest
+docker run --gpus all -it ghcr.io/l50/ares-cracker-agent-gpu:latest
 ```
 
 Or with specific GPUs:
 
 ```bash
-docker run --gpus '"device=0,1"' -it ghcr.io/dreadnode/ares-cracker-agent-gpu:latest
+docker run --gpus '"device=0,1"' -it ghcr.io/l50/ares-cracker-agent-gpu:latest
 ```
 
 ### Verifying GPU Access
@@ -95,11 +95,11 @@ export GITHUB_TOKEN="your-github-token"
 
 warpgate build --template ares-cracker-agent-gpu \
   --arch amd64 \
-  --registry ghcr.io/dreadnode \
+  --registry ghcr.io/l50 \
   --tag latest \
   --push \
-  --cache-from type=registry,ref=ghcr.io/dreadnode/ares-cracker-agent-gpu:buildcache-amd64 \
-  --cache-to type=registry,ref=ghcr.io/dreadnode/ares-cracker-agent-gpu:buildcache-amd64,mode=max
+  --cache-from type=registry,ref=ghcr.io/l50/ares-cracker-agent-gpu:buildcache-amd64 \
+  --cache-to type=registry,ref=ghcr.io/l50/ares-cracker-agent-gpu:buildcache-amd64,mode=max
 ```
 
 After the build, Ares Cracker Agent GPU Docker images will be available
@@ -111,7 +111,7 @@ locally as `ares-cracker-agent-gpu:latest`.
 
 - **hashcat** - GPU-accelerated password recovery tool compiled from source with CUDA support
 - **John the Ripper** - Classic password cracker
-- **rockyou.txt** - Famous password wordlist
+- **rockyou.txt** - Password wordlist
 - **SecLists passwords** - Common password lists
 - **ares** - Rust-compiled binary with PyO3 Python bindings
 - **Ares Python framework** - Agent orchestration and tool execution
@@ -144,7 +144,7 @@ locally as `ares-cracker-agent-gpu:latest`.
   - Rust-compiled `ares` binary with PyO3 Python bindings
   - Ares Python framework
 - **Build Process:**
-  - Clones ares repository from `feature/rust-cli` branch
+  - Clones ares repository from the `main` branch
   - Installs Rust toolchain, compiles binary with `--features python`
   - Installs binary to `/usr/local/bin/ares`
   - Cleans up Rust toolchain, build artifacts, and build-only dependencies

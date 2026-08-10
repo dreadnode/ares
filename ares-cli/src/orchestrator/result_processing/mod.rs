@@ -7,7 +7,9 @@
 //! Also polls the `ares:discoveries:{op_id}` LIST for real-time worker
 //! discoveries that arrive outside the task result flow.
 
+pub mod acl_grants;
 pub mod admin_checks;
+pub mod containment_recovery;
 pub mod discovery_polling;
 pub mod impacket_recovery;
 pub mod parsing;
@@ -21,14 +23,16 @@ pub use discovery_polling::discovery_poller;
 use std::sync::Arc;
 
 use anyhow::Result;
+use ares_core::models::User;
 use redis::aio::ConnectionLike;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
+use crate::orchestrator::automation::GOLDEN_TICKET_DISPATCHED;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::output_extraction;
 use crate::orchestrator::results::CompletedTask;
-use crate::orchestrator::state::SharedState;
+use crate::orchestrator::state::{SharedState, StateInner};
 use crate::orchestrator::task_queue::TaskQueueCore;
 use crate::orchestrator::throttling::Throttler;
 
@@ -39,13 +43,47 @@ use self::admin_checks::{
 use self::discovery_polling::has_lockout_in_result;
 use self::parsing::{parse_discoveries, resolve_parent_id};
 use self::timeline::{
-    create_credential_timeline_event, create_exploitation_timeline_event,
-    create_hash_timeline_event, create_lateral_movement_timeline_event,
+    create_exploitation_timeline_event, create_hash_timeline_event,
+    create_lateral_movement_timeline_event, publish_credential_credited,
 };
 
 /// Kerberos/SMB errors that indicate a credential is locked out.
 pub(crate) const LOCKOUT_PATTERNS: &[&str] =
     &["KDC_ERR_CLIENT_REVOKED", "STATUS_ACCOUNT_LOCKED_OUT"];
+
+/// True when the task result text contains the canonical etype-rejection
+/// markers a KDC returns when a SPN-bearing account has
+/// `msDS-SupportedEncryptionTypes` set to AES-only and the client requested
+/// (only) RC4. The default-etype kerberoast TGS-REQ trips this; the orchestrator
+/// then needs to re-dispatch with an AES etype hint. Bug E.
+pub(crate) fn result_text_indicates_etype_nosupp(result: &Option<Value>) -> bool {
+    let Some(payload) = result else {
+        return false;
+    };
+    let texts = collect_result_text_parts(payload);
+    texts.iter().any(|t| {
+        t.contains("KDC_ERR_ETYPE_NOSUPP")
+            || t.contains("KDC_ERR_ETYPE_NOTSUPP")
+            || t.contains("KDC has no support for encryption type")
+    })
+}
+
+/// True when the technique should trigger an AES-etype kerberoast retry on
+/// observing `KDC_ERR_ETYPE_NOSUPP`. Pure — extracted so the retry gate can
+/// be unit-tested without spinning up the orchestrator. Bug E.
+pub(crate) fn should_retry_kerberoast_with_aes(
+    technique: Option<&str>,
+    result: &Option<Value>,
+) -> bool {
+    let Some(tech) = technique else {
+        return false;
+    };
+    let t = tech.to_lowercase();
+    if t != "kerberoast" && t != "targeted_kerberoast" {
+        return false;
+    }
+    result_text_indicates_etype_nosupp(result)
+}
 
 /// Process a completed task result: extract discoveries and update state.
 pub async fn process_completed_task(
@@ -179,6 +217,13 @@ pub async fn process_completed_task(
             share_auth_label.as_deref(),
         )
         .await;
+
+        // Recover AS-REP-roastable principals the agent flagged via
+        // `report_finding` (routed into `llm_findings`, not `discoveries`) and
+        // publish them as users. Without this the deterministic `asrep_roast`
+        // automation — which reads its userlist from `state.users` — never
+        // targets an account that only ever surfaced as a finding.
+        publish_asrep_roastable_findings(payload, dispatcher, &default_domain).await;
     }
 
     // Mark host as owned when a credential_access task succeeds AND parser
@@ -203,6 +248,10 @@ pub async fn process_completed_task(
                 );
             }
         }
+    }
+
+    if let Some(ref payload) = result.result {
+        acl_grants::publish_granted_acl_edges(payload, dispatcher).await;
     }
 
     // Domain SID extraction: scan raw text for S-1-5-21-... patterns (from secretsdump).
@@ -237,8 +286,15 @@ pub async fn process_completed_task(
         }
     }
 
+    release_unforged_golden_ticket_domain(
+        &task_params_snapshot,
+        task_domain.as_deref(),
+        dispatcher,
+    )
+    .await;
+
     // Handle exploit task outcomes — create timeline events for both success and failure
-    if completed.task_id.starts_with("exploit_") {
+    if is_exploit_scoped_task_id(&completed.task_id) {
         if let Some(vuln_id) = result
             .result
             .as_ref()
@@ -262,6 +318,8 @@ pub async fn process_completed_task(
             // primitive on getST exit-0.
             let has_ticket_evidence =
                 is_ticket_grant_vuln(&vuln_id) && result_has_ccache_evidence(&result.result);
+            let has_acl_evidence =
+                is_acl_mutation_vuln(&vuln_id) && result_has_acl_mutation_evidence(&result.result);
             // Stall-tolerance: when the LLM ends its turn without calling
             // task_complete (LoopEndReason::MaxSteps or budget exhaustion),
             // submission.rs stamps `success=false` with an error string
@@ -276,13 +334,39 @@ pub async fn process_completed_task(
             let stalled_with_evidence = !result.success
                 && error_indicates_stall(result.error.as_deref())
                 && !result_text_indicates_failure(&result.result)
-                && (result_has_parser_evidence(&result.result) || has_ticket_evidence);
+                && (result_has_parser_evidence(&result.result)
+                    || has_ticket_evidence
+                    || has_acl_evidence);
+            let assisted_with_evidence = !result.success
+                && error_indicates_assistance(result.error.as_deref())
+                && !result_text_indicates_failure(&result.result)
+                && (result_has_parser_evidence(&result.result)
+                    || has_ticket_evidence
+                    || has_acl_evidence);
             let actually_succeeded = (result.success
                 && !result_text_indicates_failure(&result.result)
-                && (result_has_parser_evidence(&result.result) || has_ticket_evidence))
-                || stalled_with_evidence;
+                && (result_has_parser_evidence(&result.result)
+                    || has_ticket_evidence
+                    || has_acl_evidence))
+                || stalled_with_evidence
+                || assisted_with_evidence;
+
+            if !actually_succeeded && result_has_shadow_cred_stage_one(&result.result) {
+                warn!(
+                    vuln_id = %vuln_id,
+                    task_id = %task_id,
+                    "Shadow credential written but never converted — msDS-KeyCredentialLink landed and a PFX exists, but no credential was recovered. Run certipy_auth on the PFX to complete the chain; not crediting this vulnerability"
+                );
+            }
 
             if actually_succeeded {
+                if result_has_shadow_cred_stage_one(&result.result) {
+                    info!(
+                        vuln_id = %vuln_id,
+                        task_id = %task_id,
+                        "Shadow credential chain converted end to end — the msDS-KeyCredentialLink write produced a parser-extracted credential, crediting this vulnerability"
+                    );
+                }
                 info!(vuln_id = %vuln_id, task_id = %task_id, "Marking vulnerability as exploited");
                 if let Err(e) = dispatcher
                     .state
@@ -293,53 +377,42 @@ pub async fn process_completed_task(
                 }
                 create_exploitation_timeline_event(dispatcher, &vuln_id, task_id).await;
 
-                // Attack-path diversity: record the walked
-                // (foothold, technique, target) step for coverage measurement
-                // and cross-run novelty bias. Inert unless emit_path_records or
-                // novelty_enabled is set (see docs/attack-path-diversity.md).
-                let strategy = &dispatcher.config.strategy;
-                if strategy.emit_path_records || strategy.novelty_enabled {
-                    let vuln_type = task_params_snapshot
-                        .get("vuln_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(vuln_id.as_str());
-                    let target = task_params_snapshot
-                        .get("target")
-                        .and_then(|v| v.as_str())
-                        .or(task_target_ip.as_deref())
-                        .unwrap_or("");
-                    let mut conn = dispatcher.queue.connection();
-                    crate::orchestrator::diversity::record_step(
-                        &mut conn,
-                        &dispatcher.config.operation_id,
-                        &strategy.novelty_scope,
-                        cred_key.as_deref(),
-                        vuln_type,
-                        target,
-                        strategy.emit_path_records,
-                        strategy.novelty_enabled,
-                    )
-                    .await;
-                }
+                // Fix D: an S4U / constrained-delegation success to cifs/<dc>
+                // leaves an Administrator ccache usable for DCSync. Convert the
+                // foothold into a Kerberos krbtgt dump here — this is the
+                // universal exploit-success path, so it fires no matter which
+                // dispatcher (auto_s4u OR the LLM exploitation workflow) ran the
+                // S4U. Gated + deduped inside; a no-op for non-delegation vulns.
+                crate::orchestrator::automation::maybe_dispatch_post_s4u_secretsdump(
+                    dispatcher, &vuln_id,
+                )
+                .await;
             } else {
                 // Record failed exploit attempts as timeline events so they appear
                 // in reports (e.g. noPac patched, PrintNightmare patched, Certifried
                 // tool missing). This closes the "dispatched but no report evidence" gap.
-                let err_msg = result.error.as_deref().unwrap_or("unknown error");
+                let err_msg = exploit_failure_reason(result.error.as_deref(), &result.result);
                 let event_id = format!(
                     "evt-exploit-fail-{}",
                     &uuid::Uuid::new_v4().simple().to_string()[..8]
                 );
+                let techniques = self::timeline::exploitation_techniques(&vuln_id);
+                let target_ip = task_params_snapshot
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .or(task_target_ip.as_deref());
                 let event = serde_json::json!({
                     "id": event_id,
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                     "source": "exploit_failed",
+                    "outcome": "failed",
+                    "target_ip": target_ip,
                     "description": format!("Exploit attempted but failed: {vuln_id} — {err_msg}"),
-                    "mitre_techniques": ["T1210"],
+                    "mitre_techniques": techniques,
                 });
                 let _ = dispatcher
                     .state
-                    .persist_timeline_event(&dispatcher.queue, &event, &["T1210".to_string()])
+                    .persist_timeline_event(&dispatcher.queue, &event, &techniques)
                     .await;
                 info!(
                     vuln_id = %vuln_id,
@@ -358,6 +431,43 @@ pub async fn process_completed_task(
                         failure_count = count,
                         "Vuln abandoned — exceeded max exploit failures"
                     );
+                }
+
+                // Shadow-cred pre-flight (post-flight learning): when a
+                // shadow-cred exploit returns INSUFF_ACCESS_RIGHTS on
+                // msDS-KeyCredentialLink, the source doesn't hold
+                // WriteProperty on that attribute — retrying won't grant
+                // it. Skip straight to abandoned instead of burning
+                // MAX_EXPLOIT_FAILURES worth of dispatches.
+                //
+                // Unless the edge itself carries WRITE_DAC. GenericAll is full
+                // control, so the source can write an explicit ACE granting the
+                // property write and try again — abandoning forecloses a path
+                // that is still open. Those stay live for auto_dacl_abuse.
+                let vuln_type_snapshot = task_params_snapshot
+                    .get("vuln_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if is_shadow_cred_vuln_type(vuln_type_snapshot)
+                    && result_indicates_keycredlink_access_denied(&result.result, err_msg)
+                    && !dispatcher.state.is_exploit_abandoned(&vuln_id).await
+                {
+                    if grants_dacl_write(vuln_type_snapshot) {
+                        warn!(
+                            vuln_id = %vuln_id,
+                            task_id = %task_id,
+                            vuln_type = %vuln_type_snapshot,
+                            "Shadow-cred INSUFF_ACCESS_RIGHTS on msDS-KeyCredentialLink — keeping vuln live; the edge carries WRITE_DAC so auto_dacl_abuse can grant the property write via dacl_edit"
+                        );
+                    } else {
+                        warn!(
+                            vuln_id = %vuln_id,
+                            task_id = %task_id,
+                            vuln_type = %vuln_type_snapshot,
+                            "Shadow-cred INSUFF_ACCESS_RIGHTS on msDS-KeyCredentialLink — abandoning vuln (source lacks WriteProperty on that attribute and cannot grant it)"
+                        );
+                        dispatcher.state.mark_exploit_abandoned(&vuln_id).await;
+                    }
                 }
             }
         }
@@ -384,6 +494,11 @@ pub async fn process_completed_task(
     // username_as_password and password_spray test multiple users in one
     // task — when a specific user trips STATUS_ACCOUNT_LOCKED_OUT we
     // remember that principal so future enum tasks can skip it.
+    //
+    // Bug E: SPN-bearing principals get the ≥30-min AD-default quarantine
+    // window instead of the generic 5 min. The 5-min cycle doesn't outlast
+    // the real lockout policy, so the spray loop ends up re-hammering the
+    // same locked principal across neighbouring domains.
     if has_lockout_in_result(result) {
         let locked = extract_locked_usernames_from_result(&result.result);
         if !locked.is_empty() {
@@ -396,74 +511,48 @@ pub async fn process_completed_task(
                 let mut state = dispatcher.state.write().await;
                 for (user, dom_hint) in &locked {
                     let dom = dom_hint.as_deref().unwrap_or(&resolved_domain);
-                    warn!(
-                        user = %user,
-                        domain = %dom,
-                        task_id = %task_id,
-                        "User quarantined for 5 min: enumeration lockout detected"
-                    );
-                    state.quarantine_principal(user, dom);
+                    let is_spn = crate::orchestrator::automation::credential_access::is_kerberoastable_principal(&state, user, dom);
+                    if is_spn {
+                        warn!(
+                            user = %user,
+                            domain = %dom,
+                            task_id = %task_id,
+                            "SPN-bearing user quarantined for 30 min: AD lockout-policy default applies (kerberoast pivot recommended)"
+                        );
+                        state.quarantine_principal_for(
+                            user,
+                            dom,
+                            crate::orchestrator::automation::credential_access::SPN_LOCKOUT_QUARANTINE_SECS,
+                        );
+                    } else {
+                        warn!(
+                            user = %user,
+                            domain = %dom,
+                            task_id = %task_id,
+                            "User quarantined for 5 min: enumeration lockout detected"
+                        );
+                        state.quarantine_principal(user, dom);
+                    }
                 }
             }
         }
     }
 
-    // SeImpersonate primitive detection. When a task's output captures a
-    // `whoami /priv` (or equivalent) showing SeImpersonatePrivilege held
-    // (and enabled), we have everything needed to escalate to SYSTEM via
-    // PrintSpoofer / GodPotato. Surface this as `seimpersonate_<host>` and
-    // mark exploited so the scoreboard credits the primitive. The follow-on
-    // potato dispatch is left for the existing privesc agent (already wired
-    // with godpotato / printspoofer tools) to consume opportunistically.
     if result_has_seimpersonate_signal(&result.result) {
         let host_label =
             derive_seimpersonate_host_label(dispatcher, task_target_ip.as_deref()).await;
-        let vuln_id = format!("seimpersonate_{}", host_label);
-        let mut details = std::collections::HashMap::new();
-        details.insert("host".into(), Value::String(host_label.clone()));
-        if let Some(ref ip) = task_target_ip {
-            details.insert("target_ip".into(), Value::String(ip.clone()));
-        }
-        details.insert(
-            "note".into(),
-            Value::String(
-                "SeImpersonatePrivilege observed enabled — \
-                 escalation path via PrintSpoofer / GodPotato to SYSTEM."
-                    .into(),
-            ),
-        );
-        let vuln = ares_core::models::VulnerabilityInfo {
-            vuln_id: vuln_id.clone(),
-            vuln_type: "seimpersonate".to_string(),
-            target: task_target_ip.clone().unwrap_or_else(|| host_label.clone()),
-            discovered_by: "result_processing".to_string(),
-            discovered_at: chrono::Utc::now(),
-            details,
-            recommended_agent: "privesc".to_string(),
-            priority: 2,
-        };
+        let vuln = build_seimpersonate_vuln(&host_label, task_target_ip.as_deref());
+        let vuln_id = vuln.vuln_id.clone();
         let _ = dispatcher
             .state
             .publish_vulnerability(&dispatcher.queue, vuln)
             .await;
-        if let Err(e) = dispatcher
-            .state
-            .mark_exploited(&dispatcher.queue, &vuln_id)
-            .await
-        {
-            warn!(
-                err = %e,
-                vuln_id = %vuln_id,
-                "Failed to mark seimpersonate primitive exploited"
-            );
-        } else {
-            info!(
-                vuln_id = %vuln_id,
-                host = %host_label,
-                task_id = %task_id,
-                "SeImpersonate primitive observed in task output — exploit token emitted"
-            );
-        }
+        info!(
+            vuln_id = %vuln_id,
+            host = %host_label,
+            task_id = %task_id,
+            "SeImpersonate primitive detected — published for privesc agent (no exploit credit emitted)"
+        );
     }
 
     // NTLM Relay tokenization. The auto_ntlm_relay chain dispatches relay
@@ -475,6 +564,177 @@ pub async fn process_completed_task(
     // Recognise the relay technique here and emit a synthetic token so the
     // scoreboard credits the primitive.
     let task_technique = task_technique_from_pending(dispatcher, task_id).await;
+
+    // Blue containment classification. When a red tool call fails in a way
+    // that looks like blue took action, surface it as a state event so the
+    // exploitation queue can drop dependent work and the LLM prompt reflects
+    // "this credential/host/cert/realm is dead". See docs/blue.md § How red
+    // reacts.
+    {
+        use containment_recovery::ContainmentSignal;
+        let signals = containment_recovery::classify_containment_signals(
+            &result.result,
+            task_technique.as_deref(),
+            cred_key.as_deref(),
+            task_domain.as_deref(),
+            task_target_ip.as_deref(),
+        );
+        for signal in signals {
+            match signal {
+                ContainmentSignal::CredentialRevoked {
+                    username,
+                    domain,
+                    source,
+                } => {
+                    // The unambiguous KDC-declared revocation publishes on first
+                    // sight; a generic auth-reject string must recur for the same
+                    // principal before we believe blue disabled it, so one benign
+                    // logon failure can't strike a still-valid credential from the
+                    // LLM's view.
+                    let publish = if source
+                        .contains(containment_recovery::KDC_CLIENT_REVOKED_MARKER)
+                    {
+                        true
+                    } else {
+                        let key = format!("{}@{}", username.to_lowercase(), domain.to_lowercase());
+                        let mut state = dispatcher.state.write().await;
+                        let count = state.containment_reject_counts.entry(key).or_insert(0);
+                        *count += 1;
+                        *count >= containment_recovery::CREDENTIAL_REVOKE_MIN_OBSERVATIONS
+                    };
+                    if publish {
+                        dispatcher
+                            .state
+                            .publish_credential_revoked(&username, &domain, &source)
+                            .await;
+                    } else {
+                        info!(
+                            user = %username,
+                            domain = %domain,
+                            source = %source,
+                            attribution = %dispatcher
+                                .state
+                                .containment_attribution()
+                                .await
+                                .as_str(),
+                            "containment: weak credential-reject below revocation \
+                             threshold — deferring (needs corroboration)"
+                        );
+                    }
+                }
+                ContainmentSignal::HostIsolated {
+                    ip,
+                    hostname,
+                    source,
+                } => {
+                    dispatcher
+                        .state
+                        .publish_host_isolated(&ip, &hostname, &source)
+                        .await;
+                }
+                ContainmentSignal::KrbtgtRotated { domain, source } => {
+                    // Realm-wide blast radius: publishing skips every
+                    // Kerberos-shaped credential_access task in the realm for
+                    // the rest of the op, so a lone mismatch must corroborate
+                    // before it spends that. Blue's own rotations do not come
+                    // through here — they arrive as OpStateEvents and are
+                    // applied in `state::replay` — so this gate cannot mask a
+                    // real containment action.
+                    let publish = {
+                        let mut state = dispatcher.state.write().await;
+                        let count = state
+                            .containment_krbtgt_mismatch_counts
+                            .entry(domain.to_lowercase())
+                            .or_insert(0);
+                        *count += 1;
+                        *count >= containment_recovery::KRBTGT_ROTATION_MIN_OBSERVATIONS
+                    };
+                    if publish {
+                        dispatcher
+                            .state
+                            .publish_krbtgt_rotated(&domain, &source)
+                            .await;
+                    } else {
+                        info!(
+                            domain = %domain,
+                            source = %source,
+                            "containment: single Kerberos key mismatch below rotation \
+                             threshold — deferring (needs corroboration)"
+                        );
+                    }
+                }
+                ContainmentSignal::CertificateRevoked { serial, ca, source } => {
+                    dispatcher
+                        .state
+                        .publish_certificate_revoked(&serial, &ca, &source)
+                        .await;
+                }
+            }
+        }
+    }
+
+    // Bug E: AES kerberoast retry on KDC_ERR_ETYPE_NOSUPP. When a kerberoast
+    // dispatch hits an AES-only SPN account, the default-etype TGS-REQ is
+    // rejected pre-TGS-REP. Re-dispatch with an AES etype hint so we extract
+    // a $krb5tgs$18$ hash before any password_spray touches the same principal
+    // and trips the AD lockout policy.
+    if should_retry_kerberoast_with_aes(task_technique.as_deref(), &result.result) {
+        let resolved_domain = if let Some(ref td) = task_domain {
+            td.clone()
+        } else {
+            resolve_domain_from_ip(dispatcher, task_target_ip.as_deref()).await
+        };
+        let dc_ip = task_target_ip.clone().unwrap_or_default();
+        let target_user = task_params_snapshot
+            .get("target_user")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let cred = {
+            let state = dispatcher.state.read().await;
+            task_username.as_deref().and_then(|u| {
+                state
+                    .credentials
+                    .iter()
+                    .find(|c| {
+                        c.username.eq_ignore_ascii_case(u)
+                            && (resolved_domain.is_empty()
+                                || c.domain.eq_ignore_ascii_case(&resolved_domain))
+                    })
+                    .cloned()
+            })
+        };
+        if let (false, false, Some(cred)) = (resolved_domain.is_empty(), dc_ip.is_empty(), cred) {
+            let payload =
+                crate::orchestrator::automation::credential_access::build_aes_kerberoast_retry_payload(
+                    &resolved_domain,
+                    &dc_ip,
+                    &cred,
+                    target_user.as_deref(),
+                );
+            match dispatcher
+                .throttled_submit("credential_access", "credential_access", payload, 1)
+                .await
+            {
+                Ok(Some(new_task_id)) => info!(
+                    parent_task = %task_id,
+                    chained_task = %new_task_id,
+                    target = %dc_ip,
+                    domain = %resolved_domain,
+                    "Kerberoast AES retry dispatched after KDC_ERR_ETYPE_NOSUPP"
+                ),
+                Ok(None) => {}
+                Err(e) => warn!(err = %e, "Failed to dispatch AES kerberoast retry"),
+            }
+        } else {
+            warn!(
+                task_id = %task_id,
+                domain = %resolved_domain,
+                dc_ip = %dc_ip,
+                "Cannot dispatch AES kerberoast retry: missing domain/dc_ip/credential"
+            );
+        }
+    }
+
     if let Some(ref tech) = task_technique {
         if (tech == "ntlm_relay_ldap" || tech == "ntlm_relay_adcs")
             && result.success
@@ -585,8 +845,11 @@ pub async fn process_completed_task(
         }
     }
 
+    dispatcher.crack_inflight.release(task_id).await;
+
     dispatcher.credential_access_notify.notify_waiters();
     dispatcher.delegation_notify.notify_waiters();
+    dispatcher.planning_notify.notify_waiters();
 
     let _ = dispatcher.notify_state_update().await;
 }
@@ -630,7 +893,7 @@ async fn task_relay_target_from_pending(
 /// authentication. Recognises both the explicit "NTLMv1 allowed" / "NTLM
 /// downgrade" prose forms and the canonical `LmCompatibilityLevel: <0..2>`
 /// registry probe output.
-fn collect_result_text_parts(payload: &Value) -> Vec<String> {
+pub(crate) fn collect_result_text_parts(payload: &Value) -> Vec<String> {
     let mut texts: Vec<String> = Vec::new();
     if let Some(arr) = payload.get("tool_outputs").and_then(|v| v.as_array()) {
         for item in arr {
@@ -705,6 +968,39 @@ async fn derive_seimpersonate_host_label(
         return ip.replace('.', "_");
     }
     "unknown".to_string()
+}
+
+fn build_seimpersonate_vuln(
+    host_label: &str,
+    target_ip: Option<&str>,
+) -> ares_core::models::VulnerabilityInfo {
+    let vuln_id = format!("seimpersonate_{}", host_label);
+    let mut details = std::collections::HashMap::new();
+    details.insert("host".into(), Value::String(host_label.to_string()));
+    if let Some(ip) = target_ip {
+        details.insert("target_ip".into(), Value::String(ip.to_string()));
+    }
+    details.insert(
+        "note".into(),
+        Value::String(
+            "SeImpersonatePrivilege observed enabled — operator lead only. \
+             No on-target execution primitive is available in this harness, \
+             so no automated SYSTEM escalation will follow."
+                .into(),
+        ),
+    );
+    ares_core::models::VulnerabilityInfo {
+        vuln_id,
+        vuln_type: "seimpersonate".to_string(),
+        target: target_ip
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| host_label.to_string()),
+        discovered_by: "result_processing".to_string(),
+        discovered_at: chrono::Utc::now(),
+        details,
+        recommended_agent: "privesc".to_string(),
+        priority: 2,
+    }
 }
 
 /// Returns `true` when trusted tool-output payloads contain a recognised
@@ -808,24 +1104,34 @@ fn gmsa_exploit_token(username: &str) -> String {
     format!("gmsa_{}", username.trim_end_matches('$').to_lowercase())
 }
 
-/// gMSA managed-password recovery side-effect: when secretsdump returns a
-/// Group Managed Service Account hash (account ends with `$` and name
-/// contains "gmsa"), credit the gMSA primitive even though we never went
-/// through `auto_gmsa_extraction`. Without this, gMSA hashes captured
-/// incidentally via DCSync never emit a `gmsa_*` token to the exploited
-/// set and the scoreboard understates progress.
+/// True when `source` names a tool that actually reads a gMSA managed
+/// password (`gmsa_dump_passwords`, `gmsa_read_password_bloodyad`) rather
+/// than a tool that merely returns the account's NTLM hash as a byproduct.
+fn is_gmsa_read_source(source: &str) -> bool {
+    source.to_lowercase().contains("gmsa")
+}
+
+/// gMSA managed-password recovery side-effect: credit the gMSA primitive
+/// when a managed-password read actually produced the material.
 ///
-/// No-op for non-gMSA usernames. Errors from `mark_exploited` are logged
-/// but not propagated — credit emission is best-effort and shouldn't
-/// fail the surrounding hash-publish flow.
+/// Requires BOTH a gMSA-looking principal AND a producing tool that reads
+/// managed passwords. A DCSync of the domain returns every gMSA account's
+/// NTLM hash as ordinary NTDS loot; crediting that as a gMSA read marks the
+/// primitive exploited on operations that never attempted it, which is the
+/// same precondition-as-outcome error `seimpersonate` was corrected for.
+///
+/// No-op otherwise. Errors from `mark_exploited` are logged but not
+/// propagated — credit emission is best-effort and shouldn't fail the
+/// surrounding hash-publish flow.
 async fn emit_gmsa_exploit_token_if_gmsa<C>(
     state: &SharedState,
     queue: &TaskQueueCore<C>,
     username: &str,
+    source: &str,
 ) where
     C: ConnectionLike + Clone + Send + Sync + 'static,
 {
-    if !is_gmsa_principal(username) {
+    if !is_gmsa_principal(username) || !is_gmsa_read_source(source) {
         return;
     }
     let vuln_id = gmsa_exploit_token(username);
@@ -839,7 +1145,7 @@ async fn emit_gmsa_exploit_token_if_gmsa<C>(
         info!(
             vuln_id = %vuln_id,
             account = %username,
-            "gMSA hash captured via secretsdump — emitted exploit token"
+            "gMSA managed password read — emitted exploit token"
         );
     }
 }
@@ -876,6 +1182,183 @@ fn is_ticket_grant_vuln(vuln_id: &str) -> bool {
         || v.starts_with("unconstrained_delegation_")
         || v.starts_with("rbcd_")
         || v.starts_with("s4u_")
+        || v.starts_with("golden_ticket_")
+        || v.starts_with("silver_ticket_")
+}
+
+fn exploit_failure_reason<'a>(error: Option<&'a str>, result: &'a Option<Value>) -> &'a str {
+    error
+        .filter(|e| !e.trim().is_empty())
+        .or_else(|| {
+            result
+                .as_ref()
+                .and_then(|v| v.get("summary"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or("unknown error")
+}
+
+pub(crate) fn is_acl_mutation_vuln(vuln_id: &str) -> bool {
+    let v = vuln_id.to_lowercase();
+    v.starts_with("acl_") || v.starts_with("gpo_")
+}
+
+fn is_exploit_scoped_task_id(task_id: &str) -> bool {
+    task_id.starts_with("exploit_")
+        || task_id.starts_with("lateral_")
+        || task_id.starts_with("privesc_")
+}
+
+const MAX_GOLDEN_TICKET_FORGE_ATTEMPTS: u32 = 2;
+
+async fn release_unforged_golden_ticket_domain(
+    task_params: &std::collections::HashMap<String, serde_json::Value>,
+    task_domain: Option<&str>,
+    dispatcher: &Arc<Dispatcher>,
+) {
+    let is_golden_ticket = task_params
+        .get("technique")
+        .and_then(|v| v.as_str())
+        .is_some_and(|t| t.eq_ignore_ascii_case("golden_ticket"));
+    if !is_golden_ticket {
+        return;
+    }
+    let Some(domain) = task_domain.filter(|d| !d.is_empty()).map(str::to_lowercase) else {
+        return;
+    };
+    {
+        let state = dispatcher.state.read().await;
+        if state
+            .exploited_vulnerabilities
+            .contains(&format!("golden_ticket_{domain}"))
+        {
+            return;
+        }
+    }
+    let attempt = {
+        let mut state = dispatcher.state.write().await;
+        let n = state
+            .golden_ticket_forge_attempts
+            .entry(domain.clone())
+            .or_insert(0);
+        *n += 1;
+        *n
+    };
+    if attempt >= MAX_GOLDEN_TICKET_FORGE_ATTEMPTS {
+        warn!(
+            domain = %domain,
+            attempt,
+            "Golden ticket forge produced no ticket after repeated attempts — leaving domain closed"
+        );
+        return;
+    }
+    dispatcher
+        .state
+        .write()
+        .await
+        .unmark_processed(GOLDEN_TICKET_DISPATCHED, &domain);
+    let _ = dispatcher
+        .state
+        .unpersist_dedup(&dispatcher.queue, GOLDEN_TICKET_DISPATCHED, &domain)
+        .await;
+    warn!(
+        domain = %domain,
+        "Golden ticket forge produced no ticket — reopening domain for retry"
+    );
+}
+
+/// True when `vuln_type` (as recorded in `task.params.vuln_type`) belongs
+/// to a shadow-credentials dispatch — the shape of the vuln types kept in
+/// sync with `automation::shadow_credentials::is_shadow_cred_candidate`.
+/// Used by the result-processing pre-flight gate: a shadow-cred task that
+/// comes back with INSUFF_ACCESS_RIGHTS on `msDS-KeyCredentialLink` gets
+/// one-shot abandoned instead of retrying to the generic MAX.
+///
+/// `writedacl` / `writeowner` are excluded for the same reason the dispatch
+/// matcher excludes them: those edges are exploited via `dacl_edit`, and
+/// abandoning the vuln on one opportunistic pywhisker attempt would kill the
+/// escalate-first path before `dacl_edit` ever runs.
+fn is_shadow_cred_vuln_type(vuln_type: &str) -> bool {
+    matches!(
+        vuln_type.to_lowercase().as_str(),
+        "genericall"
+            | "genericwrite"
+            | "shadow_credentials"
+            | "writeproperty"
+            | "acl_genericall"
+            | "acl_genericwrite"
+            | "acl_writeproperty"
+    )
+}
+
+/// True when the ACL right includes `WRITE_DAC` — i.e. the source can rewrite
+/// the target's DACL and grant itself a right it does not currently hold.
+///
+/// This is what separates a recoverable `INSUFF_ACCESS_RIGHTS` from a terminal
+/// one. `GenericAll` is full control and therefore carries `WRITE_DAC`, so a
+/// denied `msDS-KeyCredentialLink` write can be retried after `dacl_edit`
+/// writes an explicit ACE. `GenericWrite` and `WriteProperty` grant property
+/// writes only — a source denied on that attribute has no way to widen its own
+/// access, so abandoning is correct there.
+///
+/// `writedacl` / `writeowner` are listed for completeness; since #283 they are
+/// routed to `auto_dacl_abuse` before a shadow-cred dispatch is ever made, so
+/// they should not reach this path.
+fn grants_dacl_write(vuln_type: &str) -> bool {
+    matches!(
+        vuln_type.to_lowercase().as_str(),
+        "genericall"
+            | "acl_genericall"
+            | "writedacl"
+            | "acl_writedacl"
+            | "writeowner"
+            | "acl_writeowner"
+    )
+}
+
+/// True when the tool output or error string carries a
+/// `INSUFF_ACCESS_RIGHTS`-shaped failure specifically for the
+/// `msDS-KeyCredentialLink` attribute (LDAP code 0x2098 / 50). This is the
+/// deterministic signal that the source principal doesn't hold WriteProperty
+/// on that attribute. Re-running the same dispatch cannot change that, so the
+/// shadow-cred pre-flight bumps the vuln straight to abandoned — but only when
+/// the edge cannot widen its own access; see [`grants_dacl_write`].
+///
+/// Recognises the impacket/ldap3/certipy/pywhisker/bloodyad wordings:
+///   - `INSUFF_ACCESS_RIGHTS` combined with `msDS-KeyCredentialLink` /
+///     `KeyCredentialLink` in the same output blob
+///   - LDAP result `0x2098` combined with the same attribute reference
+///   - certipy's canonical "user has no permission to add a certificate"
+fn result_indicates_keycredlink_access_denied(result: &Option<Value>, err_msg: &str) -> bool {
+    let mut haystacks: Vec<String> = Vec::new();
+    haystacks.push(err_msg.to_lowercase());
+    if let Some(payload) = result.as_ref() {
+        for part in collect_result_text_parts(payload) {
+            haystacks.push(part.to_lowercase());
+        }
+    }
+    for h in &haystacks {
+        let mentions_keycred =
+            h.contains("keycredentiallink") || h.contains("msds-keycredentiallink");
+        if !mentions_keycred {
+            continue;
+        }
+        let mentions_denied = h.contains("insuff_access_rights")
+            || h.contains("insufficient access rights")
+            || h.contains("insufficientaccessrights")
+            || h.contains("0x2098")
+            || h.contains("has no permission to add a certificate");
+        if mentions_denied {
+            return true;
+        }
+    }
+    // certipy sometimes emits the "no permission to add a certificate"
+    // wording without naming the attribute — accept the certipy-specific
+    // phrase on its own as a shadow-cred deny signal.
+    haystacks
+        .iter()
+        .any(|h| h.contains("no permission to add a certificate"))
 }
 
 /// True when the result's raw tool output indicates a Kerberos ticket was
@@ -898,6 +1381,139 @@ fn result_has_ccache_evidence(result: &Option<Value>) -> bool {
     false
 }
 
+/// Success lines specific enough that no other tool prints them, so they stand
+/// on their own wherever in the task they appear. Every marker here names an
+/// outcome that *is* the objective: once the line is printed the edge has been
+/// taken and nothing further is required.
+const ACL_MUTATION_MARKERS: &[&str] = &[
+    "dacl modified successfully",
+    "has now genericall on",
+    "has now genericall over",
+    "password changed successfully",
+    "is now able to dcsync",
+    "can now impersonate users on",
+    "versionnumber attribute changed successfully",
+];
+
+/// Shadow-credential stage-one lines. These say a `msDS-KeyCredentialLink`
+/// write landed and a PFX exists — the *first* half of a two-stage attack whose
+/// second half (PKINIT via `certipy_auth`) is what actually recovers the
+/// target's NT hash. On their own they prove no credential was obtained, so
+/// they must never satisfy the exploit gate by themselves; stage two shows up
+/// as ordinary parser evidence (a hash lands in `discoveries`) and credits
+/// through that route instead.
+const SHADOW_CRED_STAGE_ONE_MARKERS: &[&str] = &[
+    "successfully added msds-keycredentiallink",
+    "updated the msds-keycredentiallink",
+    "successfully added key credential",
+    "saved pfx",
+];
+
+/// Success lines that are ordinary English and appear in unrelated tool output
+/// (`[*] Host added to scope`, `[+] Cache has been updated`). Credited only
+/// when the emitting entry is itself an ACL mutation primitive — otherwise any
+/// unrelated tool in the same task marks the ACL vulnerability EXPLOITED, which
+/// trades "ACL success is structurally impossible" for a false positive in the
+/// other direction.
+const ACL_MUTATION_MARKERS_NEEDING_ATTRIBUTION: &[&str] = &[
+    "added to ",
+    "has been updated",
+    "scheduledtask",
+    "version updated",
+    "gpt.ini",
+    "done!",
+];
+
+/// Tools that only ever perform stage one of a shadow-credential chain, or
+/// whose stage-two result arrives as a parsed hash rather than as a success
+/// line. Their generic `[*] … done!`-shaped output must not be read as an
+/// exploit, because for these tools such a line means the write landed, not
+/// that a credential was recovered.
+const SHADOW_CRED_STAGE_ONE_TOOLS: &[&str] = &["pywhisker", "certipy_shadow"];
+
+/// Tools whose output may be read as proof an ACL edge was taken.
+const ACL_MUTATION_TOOLS: &[&str] = &[
+    "adminsd_holder_add_ace",
+    "bloodyad_add_genericall",
+    "bloodyad_add_group_member",
+    "bloodyad_set_object_attr",
+    "bloodyad_set_password",
+    "certipy_shadow",
+    "dacl_edit",
+    "pygpoabuse_immediate_task",
+    "pywhisker",
+    "rbcd_write",
+    "sharpgpoabuse",
+];
+
+fn result_has_acl_mutation_evidence(result: &Option<Value>) -> bool {
+    let Some(payload) = result.as_ref() else {
+        return false;
+    };
+    let Some(entries) = payload.get("tool_outputs").and_then(|v| v.as_array()) else {
+        return false;
+    };
+
+    for entry in entries {
+        let (name, output) = match entry.as_str() {
+            Some(s) => (None, s),
+            None => (
+                entry.get("name").and_then(Value::as_str),
+                entry.get("output").and_then(Value::as_str).unwrap_or(""),
+            ),
+        };
+        let attributed = name.is_some_and(|n| ACL_MUTATION_TOOLS.contains(&n));
+        let stage_one_only = name.is_some_and(|n| SHADOW_CRED_STAGE_ONE_TOOLS.contains(&n));
+
+        for line in output.lines() {
+            let lower = line.trim().to_lowercase();
+            if !lower.starts_with("[+]") && !lower.starts_with("[*]") {
+                continue;
+            }
+            if ACL_MUTATION_MARKERS.iter().any(|m| lower.contains(m)) {
+                return true;
+            }
+            if attributed
+                && !stage_one_only
+                && ACL_MUTATION_MARKERS_NEEDING_ATTRIBUTION
+                    .iter()
+                    .any(|m| lower.contains(m))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` when the task wrote a shadow credential (stage one landed)
+/// without any independent evidence that the resulting PFX was ever converted
+/// into a credential. Used only to make the gap countable in the log: a
+/// half-finished chain that silently credits nothing is exactly the failure
+/// mode that let six of these render as EXPLOITED before the marker split.
+fn result_has_shadow_cred_stage_one(result: &Option<Value>) -> bool {
+    let Some(payload) = result.as_ref() else {
+        return false;
+    };
+    let Some(entries) = payload.get("tool_outputs").and_then(|v| v.as_array()) else {
+        return false;
+    };
+
+    entries.iter().any(|entry| {
+        let output = match entry.as_str() {
+            Some(s) => s,
+            None => entry.get("output").and_then(Value::as_str).unwrap_or(""),
+        };
+        output.lines().any(|line| {
+            let lower = line.trim().to_lowercase();
+            (lower.starts_with("[+]") || lower.starts_with("[*]"))
+                && SHADOW_CRED_STAGE_ONE_MARKERS
+                    .iter()
+                    .any(|m| lower.contains(m))
+        })
+    })
+}
+
 /// Returns `true` when the task's error string is one of the agent-loop
 /// stall conditions (LoopEndReason::MaxSteps, MaxTokens, BudgetExceeded,
 /// or "ended turn without task_complete"). These conditions indicate the
@@ -915,6 +1531,15 @@ fn error_indicates_stall(err: Option<&str>) -> bool {
         || lower.contains("max steps")
         || lower.contains("agent hit max tokens")
         || lower.contains("budget exceeded")
+}
+
+fn error_indicates_assistance(err: Option<&str>) -> bool {
+    let Some(e) = err else {
+        return false;
+    };
+    e.trim_start()
+        .to_lowercase()
+        .starts_with("assistance needed:")
 }
 
 fn result_has_parser_evidence(result: &Option<Value>) -> bool {
@@ -1055,7 +1680,10 @@ pub(crate) fn reconcile_extracted_credential_domain(
     let user_lc = username.to_lowercase();
     let mut domains: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for u in users {
-        if u.username.to_lowercase() == user_lc && !u.domain.is_empty() {
+        if u.username.to_lowercase() == user_lc
+            && !u.domain.is_empty()
+            && !user_source_is_model_authored(&u.source)
+        {
             domains.insert(u.domain.to_lowercase());
         }
     }
@@ -1067,6 +1695,10 @@ pub(crate) fn reconcile_extracted_credential_domain(
         return None;
     }
     Some(only)
+}
+
+pub(crate) fn user_source_is_model_authored(source: &str) -> bool {
+    matches!(source, "asrep_roastable_finding")
 }
 
 fn is_low_trust_realm_inferred_credential_source(source: &str) -> bool {
@@ -1093,23 +1725,31 @@ pub(crate) fn reconcile_low_trust_credential_domain(
     Some(corrected)
 }
 
-/// `kerberoast_{username}` or `asrep_roast_{domain}` token when the
+/// `kerberoast_{domain}_{username}` or `asrep_roast_{domain}` token when the
 /// captured hash carries the canonical impacket / hashcat prefix
 /// (`$krb5tgs$`, `$krb5asrep$`). Returns `None` for other hash types so
 /// the caller emits exactly one token per captured roast hash. Token
 /// values match dreadgoad's `transport_ares.aresExploitedToTechniqueIDs`
 /// prefix matchers — anything starting with `kerberoast_` / `asrep_roast_`
 /// credits the corresponding scoreboard primitive.
+///
+/// The kerberoast key carries the realm because the same SPN account name
+/// exists in more than one domain — a shared-password service account roasted
+/// in a child domain and again in a second forest is two primitives on two
+/// DCs, and a bare `kerberoast_{username}` scored them as one. The domain is
+/// dropped only when the capture carries no realm at all, which keeps the
+/// realm-less fallback identical to the previous key.
 fn roast_exploit_token(hash_value: &str, username: &str, domain: &str) -> Option<String> {
     let user_lc = username.trim().to_lowercase();
     let dom_lc = domain.trim().to_lowercase();
     if hash_value.starts_with("$krb5tgs$") {
-        // Kerberoast: token-per-account so multiple SPN hashes don't
-        // collapse on a single entry.
         if user_lc.is_empty() {
             return None;
         }
-        Some(format!("kerberoast_{user_lc}"))
+        if dom_lc.is_empty() {
+            return Some(format!("kerberoast_{user_lc}"));
+        }
+        Some(format!("kerberoast_{dom_lc}_{user_lc}"))
     } else if hash_value.starts_with("$krb5asrep$") {
         // AS-REP roast: dreadgoad's objective is per-domain (any
         // preauth-disabled account demonstrates the primitive); token-
@@ -1123,6 +1763,361 @@ fn roast_exploit_token(hash_value: &str, username: &str, domain: &str) -> Option
     } else {
         None
     }
+}
+
+/// The realm a roast token is keyed on: lowercased, and resolved flat→FQDN
+/// when state knows the mapping.
+///
+/// `publish_hash` runs exactly this normalization on the `Hash` it stores, but
+/// it takes the hash by value and every caller captured `domain` beforehand —
+/// so the string reaching this module is the raw one the parser emitted. Now
+/// that the realm is part of the Kerberoast key, a `CHILD` capture and a
+/// `child.contoso.local` capture of the same account would otherwise mint two
+/// tokens for one primitive, replacing the undercount this fixes with an
+/// overcount. An unknown flat name keeps its own spelling rather than being
+/// guessed into a phantom realm.
+async fn roast_token_realm(state: &SharedState, domain: &str) -> String {
+    let lowered = domain.trim().to_lowercase();
+    if lowered.is_empty() {
+        return lowered;
+    }
+    let inner = state.read().await;
+    crate::orchestrator::state::canonicalize_domain_label(&lowered, &inner).unwrap_or(lowered)
+}
+
+/// Priority of the witness record minted by [`roast_credit_record`]. Above
+/// `ops loot`'s exploitable/finding threshold so the row lands in the
+/// informational table, and high enough that the exploitation ZSET — which
+/// pops lowest-score-first — never reaches it before `mark_exploited` runs.
+const ROAST_CREDIT_PRIORITY: i32 = 5;
+
+/// The vulnerability record that stands behind a roast exploit credit.
+///
+/// `mark_exploited` adds an id to `ares:op:{id}:exploited` whether or not a
+/// record exists for it, so a roast token used to be a scoreboard member with
+/// nothing behind it: it raised the headline exploited count, rendered in no
+/// table, and named no evidence. Publishing this record first is what makes the
+/// credit auditable — every phantom found in this system so far was found
+/// because it rendered somewhere and the evidence under it could be checked.
+///
+/// The record is a witness, not a work item. It describes a primitive that has
+/// already succeeded, which is why the caller marks it exploited immediately
+/// and why `exploitation::is_automation_owned_vuln` refuses to dispatch its
+/// `vuln_type`.
+fn roast_credit_record(
+    token: &str,
+    username: &str,
+    domain: &str,
+    hash_type: &str,
+    source: &str,
+) -> ares_core::models::VulnerabilityInfo {
+    let is_asrep = token.starts_with("asrep_roast");
+    let target = if is_asrep && !domain.trim().is_empty() {
+        domain.trim()
+    } else {
+        username.trim()
+    };
+    let mut details = std::collections::HashMap::new();
+    details.insert("account".to_string(), Value::from(username));
+    details.insert("domain".to_string(), Value::from(domain));
+    details.insert("hash_type".to_string(), Value::from(hash_type));
+    details.insert("captured_by".to_string(), Value::from(source));
+    ares_core::models::VulnerabilityInfo {
+        vuln_id: token.to_string(),
+        vuln_type: if is_asrep {
+            "asrep_roast"
+        } else {
+            "kerberoast"
+        }
+        .to_string(),
+        target: target.to_string(),
+        discovered_by: "roast_hash_capture".to_string(),
+        discovered_at: chrono::Utc::now(),
+        details,
+        recommended_agent: String::new(),
+        priority: ROAST_CREDIT_PRIORITY,
+    }
+}
+
+/// Everything a newly-published hash earns: its timeline event, the gMSA
+/// exploit token when the read was genuine, and AS-REP / Kerberoast primitive
+/// credit — the token, plus the [`roast_credit_record`] that makes it show up
+/// in a report rather than only in a Redis set.
+///
+/// Call this from **every** path that gets `Ok(true)` out of `publish_hash`.
+/// There are two — the parser path and the realtime discovery channel — and
+/// they drifted for the entire life of the corpus: the realtime channel did
+/// only part of this work, which is why `T1558.004` appears zero times in 92
+/// operations despite 145 AS-REP captures, and why roast primitive credit was
+/// missing on the channel roast hashes actually arrive over. Keeping the three
+/// steps in one function is what stops that recurring.
+///
+/// Credit is deliberately emitted at *capture* time, not crack time: a crack
+/// can fail on wordlist coverage or an AES etype, but the capture already
+/// proves the primitive.
+pub(crate) async fn credit_published_hash(
+    dispatcher: &Arc<Dispatcher>,
+    username: &str,
+    domain: &str,
+    hash_type: &str,
+    hash_value: &str,
+    source: &str,
+) {
+    create_hash_timeline_event(dispatcher, username, domain, hash_type, hash_value, source).await;
+
+    emit_gmsa_exploit_token_if_gmsa(&dispatcher.state, &dispatcher.queue, username, source).await;
+
+    let realm = roast_token_realm(&dispatcher.state, domain).await;
+
+    let Some(token) = roast_exploit_token(hash_value, username, &realm) else {
+        return;
+    };
+    if let Err(e) = dispatcher
+        .state
+        .publish_vulnerability(
+            &dispatcher.queue,
+            roast_credit_record(&token, username, &realm, hash_type, source),
+        )
+        .await
+    {
+        warn!(
+            err = %e,
+            vuln_id = %token,
+            "Failed to publish roast vulnerability record — credit will be an orphan"
+        );
+    }
+    if let Err(e) = dispatcher
+        .state
+        .mark_exploited(&dispatcher.queue, &token)
+        .await
+    {
+        warn!(
+            err = %e,
+            vuln_id = %token,
+            "Failed to mark roast hash as exploited"
+        );
+    } else {
+        info!(
+            vuln_id = %token,
+            account = %username,
+            domain = %realm,
+            "Kerberos roast hash captured — emitted exploit token"
+        );
+    }
+}
+
+/// True when `s` is a dotted-quad IPv4 literal (four all-digit segments).
+/// Used to reject a finding `target` that names the DC IP rather than the
+/// affected account.
+fn is_ipv4_like(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// True when `s` is a usable bare `sAMAccountName` — no realm/domain
+/// qualifier, no whitespace, not an IP address, not a machine account.
+/// Keeps finding-derived userlists from feeding garbage principals to the
+/// deterministic AS-REP roast.
+fn is_plausible_username(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() > 1
+        && !s.contains(char::is_whitespace)
+        && !s.ends_with('$')
+        && !s.contains('/')
+        && !s.contains('@')
+        && !s.contains('\\')
+        && !is_ipv4_like(s)
+}
+
+/// Split a principal token into `(sAMAccountName, optional realm)`, unwrapping
+/// UPN (`sam@realm.tld`) and `DOMAIN\sam` forms. The realm is only returned
+/// for UPN input — a NetBIOS `DOMAIN\` prefix is not a DNS realm, so the
+/// caller falls back to the task domain there.
+fn split_principal(raw: &str) -> (String, Option<String>) {
+    let raw = raw.trim();
+    if let Some((sam, realm)) = raw.split_once('@') {
+        if !sam.is_empty() && realm.contains('.') {
+            return (sam.to_string(), Some(realm.to_string()));
+        }
+    }
+    if let Some((_, sam)) = raw.rsplit_once('\\') {
+        return (sam.trim().to_string(), None);
+    }
+    (raw.to_string(), None)
+}
+
+/// Best-effort principal recovery from a finding's free-text description.
+/// Prefers unambiguous UPN (`sam@realm.tld`) / `DOMAIN\sam` tokens, then falls
+/// back to the token following a `user`/`account` keyword (e.g.
+/// "User alice has DoesNotRequirePreAuth"). Returns the raw token; the caller
+/// normalises it via [`split_principal`].
+fn username_from_finding_description(desc: &str) -> Option<String> {
+    let clean = |t: &str| {
+        t.trim_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '\'' | '"' | '(' | ')' | '`'))
+            .to_string()
+    };
+    let tokens: Vec<String> = desc
+        .split_whitespace()
+        .map(clean)
+        .filter(|t| !t.is_empty())
+        .collect();
+    for tok in &tokens {
+        if let Some((sam, realm)) = tok.split_once('@') {
+            if !sam.is_empty() && realm.contains('.') && is_plausible_username(sam) {
+                return Some(tok.clone());
+            }
+        }
+        if let Some((_, sam)) = tok.rsplit_once('\\') {
+            if is_plausible_username(sam) {
+                return Some(tok.clone());
+            }
+        }
+    }
+    for pair in tokens.windows(2) {
+        let kw = pair[0].to_lowercase();
+        if (kw == "user" || kw == "account") && is_plausible_username(&pair[1]) {
+            return Some(pair[1].clone());
+        }
+    }
+    None
+}
+
+/// Pull the raw principal token a `report_finding(vuln_type=asrep_roastable)`
+/// names, in priority order: a structured `details` account field, the finding
+/// `target` (where the recon prompts now place the sAMAccountName), then a
+/// principal parsed out of the description. Returns the raw token (possibly UPN
+/// or `DOMAIN\user`); [`split_principal`] normalises it.
+fn asrep_principal_candidate(vuln: &Value) -> Option<String> {
+    let details = vuln.get("details");
+    if let Some(d) = details {
+        for k in ["account_name", "username", "principal", "sam_account_name"] {
+            if let Some(s) = d.get(k).and_then(|v| v.as_str()) {
+                let s = s.trim();
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    if let Some(s) = vuln.get("target").and_then(|v| v.as_str()) {
+        let (sam, _) = split_principal(s);
+        if is_plausible_username(&sam) {
+            return Some(s.trim().to_string());
+        }
+    }
+    details
+        .and_then(|d| d.get("description"))
+        .and_then(|v| v.as_str())
+        .and_then(username_from_finding_description)
+}
+
+/// Recover AS-REP-roastable principals named in LLM `report_finding` findings
+/// as publishable [`User`] records. Pure — no Redis, no dispatcher.
+///
+/// The recon / cross-forest-enum prompts tell the agent to flag
+/// `DoesNotRequirePreAuth` accounts by calling `report_finding` with
+/// `vuln_type='asrep_roastable'`. Those findings route into `llm_findings`
+/// (never `discoveries`), so the named principal never reaches `state.users`
+/// and the already-wired deterministic `asrep_roast` — which reads its
+/// userlist from `state.users` — has nothing to roast. This recovers the
+/// principal so it can be published, mirroring the `ldap_extraction` recovery
+/// in 58a7d52 (a recon-only discovery path that never persisted its users).
+///
+/// Published with the low-trust `asrep_roastable_finding` source: it feeds
+/// `select_asrep_work` / `collect_known_users_for_domain` (which filter by
+/// domain, not source) without entering the verified loot roster — the roast
+/// itself is self-verifying, since a hallucinated account only draws
+/// `KDC_ERR_C_PRINCIPAL_UNKNOWN`.
+pub(crate) fn extract_asrep_roastable_users(payload: &Value, default_domain: &str) -> Vec<User> {
+    let Some(findings) = payload.get("llm_findings").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut users = Vec::new();
+    for finding in findings {
+        let Some(vulns) = finding.get("vulnerabilities").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for vuln in vulns {
+            let vuln_type = vuln.get("vuln_type").and_then(|v| v.as_str()).unwrap_or("");
+            if !vuln_type.eq_ignore_ascii_case("asrep_roastable") {
+                continue;
+            }
+            let Some(raw) = asrep_principal_candidate(vuln) else {
+                continue;
+            };
+            let (sam, upn_domain) = split_principal(&raw);
+            if !is_plausible_username(&sam) {
+                continue;
+            }
+            let domain = vuln
+                .get("details")
+                .and_then(|d| d.get("domain"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or(upn_domain)
+                .unwrap_or_else(|| default_domain.to_string());
+            users.push(User {
+                username: sam,
+                domain,
+                description:
+                    "DoesNotRequirePreAuth (AS-REP roastable) — recovered from report_finding"
+                        .to_string(),
+                is_admin: false,
+                source: "asrep_roastable_finding".to_string(),
+                member_of: Vec::new(),
+            });
+        }
+    }
+    users
+}
+
+/// Publish AS-REP-roastable principals recovered from `report_finding`
+/// findings so the deterministic `asrep_roast` automation targets them.
+///
+/// See [`extract_asrep_roastable_users`]. Publishing each principal into
+/// `state.users` re-arms `select_asrep_work` for its domain — the userlist
+/// transitions from `:empty` to `:users` and `publish_user` clears the
+/// per-domain AS-REP dedup — which dispatches a deterministic
+/// `GetNPUsers -usersfile <known_users>` against the DC. That is the
+/// load-bearing no-cred foothold into a SID-filtered foreign forest.
+async fn publish_asrep_roastable_findings(
+    payload: &Value,
+    dispatcher: &Arc<Dispatcher>,
+    default_domain: &str,
+) {
+    for user in extract_asrep_roastable_users(payload, default_domain) {
+        let username = user.username.clone();
+        let domain = user.domain.clone();
+        match dispatcher.state.publish_user(&dispatcher.queue, user).await {
+            Ok(true) => info!(
+                username = %username,
+                domain = %domain,
+                "Published AS-REP-roastable principal from report_finding — armed deterministic asrep_roast"
+            ),
+            Ok(false) => {}
+            Err(e) => warn!(err = %e, "Failed to publish AS-REP-roastable principal from finding"),
+        }
+    }
+}
+
+/// Returns true when an inter-realm referral ticket targeting `target_domain`
+/// cannot DCSync via DRSUAPI because the source forest's RID-519 ExtraSid is
+/// stripped from the referral PAC by the target's SID filtering.
+///
+/// Pure — extracted from `auto_chain_s4u_secretsdump` so the SID-filter guard
+/// can be unit-tested without a Dispatcher.
+fn is_dcsync_chain_blocked_by_sid_filter(state: &StateInner, target_domain: &str) -> bool {
+    let key = target_domain.to_lowercase();
+    state
+        .trusted_domains
+        .get(&key)
+        .map(|t| t.is_cross_forest() && t.sid_filtering)
+        .unwrap_or(false)
 }
 
 async fn auto_chain_s4u_secretsdump(
@@ -1158,7 +2153,6 @@ async fn auto_chain_s4u_secretsdump(
                 let after = &fname[at_pos + 1..];
                 // Extract hostname: CIFS_dc01@REALM.ccache → CIFS.dc01
                 let host_part = after.split('@').next().unwrap_or(after).replace('_', ".");
-                // Remove the service prefix (CIFS. → dc01)
                 if let Some(dot_pos) = host_part.find('.') {
                     let candidate = &host_part[dot_pos + 1..];
                     if !candidate.is_empty() {
@@ -1178,7 +2172,6 @@ async fn auto_chain_s4u_secretsdump(
     // Resolve target IP if it's a hostname
     let resolved_ip = {
         let state = dispatcher.state.read().await;
-        // Check if target_ip is actually an IP already
         if target_ip.parse::<std::net::Ipv4Addr>().is_ok() {
             target_ip.clone()
         } else {
@@ -1196,6 +2189,31 @@ async fn auto_chain_s4u_secretsdump(
         .filter(|d| !d.is_empty())
         .or_else(|| get_param("domain"))
         .unwrap_or("");
+
+    // Bug C: cross-realm referral tickets cannot DCSync a SID-filtered target.
+    // The ccache from `create_inter_realm_ticket` contains ldap/cifs service
+    // tickets whose PAC has been stripped of the source forest's RID-519
+    // ExtraSid by the target KDC's SID filtering. impacket's secretsdump via
+    // DRSUAPI needs a DA-bound principal in the target domain — the referral
+    // PAC is not — so the dump is unwinnable no matter how cleanly the ticket
+    // loads. The ticket is still useful for LDAP enum, certipy auth, etc.
+    // (handled by other automation), so we don't drop the ticket — we just
+    // skip the doomed DCSync chain.
+    if !domain.is_empty() {
+        let skip = {
+            let state = dispatcher.state.read().await;
+            is_dcsync_chain_blocked_by_sid_filter(&state, domain)
+        };
+        if skip {
+            info!(
+                task_id = %task_id,
+                target_domain = %domain,
+                ticket = %ticket_path,
+                "S4U auto-chain: skipping secretsdump — cross-realm referral PAC cannot DCSync a SID-filtered target (LDAP/ADCS paths still active)"
+            );
+            return;
+        }
+    }
 
     // Dispatch secretsdump with ticket (no password needed).
     // Must include username — secretsdump requires it even with -k -no-pass.
@@ -1237,7 +2255,7 @@ async fn auto_chain_s4u_secretsdump(
 /// Collects text from raw tool output fields ("tool_output", "output", "tool_outputs")
 /// and runs regex-based extraction on the combined text. Safety net that catches
 /// discoveries the per-tool parsers or LLM-reported structured data may have missed.
-async fn extract_from_raw_text(
+pub(crate) async fn extract_from_raw_text(
     payload: &Value,
     dispatcher: &Arc<Dispatcher>,
     default_domain: &str,
@@ -1263,6 +2281,7 @@ async fn extract_from_raw_text(
         for item in arr {
             if let Some(s) = item.as_str() {
                 tool_outputs.push(output_extraction::ToolOutputCtx {
+                    name: None,
                     arguments: None,
                     output: s,
                 });
@@ -1271,6 +2290,7 @@ async fn extract_from_raw_text(
                     continue;
                 };
                 tool_outputs.push(output_extraction::ToolOutputCtx {
+                    name: obj.get("name").and_then(|v| v.as_str()),
                     arguments: obj.get("arguments"),
                     output: s,
                 });
@@ -1318,36 +2338,35 @@ async fn extract_from_raw_text(
             cred.domain = corrected;
         }
         let is_cracked = cred.source.starts_with("cracked:");
-        let source = cred.source.clone();
         let username = cred.username.clone();
         let domain = cred.domain.clone();
         let password = cred.password.clone();
-        let is_admin = cred.is_admin;
-        match dispatcher
-            .state
-            .publish_credential(&dispatcher.queue, cred)
-            .await
-        {
-            Ok(true) => {
-                new_count += 1;
-                create_credential_timeline_event(dispatcher, &source, &username, &domain, is_admin)
-                    .await;
-                // When a cracked credential is published, update the corresponding
-                // hash's cracked_password field in state and Redis.
-                if is_cracked {
-                    let _ = dispatcher
-                        .state
-                        .update_hash_cracked_password(
-                            &dispatcher.queue,
-                            &username,
-                            &domain,
-                            &password,
-                        )
-                        .await;
-                }
+        match publish_credential_credited(dispatcher, cred).await {
+            Ok(true) => new_count += 1,
+            Ok(false) => {} // duplicate credential — the hash stamp below still runs
+            Err(e) => {
+                warn!(err = %e, "Failed to publish text-extracted credential");
+                continue;
             }
-            Ok(false) => {} // duplicate
-            Err(e) => warn!(err = %e, "Failed to publish text-extracted credential"),
+        }
+        // Stamp the matching raw-ticket hash as cracked whenever we recovered a
+        // cracked plaintext — even when the credential row itself was a duplicate.
+        // A kerberoast/AS-REP hash dedups by principal, so an account holds one
+        // ticket Hash row per op. When that account's password is already known
+        // from another source (GPP, cleartext, a prior crack of a different
+        // ticket, a spray hit), cracking the ticket re-derives the same plaintext
+        // and `publish_credential` dedups it (the key is domain+user+password,
+        // source-independent) → Ok(false). Without stamping on this path the
+        // ticket Hash stays at cracked_password=None, so `is_reportable_hash`
+        // surfaces the raw blob as an *uncracked* finding alongside the cracked
+        // Credential — double-counting the account on the external scoreboard and
+        // showing it as raw material in loot's Hashes view. Stamping here keeps
+        // the Credentials/Hashes views and the scoreboard consistent.
+        if is_cracked {
+            let _ = dispatcher
+                .state
+                .update_hash_cracked_password(&dispatcher.queue, &username, &domain, &password)
+                .await;
         }
     }
 
@@ -1427,10 +2446,24 @@ async fn extract_from_raw_text(
     // immediate high-priority secretsdump.
     // Check each tool output independently (joining is safe here — Pwn3d! is a
     // standalone marker with no stateful context to leak).
+    //
+    // Gated on stdout provenance like every sibling extractor in this pass. An
+    // LLM-directed shell echoes a command the model chose, so `echo "[+]
+    // CONTOSO\admin:Pw (Pwn3d!)"` would otherwise flag a credential as local
+    // admin and queue a privileged secretsdump off nothing but the model's own
+    // output. Only netexec-family tools emit this marker for real.
     for ctx in &tool_outputs {
-        if ctx.output.contains("Pwn3d!") {
-            detect_and_upgrade_admin_credentials(ctx.output, dispatcher).await;
+        if !ctx.output.contains("Pwn3d!") {
+            continue;
         }
+        if ctx.is_llm_directed_shell() {
+            warn!(
+                tool = ?ctx.name,
+                "Ignoring Pwn3d! marker from an LLM-directed shell — its stdout is a command the model chose"
+            );
+            continue;
+        }
+        detect_and_upgrade_admin_credentials(ctx.output, dispatcher).await;
     }
 
     if new_count > 0 {
@@ -1442,12 +2475,48 @@ async fn extract_from_raw_text(
 }
 
 /// Extract credentials, hashes, hosts, vulns, and shares from a result payload.
-async fn extract_discoveries(
+/// Persist any account-lockout threshold the `password_policy` parser found.
+///
+/// This is the ground truth the spray budget is supposed to be computed from.
+/// It was parsed into `discoveries["password_policies"]` and never read, so the
+/// only `lockout_threshold` reaching the budget check was the one the agent
+/// typed into the tool call.
+async fn record_password_policies(payload: &Value, dispatcher: &Arc<Dispatcher>) {
+    let Some(policies) = payload.get("password_policies").and_then(|v| v.as_array()) else {
+        return;
+    };
+
+    for policy in policies {
+        let Some(domain) = policy.get("domain").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let threshold = policy.get("lockout_threshold").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+        });
+        let Some(threshold) = threshold else { continue };
+
+        dispatcher
+            .state
+            .write()
+            .await
+            .record_password_policy(domain, threshold);
+        info!(
+            domain = %domain,
+            lockout_threshold = threshold,
+            "Recorded observed account-lockout policy"
+        );
+    }
+}
+
+pub(crate) async fn extract_discoveries(
     payload: &Value,
     dispatcher: &Arc<Dispatcher>,
     task_target_ip: Option<&str>,
     share_auth_label: Option<&str>,
 ) -> Result<()> {
+    record_password_policies(payload, dispatcher).await;
+
     let mut parsed = parse_discoveries(payload);
 
     // Resolve credential lineage (parent_id / attack_step) before publishing.
@@ -1500,38 +2569,29 @@ async fn extract_discoveries(
     }
 
     for cred in parsed.credentials {
-        // Capture fields before move for timeline event
-        let source = cred.source.clone();
         let username = cred.username.clone();
         let domain = cred.domain.clone();
         let password = cred.password.clone();
-        let is_admin = cred.is_admin;
-        let is_cracked = source.starts_with("cracked");
-        match dispatcher
-            .state
-            .publish_credential(&dispatcher.queue, cred)
-            .await
-        {
-            Ok(true) => {
-                debug!("Published new credential from result");
-                create_credential_timeline_event(dispatcher, &source, &username, &domain, is_admin)
-                    .await;
-                // When a cracked credential is published, update the corresponding
-                // hash's cracked_password field in state and Redis.
-                if is_cracked {
-                    let _ = dispatcher
-                        .state
-                        .update_hash_cracked_password(
-                            &dispatcher.queue,
-                            &username,
-                            &domain,
-                            &password,
-                        )
-                        .await;
-                }
+        let is_cracked = cred.source.starts_with("cracked");
+        match publish_credential_credited(dispatcher, cred).await {
+            Ok(true) => debug!("Published new credential from result"),
+            Ok(false) => {} // duplicate credential — the hash stamp below still runs
+            Err(e) => {
+                warn!(err = %e, "Failed to publish credential");
+                continue;
             }
-            Ok(false) => {} // duplicate
-            Err(e) => warn!(err = %e, "Failed to publish credential"),
+        }
+        // Stamp the matching raw-ticket hash as cracked even when the credential
+        // row was a duplicate — see the full rationale in `extract_from_raw_text`.
+        // A kerberoast/AS-REP crack of an account whose password is already known
+        // dedups the credential (Ok(false)); without this it leaves the ticket at
+        // cracked_password=None and double-reports alongside the cracked Credential
+        // (see `is_reportable_hash`).
+        if is_cracked {
+            let _ = dispatcher
+                .state
+                .update_hash_cracked_password(&dispatcher.queue, &username, &domain, &password)
+                .await;
         }
     }
 
@@ -1553,7 +2613,7 @@ async fn extract_discoveries(
         match dispatcher.state.publish_hash(&dispatcher.queue, hash).await {
             Ok(true) => {
                 debug!("Published new hash from result");
-                create_hash_timeline_event(
+                credit_published_hash(
                     dispatcher,
                     &username,
                     &domain,
@@ -1562,38 +2622,6 @@ async fn extract_discoveries(
                     &source,
                 )
                 .await;
-
-                emit_gmsa_exploit_token_if_gmsa(&dispatcher.state, &dispatcher.queue, &username)
-                    .await;
-
-                // AS-REP / Kerberoast primitive credit on hash capture.
-                // dreadgoad's scoreboard otherwise infers `asrep_roast` /
-                // `kerberoast` from the cracked-credential hint, which only
-                // fires AFTER the hash crack succeeds. The crack may fail
-                // (insufficient wordlist coverage, AES instead of RC4) yet
-                // the capture itself already proves the primitive. Emit the
-                // token at capture time so credit is independent of crack
-                // outcome.
-                if let Some(token) = roast_exploit_token(&hash_value, &username, &domain) {
-                    if let Err(e) = dispatcher
-                        .state
-                        .mark_exploited(&dispatcher.queue, &token)
-                        .await
-                    {
-                        warn!(
-                            err = %e,
-                            vuln_id = %token,
-                            "Failed to mark roast hash as exploited"
-                        );
-                    } else {
-                        info!(
-                            vuln_id = %token,
-                            account = %username,
-                            domain = %domain,
-                            "Kerberos roast hash captured — emitted exploit token"
-                        );
-                    }
-                }
             }
             Ok(false) => {}
             Err(e) => warn!(err = %e, "Failed to publish hash"),
@@ -1634,7 +2662,6 @@ async fn extract_discoveries(
         }
     }
 
-    // Extract trusted_domains from parser output
     if let Some(trusts) = payload.get("trusted_domains").and_then(|v| v.as_array()) {
         for trust_val in trusts {
             if let Ok(trust) =

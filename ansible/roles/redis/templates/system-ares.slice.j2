@@ -1,0 +1,8 @@
+[Unit]
+Description=Ares system slice (orchestrator + workers)
+Before=slices.target
+
+[Slice]
+MemoryMax={{ redis_ares_slice_memory_max }}
+MemoryHigh={{ redis_ares_slice_memory_high }}
+TasksMax={{ redis_ares_slice_tasks_max }}

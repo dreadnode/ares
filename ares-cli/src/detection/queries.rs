@@ -19,7 +19,6 @@ pub(crate) fn build_priority_queries(
 ) -> Vec<PlaybookQuery> {
     let mut queries = Vec::new();
 
-    // 1. Domain Admin detection (highest priority if achieved)
     if state.has_domain_admin {
         queries.push(PlaybookQuery {
             technique_id: "T1078.002".into(),
@@ -35,7 +34,6 @@ pub(crate) fn build_priority_queries(
         });
     }
 
-    // 2. Credential dumping detection
     if !state.all_hashes.is_empty() {
         let usernames: Vec<&str> = state
             .all_hashes
@@ -65,7 +63,6 @@ pub(crate) fn build_priority_queries(
         });
     }
 
-    // 3. Lateral movement detection
     if state.all_hosts.len() > 1 {
         let host_ips: Vec<&str> = state
             .all_hosts
@@ -89,7 +86,6 @@ pub(crate) fn build_priority_queries(
         });
     }
 
-    // 4. Kerberos attack detection
     if techniques.iter().any(|t| t.starts_with("T1558")) {
         queries.push(PlaybookQuery {
             technique_id: "T1558".into(),
@@ -106,7 +102,6 @@ pub(crate) fn build_priority_queries(
         });
     }
 
-    // 5. Network discovery detection
     queries.push(PlaybookQuery {
         technique_id: "T1046".into(),
         technique_name: "Network Service Discovery".into(),
@@ -124,7 +119,6 @@ pub(crate) fn build_priority_queries(
         windows_event_ids: vec!["5156".into()],
     });
 
-    // 6. Compromised account activity (top 3)
     for cred in state.all_credentials.iter().take(3) {
         let account = if cred.domain.is_empty() {
             cred.username.clone()
@@ -147,7 +141,6 @@ pub(crate) fn build_priority_queries(
         });
     }
 
-    // Sort by priority
     let priority_order = |p: &str| -> u8 {
         match p {
             "critical" => 0,

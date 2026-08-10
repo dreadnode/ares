@@ -4,8 +4,7 @@
 use regex::Regex;
 use serde_json::{json, Value};
 use std::sync::LazyLock;
-
-// ── Lsassy ──────────────────────────────────────────────────────────────────
+use tracing::{debug, warn};
 
 /// Real ANSI escape sequences (e.g. `\x1b[1;33m`).
 static ANSI_ESC_RE: LazyLock<Regex> =
@@ -88,6 +87,10 @@ pub fn parse_lsassy(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) {
         }
     }
 
+    if hashes.is_empty() && creds.is_empty() {
+        report_empty_lsassy_dump(output, params);
+    }
+
     (hashes, creds)
 }
 
@@ -107,6 +110,168 @@ fn is_lsassy_noise(line: &str) -> bool {
         // can't carry a DOMAIN\user pair — skip them up-front.
         || ((line.starts_with('[') || line.starts_with('('))
             && !line.contains('\\'))
+}
+
+static LSASSY_PPL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(runasppl|pplkiller|ppldump|mimidrv|ppl)\b|lsa protection|protected process|protectedprocesslight")
+        .expect("lsassy ppl regex")
+});
+
+const LSASSY_PPL_REMEDIATION: &str =
+    "LSA protection (RunAsPPL) refuses the userland LSASS read and no lsassy dump method \
+     bypasses it — take this host's secrets via secretsdump against its machine account, or \
+     DCSync once a replication-capable principal is held. Do not re-dispatch lsassy here.";
+
+const LSASSY_FAILURE_CASES: &[(&[&str], &str, &str)] = &[
+    (
+        &["defender", "antivirus", "quarantin", "malware"],
+        "av_blocked",
+        "An endpoint control removed or blocked the dump — change dump method or pick a \
+         technique that never touches LSASS.",
+    ),
+    (
+        &[
+            "authentication error",
+            "authentication failed",
+            "status_logon_failure",
+            "status_account_restriction",
+            "status_password_expired",
+            "status_password_must_change",
+            "status_trusted_relationship_failure",
+            "kdc_err",
+        ],
+        "auth_failed",
+        "The credential did not authenticate to this host — re-check account, secret and realm \
+         before re-running.",
+    ),
+    (
+        &[
+            "not enough privileges",
+            "insufficient privileges",
+            "you need to be admin",
+            "is not an admin",
+            "requires admin",
+        ],
+        "no_admin",
+        "lsassy needs local administrator rights on the target — obtain an admin principal for \
+         this host first.",
+    ),
+    (
+        &[
+            "access is denied",
+            "access denied",
+            "access_denied",
+            "0x00000005",
+            "requires elevation",
+            "permission denied",
+        ],
+        "access_denied",
+        "The LSASS read was refused. If this principal is already local admin here, LSA \
+         protection (RunAsPPL) is the usual cause — pivot to secretsdump against the machine \
+         account rather than re-running lsassy.",
+    ),
+    (
+        &[
+            "status_bad_network_name",
+            "status_object_name_not_found",
+            "connection refused",
+            "unable to connect",
+            "connection reset",
+            "network is unreachable",
+            "no route to host",
+        ],
+        "unreachable",
+        "The host did not accept the SMB connection — confirm reachability and that 445 is open \
+         before re-running.",
+    ),
+    (
+        &["timed out"],
+        "timeout",
+        "The dump did not finish inside the tool timeout — retry at most once, then pivot.",
+    ),
+    (
+        &[
+            "unable to dump",
+            "error while dumping",
+            "could not dump",
+            "dump failed",
+            "dumping lsass failed",
+            "no dump file",
+            "lsass was not dumped",
+        ],
+        "dump_failed",
+        "lsassy reached the host and produced no dump — try another dump method, and treat LSA \
+         protection (RunAsPPL) as the leading hypothesis when the principal is already admin.",
+    ),
+];
+
+struct LsassyFailure {
+    reason: &'static str,
+    detail: String,
+    remediation: &'static str,
+}
+
+fn classify_lsassy_failure(output: &str) -> Option<LsassyFailure> {
+    let mut generic: Option<LsassyFailure> = None;
+
+    for raw in output.lines() {
+        let line = strip_ansi(raw.trim());
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+
+        if LSASSY_PPL_RE.is_match(&lower) {
+            return Some(LsassyFailure {
+                reason: "lsa_protection",
+                detail: line.to_string(),
+                remediation: LSASSY_PPL_REMEDIATION,
+            });
+        }
+
+        if generic.is_none() {
+            if let Some(&(_, reason, remediation)) = LSASSY_FAILURE_CASES
+                .iter()
+                .find(|(markers, _, _)| markers.iter().any(|m| lower.contains(m)))
+            {
+                generic = Some(LsassyFailure {
+                    reason,
+                    detail: line.to_string(),
+                    remediation,
+                });
+            }
+        }
+    }
+
+    generic
+}
+
+fn report_empty_lsassy_dump(output: &str, params: &Value) {
+    let host = params
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let method = params
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default");
+
+    match classify_lsassy_failure(output) {
+        Some(failure) => warn!(
+            host = %host,
+            method = %method,
+            reason = failure.reason,
+            detail = %failure.detail,
+            remediation = failure.remediation,
+            "lsassy produced no credentials and reported a failure"
+        ),
+        None => debug!(
+            host = %host,
+            method = %method,
+            "lsassy produced no credentials and reported no failure line"
+        ),
+    }
 }
 
 fn parse_lsassy_line(line: &str) -> Option<(String, String, String)> {
@@ -200,7 +365,7 @@ fn looks_like_ntlm_hash(s: &str) -> bool {
     false
 }
 
-// ── Password spray / username-as-password ───────────────────────────────────
+// Password spray / username-as-password
 
 /// Parse netexec password spray output for successful authentications.
 ///
@@ -294,15 +459,14 @@ pub fn parse_spray_success(output: &str, params: &Value) -> Vec<Value> {
     creds
 }
 
-// ── NTDS.DIT extract (same format as secretsdump) ───────────────────────────
+// NTDS.DIT extract (same format as secretsdump)
 
 /// Parse NTDS.DIT extraction output — identical format to secretsdump.
 pub fn parse_ntds_dit(output: &str, params: &Value) -> (Vec<Value>, Vec<Value>) {
-    // NTDS.DIT output uses the same format as secretsdump
     super::parse_secretsdump(output, params)
 }
 
-// ── LDAP description password search ────────────────────────────────────────
+// LDAP description password search
 
 /// Regex to find passwords embedded in LDAP description fields.
 /// Common patterns: "Password: xxx", "pwd=xxx", "pass: xxx"
@@ -342,7 +506,6 @@ pub fn parse_ldap_descriptions(output: &str, params: &Value) -> Vec<Value> {
                 .trim_end_matches(')')
                 .to_string();
 
-            // Try to extract username from the line
             // netexec format: "SMB ... DC01  username  Description with Password: xxx"
             let username = extract_username_from_description_line(line);
             if let Some(username) = username {
@@ -451,7 +614,187 @@ fn extract_username_from_description_line(line: &str) -> Option<String> {
     None
 }
 
-// ── adidnsdump ──────────────────────────────────────────────────────────────
+// LAPS (netexec -M laps)
+
+/// Parse netexec `-M laps` output for local Administrator passwords.
+///
+/// netexec frames each line as `<PROTO> <IP> <PORT> <HOST> <payload>`; the
+/// payload for a successful LAPS read is
+/// `Computer:<hostname>  Password:<plaintext>`. Older nxc builds emit the same
+/// pair separated by whitespace runs of variable width. We fold both shapes
+/// into a `credentials[]` entry keyed to `Administrator@<hostname>` — the
+/// LAPS-managed principal is always the built-in local Administrator.
+/// Parse a `netexec_auth_check` probe result.
+///
+/// netexec marks a successful bind with `[+] DOMAIN\user:secret` and a failure
+/// with `[-] ... STATUS_LOGON_FAILURE`. Only a success yields a discovery, and
+/// the emitted hash is bound to the **probed** domain — that rebinding is the
+/// whole result, since it records that the principal authenticates in a forest
+/// its hash did not come from.
+pub fn parse_netexec_auth(output: &str, params: &Value) -> Vec<Value> {
+    let username = params
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    let hash = params.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+
+    if username.is_empty() || domain.is_empty() || hash.is_empty() {
+        return Vec::new();
+    }
+
+    let authenticated = output.lines().any(|line| {
+        let l = line.trim();
+        l.contains("[+]") && l.contains('\\') && !l.contains("STATUS_")
+    });
+    if !authenticated {
+        return Vec::new();
+    }
+
+    vec![json!({
+        "username": username,
+        "hash_value": hash,
+        "hash_type": "NTLM",
+        "domain": domain,
+        "source": "netexec_auth",
+    })]
+}
+
+pub fn parse_laps(output: &str, params: &Value) -> Vec<Value> {
+    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    let mut creds = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((host, password)) = extract_laps_pair(line) else {
+            continue;
+        };
+        let key = format!("{}:{}", host.to_lowercase(), password);
+        if !seen.insert(key) {
+            continue;
+        }
+        let host_slug = host.replace(['.', '$'], "_");
+        creds.push(json!({
+            "id": format!("laps_admin_{host_slug}"),
+            "username": "Administrator",
+            "password": password,
+            "domain": domain,
+            "source": "laps_dump",
+            "source_host": host,
+            "is_admin": true,
+        }));
+    }
+
+    creds
+}
+
+fn extract_laps_pair(line: &str) -> Option<(String, String)> {
+    let lower = line.to_ascii_lowercase();
+    let c_idx = lower.find("computer:")?;
+    let after_c = &line[c_idx + "computer:".len()..];
+    let host = after_c
+        .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+        .find(|s| !s.is_empty())?;
+    let p_rel = lower[c_idx..].find("password:")?;
+    let after_p = &line[c_idx + p_rel + "password:".len()..];
+    let password = after_p.split_whitespace().next()?;
+    if host.is_empty() || password.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), password.to_string()))
+}
+
+/// Empty-NT sentinel — a gMSA row carrying it read nothing usable.
+const EMPTY_NT_HASH: &str = "31d6cfe0d16ae931b73c59d7e0c089c0";
+
+/// Blank LM half, used when a tool prints only the NT hash.
+const BLANK_LM_HASH: &str = "aad3b435b51404eeaad3b435b51404ee";
+
+/// Parse a gMSA managed-password read into NTLM hash discoveries.
+///
+/// Two producing tools, two shapes, one marker in common — an `NTLM:` label
+/// followed by the hash:
+///
+/// ```text
+/// GMSA  192.168.58.10  389  DC01  Account: svc_gmsa$   NTLM: aad3b4...:31d6...
+/// msDS-ManagedPassword.NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef...
+/// ```
+///
+/// netexec names the account inline; bloodyAD does not, so the account falls
+/// back to the `gmsa_account` dispatch parameter. `source` is the calling tool
+/// name, which is what `emit_gmsa_exploit_token_if_gmsa` gates the exploit
+/// credit on — a managed-password read must be distinguishable from the same
+/// account's hash arriving as DCSync loot.
+pub fn parse_gmsa(output: &str, params: &Value, tool_name: &str) -> Vec<Value> {
+    let domain = params.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    let fallback_account = params
+        .get("gmsa_account")
+        .or_else(|| params.get("target"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let mut hashes = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in output.lines() {
+        let Some(hash_value) = extract_gmsa_ntlm(line) else {
+            continue;
+        };
+        let account = extract_gmsa_account(line).unwrap_or_else(|| fallback_account.to_string());
+        if account.is_empty() {
+            continue;
+        }
+        if !seen.insert(account.to_lowercase()) {
+            continue;
+        }
+        hashes.push(json!({
+            "username": account,
+            "domain": domain,
+            "hash_value": hash_value,
+            "hash_type": "ntlm",
+            "source": tool_name,
+        }));
+    }
+
+    hashes
+}
+
+/// Pull the `lm:nt` pair out of a line carrying an `NTLM:` label. Bare NT
+/// hashes are widened with the blank LM half so the value matches the
+/// `lm:nt` shape every other hash producer emits.
+fn extract_gmsa_ntlm(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let idx = lower.find("ntlm:")?;
+    let raw = line[idx + "ntlm:".len()..].split_whitespace().next()?;
+    let (lm, nt) = match raw.split_once(':') {
+        Some((l, n)) => (l, n),
+        None => (BLANK_LM_HASH, raw),
+    };
+    if !is_hex32(lm) || !is_hex32(nt) || nt.eq_ignore_ascii_case(EMPTY_NT_HASH) {
+        return None;
+    }
+    Some(format!("{}:{}", lm.to_lowercase(), nt.to_lowercase()))
+}
+
+/// Pull the account name out of netexec's `Account: <sam>` label. Absent on
+/// bloodyAD output, where the caller supplies it from dispatch parameters.
+fn extract_gmsa_account(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let idx = lower.find("account:")?;
+    let name = line[idx + "account:".len()..].split_whitespace().next()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+fn is_hex32(s: &str) -> bool {
+    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
 
 /// Parse adidnsdump output for DNS records that map to host IPs.
 ///
@@ -487,8 +830,6 @@ pub fn parse_adidnsdump(output: &str) -> Vec<Value> {
 
     hosts
 }
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -530,6 +871,84 @@ CONTOSO\\alice  (null)
         let (hashes, creds) = parse_lsassy(output, &params);
         assert!(hashes.is_empty());
         assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn lsassy_access_denied_is_classified_not_discarded() {
+        let output = "\
+[+] 192.168.58.30 Authentication successful
+[!] 192.168.58.30 Unable to dump lsass: STATUS_ACCESS_DENIED";
+        let failure = classify_lsassy_failure(output).expect("failure reason must survive");
+        assert_eq!(failure.reason, "access_denied");
+        assert!(failure.detail.contains("STATUS_ACCESS_DENIED"));
+        assert!(failure.remediation.contains("RunAsPPL"));
+    }
+
+    #[test]
+    fn lsassy_ppl_line_classifies_as_lsa_protection() {
+        let output = "[!] 192.168.58.30 lsass.exe is a protected process (RunAsPPL enabled)";
+        let failure = classify_lsassy_failure(output).expect("PPL refusal must be classified");
+        assert_eq!(failure.reason, "lsa_protection");
+        assert!(failure.remediation.contains("secretsdump"));
+    }
+
+    #[test]
+    fn lsassy_lsa_protection_outranks_a_generic_dump_failure() {
+        let output = "\
+[!] 192.168.58.30 Unable to dump lsass
+[!] 192.168.58.30 LSA protection is enabled on the host";
+        let failure = classify_lsassy_failure(output).expect("must classify");
+        assert_eq!(failure.reason, "lsa_protection");
+    }
+
+    #[test]
+    fn lsassy_auth_failure_is_classified_despite_the_noise_filter() {
+        let output = "[!] 192.168.58.30 Authentication error: STATUS_LOGON_FAILURE";
+        let params = json!({"domain": "contoso.local"});
+        let (hashes, creds) = parse_lsassy(output, &params);
+        assert!(hashes.is_empty());
+        assert!(creds.is_empty());
+        let failure = classify_lsassy_failure(output).expect("must classify");
+        assert_eq!(failure.reason, "auth_failed");
+    }
+
+    #[test]
+    fn lsassy_clean_empty_dump_reports_no_failure() {
+        let output = "\
+[+] 192.168.58.30 Authentication successful
+[+] 192.168.58.30 Lsass dumped in C:\\Windows\\Temp\\dump.dmp (12 MB)
+[+] 192.168.58.30 Lsass dump deleted";
+        assert!(
+            classify_lsassy_failure(output).is_none(),
+            "a clean empty dump must stay distinguishable from a refusal"
+        );
+    }
+
+    #[test]
+    fn lsassy_failure_classification_survives_ansi_decoration() {
+        let output = "\x1b[1;31m[!] 192.168.58.30 Unable to dump lsass: Access is denied\x1b[0m";
+        let failure = classify_lsassy_failure(output).expect("ANSI must not hide the reason");
+        assert_eq!(failure.reason, "access_denied");
+        assert!(!failure.detail.contains('\x1b'));
+    }
+
+    #[test]
+    fn lsassy_dump_failure_falls_back_to_the_generic_reason() {
+        let output = "[!] 192.168.58.30 Unable to dump lsass (all methods failed)";
+        let failure = classify_lsassy_failure(output).expect("must classify");
+        assert_eq!(failure.reason, "dump_failed");
+        assert!(failure.remediation.contains("RunAsPPL"));
+    }
+
+    #[test]
+    fn lsassy_successful_credential_line_is_not_read_as_a_failure() {
+        let output = "\
+[+] 192.168.58.30 Authentication successful
+CONTOSO\\alice  P@ssw0rd!";
+        let params = json!({"domain": "contoso.local"});
+        let (_, creds) = parse_lsassy(output, &params);
+        assert_eq!(creds.len(), 1);
+        assert!(classify_lsassy_failure(output).is_none());
     }
 
     #[test]
@@ -626,6 +1045,43 @@ sAMAccountName: sam.wilson";
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0]["username"], "sam.wilson");
         assert_eq!(creds[0]["password"], "Summer2025");
+    }
+
+    #[test]
+    fn laps_extracts_admin_password() {
+        let output = "\
+LDAP  192.168.58.10  389  DC01  [*] Getting LAPS Passwords
+LDAP  192.168.58.10  389  DC01  Computer:SRV01                    Password:Summer2026!Local
+LDAP  192.168.58.10  389  DC01  Computer:WS02                     Password:Autumn2026?Local";
+        let params = json!({"domain": "contoso.local"});
+        let creds = parse_laps(output, &params);
+        assert_eq!(creds.len(), 2);
+        assert_eq!(creds[0]["username"], "Administrator");
+        assert_eq!(creds[0]["password"], "Summer2026!Local");
+        assert_eq!(creds[0]["source_host"], "SRV01");
+        assert_eq!(creds[0]["domain"], "contoso.local");
+        assert_eq!(creds[0]["is_admin"], true);
+        assert_eq!(creds[0]["source"], "laps_dump");
+        assert_eq!(creds[1]["source_host"], "WS02");
+    }
+
+    #[test]
+    fn laps_dedups_duplicate_rows() {
+        let output = "\
+Computer:SRV01  Password:SamePw
+Computer:SRV01  Password:SamePw";
+        let params = json!({});
+        assert_eq!(parse_laps(output, &params).len(), 1);
+    }
+
+    #[test]
+    fn laps_ignores_lines_without_both_fields() {
+        let output = "\
+[*] Getting LAPS Passwords
+Computer:SRV01  (no password read)
+Password:orphan";
+        let params = json!({});
+        assert!(parse_laps(output, &params).is_empty());
     }
 
     #[test]
@@ -769,5 +1225,86 @@ CONTOSO\\real_user RealPassword123";
         assert_eq!(hashes.len(), 1);
         assert!(creds.is_empty());
         assert_eq!(hashes[0]["hash_value"], "31d6cfe0d16ae931b73c59d7e0c089c0");
+    }
+
+    #[test]
+    fn gmsa_netexec_module_row_yields_hash_with_account_name() {
+        let output = "\
+LDAP  192.168.58.10  389  DC01  [*] Getting GMSA Passwords
+GMSA  192.168.58.10  389  DC01  Account: svc_gmsa$           NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        let params = json!({"domain": "contoso.local"});
+        let hashes = parse_gmsa(output, &params, "gmsa_dump_passwords");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "svc_gmsa$");
+        assert_eq!(hashes[0]["domain"], "contoso.local");
+        assert_eq!(
+            hashes[0]["hash_value"],
+            "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890"
+        );
+        assert_eq!(hashes[0]["hash_type"], "ntlm");
+        assert_eq!(hashes[0]["source"], "gmsa_dump_passwords");
+    }
+
+    #[test]
+    fn gmsa_bloodyad_row_takes_account_from_params() {
+        let output = "\
+distinguishedName: CN=svc_gmsa,CN=Managed Service Accounts,DC=contoso,DC=local
+msDS-ManagedPassword.NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        let params = json!({"domain": "contoso.local", "gmsa_account": "svc_gmsa$"});
+        let hashes = parse_gmsa(output, &params, "gmsa_read_password_bloodyad");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0]["username"], "svc_gmsa$");
+        assert_eq!(hashes[0]["source"], "gmsa_read_password_bloodyad");
+    }
+
+    #[test]
+    fn gmsa_bare_nt_hash_is_widened_with_blank_lm_half() {
+        let output = "Account: svc_gmsa$  NTLM: abcdef1234567890abcdef1234567890";
+        let hashes = parse_gmsa(
+            output,
+            &json!({"domain": "contoso.local"}),
+            "gmsa_dump_passwords",
+        );
+        assert_eq!(
+            hashes[0]["hash_value"],
+            "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890"
+        );
+    }
+
+    #[test]
+    fn gmsa_rejects_empty_nt_hash() {
+        let output = "Account: svc_gmsa$  NTLM: aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0";
+        assert!(parse_gmsa(output, &json!({}), "gmsa_dump_passwords").is_empty());
+    }
+
+    #[test]
+    fn gmsa_rejects_non_hex_and_unlabelled_lines() {
+        let output = "\
+[*] Getting GMSA Passwords
+Account: svc_gmsa$  NTLM: not-a-hash
+svc_gmsa$ aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        assert!(parse_gmsa(output, &json!({}), "gmsa_dump_passwords").is_empty());
+    }
+
+    #[test]
+    fn gmsa_without_account_name_or_param_is_dropped() {
+        let output = "msDS-ManagedPassword.NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        assert!(parse_gmsa(
+            output,
+            &json!({"domain": "contoso.local"}),
+            "gmsa_read_password_bloodyad"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn gmsa_dedupes_repeated_account_rows() {
+        let output = "\
+Account: svc_gmsa$  NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890
+Account: SVC_GMSA$  NTLM: aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890";
+        assert_eq!(
+            parse_gmsa(output, &json!({}), "gmsa_dump_passwords").len(),
+            1
+        );
     }
 }

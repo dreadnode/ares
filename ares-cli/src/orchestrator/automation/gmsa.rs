@@ -13,6 +13,7 @@ use serde_json::json;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
+use crate::orchestrator::acl_graph::is_usable_hash;
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
 
@@ -101,6 +102,10 @@ pub(crate) struct GmsaWork {
     pub domain: String,
     pub dc_ip: String,
     pub credential: ares_core::models::Credential,
+    /// NT hash for the reader when it's a machine account known only by hash
+    /// (e.g. `HOST$`, the gMSA's sole authorized reader from a member-server
+    /// secretsdump). `None` when the reader has a plaintext password.
+    pub reader_hash: Option<String>,
 }
 
 /// Build the gMSA-account dedup key (`{domain}:{username}` lowercased).
@@ -157,6 +162,7 @@ pub(crate) fn select_gmsa_work(state: &StateInner) -> Vec<GmsaWork> {
             domain: user.domain.clone(),
             dc_ip,
             credential: cred,
+            reader_hash: None,
         });
     }
 
@@ -197,22 +203,53 @@ pub(crate) fn select_gmsa_work(state: &StateInner) -> Vec<GmsaWork> {
             continue;
         }
 
-        let cred = reader
-            .and_then(|r| {
-                state.credentials.iter().find(|c| {
-                    c.username.to_lowercase() == r.to_lowercase()
-                        && (domain.is_empty() || c.domain.to_lowercase() == domain.to_lowercase())
-                })
+        // Reader resolution, most-specific first:
+        //  1. the named reader as a plaintext credential;
+        //  2. the named reader as a hash-only principal — typically a machine
+        //     account (`HOST$`) that is the gMSA's *sole* authorized reader,
+        //     recovered as an NT hash from a member-server secretsdump. Only
+        //     this principal can read the managed password, so it must win over
+        //     any generic same-domain fallback;
+        //  3. any usable same-domain credential (last resort).
+        let named_cred = reader.and_then(|r| {
+            state.credentials.iter().find(|c| {
+                c.username.to_lowercase() == r.to_lowercase()
+                    && (domain.is_empty() || c.domain.to_lowercase() == domain.to_lowercase())
             })
-            .or_else(|| {
-                state.credentials.iter().find(|c| {
-                    !domain.is_empty() && c.domain.to_lowercase() == domain.to_lowercase()
-                })
-            });
+        });
+        let named_hash = reader.and_then(|r| {
+            state.hashes.iter().find(|h| {
+                h.username.eq_ignore_ascii_case(r)
+                    && is_usable_hash(h)
+                    && (domain.is_empty() || h.domain.to_lowercase() == domain.to_lowercase())
+            })
+        });
 
-        let cred = match cred {
-            Some(c) => c.clone(),
-            None => continue,
+        let (cred, reader_hash) = if let Some(c) = named_cred {
+            (c.clone(), None)
+        } else if let Some(h) = named_hash {
+            (
+                ares_core::models::Credential {
+                    id: String::new(),
+                    username: h.username.clone(),
+                    password: String::new(),
+                    domain: h.domain.clone(),
+                    source: "secretsdump".to_string(),
+                    discovered_at: None,
+                    is_admin: false,
+                    parent_id: None,
+                    attack_step: 0,
+                },
+                Some(h.hash_value.clone()),
+            )
+        } else if let Some(c) = state
+            .credentials
+            .iter()
+            .find(|c| !domain.is_empty() && c.domain.to_lowercase() == domain.to_lowercase())
+        {
+            (c.clone(), None)
+        } else {
+            continue;
         };
 
         let Some(dc_ip) = state
@@ -229,6 +266,7 @@ pub(crate) fn select_gmsa_work(state: &StateInner) -> Vec<GmsaWork> {
             domain,
             dc_ip,
             credential: cred,
+            reader_hash,
         });
     }
 
@@ -237,16 +275,21 @@ pub(crate) fn select_gmsa_work(state: &StateInner) -> Vec<GmsaWork> {
 
 /// Build the JSON payload for a gMSA dump dispatch. Pure construction.
 pub(crate) fn build_gmsa_payload(item: &GmsaWork) -> serde_json::Value {
+    let mut credential = json!({
+        "username": item.credential.username,
+        "password": item.credential.password,
+        "domain": item.credential.domain,
+    });
+    // Machine-account reader (`HOST$`) authenticates by NT hash, not password.
+    if let Some(h) = &item.reader_hash {
+        credential["hash"] = json!(h);
+    }
     json!({
         "technique": "gmsa_dump_passwords",
         "target_ip": item.dc_ip,
         "domain": item.domain,
         "gmsa_account": item.gmsa_account,
-        "credential": {
-            "username": item.credential.username,
-            "password": item.credential.password,
-            "domain": item.credential.domain,
-        },
+        "credential": credential,
     })
 }
 
@@ -365,7 +408,7 @@ mod tests {
         assert_eq!(key, "fabrikam.local:gmsa_svc$");
     }
 
-    // ── tests for select_gmsa_work / build_gmsa_payload / gmsa_dedup_key ──
+    // tests for select_gmsa_work / build_gmsa_payload / gmsa_dedup_key
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -388,6 +431,7 @@ mod tests {
             description: description.to_string(),
             is_admin: false,
             source: String::new(),
+            member_of: Vec::new(),
         }
     }
 
@@ -416,8 +460,6 @@ mod tests {
         }
     }
 
-    // --- gmsa_dedup_key ----------------------------------------------
-
     #[test]
     fn gmsa_dedup_key_lowercases_inputs() {
         assert_eq!(
@@ -425,8 +467,6 @@ mod tests {
             "contoso.local:gmsa_svc$"
         );
     }
-
-    // --- select_gmsa_work --------------------------------------------
 
     #[test]
     fn select_gmsa_empty_state() {
@@ -499,6 +539,92 @@ mod tests {
         assert_eq!(work.len(), 1);
         assert_eq!(work[0].gmsa_account, "gmsa_svc$");
         assert_eq!(work[0].credential.username, "alice");
+        assert!(work[0].reader_hash.is_none());
+    }
+
+    #[test]
+    fn select_gmsa_ignores_roast_ciphertext_for_the_named_reader() {
+        let mut s = StateInner::new("op".into());
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        s.hashes.push(ares_core::models::Hash {
+            id: "h-svc".into(),
+            username: "svc_reader".into(),
+            hash_value: "$krb5tgs$23$*svc_reader$CONTOSO.LOCAL*".into(),
+            hash_type: "Kerberoast".into(),
+            domain: "contoso.local".into(),
+            cracked_password: None,
+            source: "kerberoast".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        });
+        let v = make_gmsa_vuln("v1", "gmsa_svc$", Some("svc_reader"), "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+
+        let work = select_gmsa_work(&s);
+
+        assert_eq!(work.len(), 1);
+        assert!(
+            work[0].reader_hash.is_none(),
+            "roast ciphertext is not -H auth material"
+        );
+        assert_eq!(work[0].credential.username, "alice");
+    }
+
+    #[test]
+    fn select_gmsa_uses_hash_only_machine_account_reader() {
+        let mut s = StateInner::new("op".into());
+        // A generic same-domain cred exists — the WRONG reader for this gMSA.
+        s.credentials
+            .push(make_cred("alice", "Pw", "contoso.local"));
+        // The gMSA's named reader is a machine account known only by NT hash,
+        // recovered from a member-server secretsdump (not a plaintext cred).
+        s.hashes.push(ares_core::models::Hash {
+            id: "h-web01".into(),
+            username: "WEB01$".into(),
+            hash_value: "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890".into(),
+            hash_type: "ntlm".into(),
+            domain: "contoso.local".into(),
+            cracked_password: None,
+            source: "secretsdump".into(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: None,
+            is_previous: false,
+            source_host: None,
+            is_trust_key: false,
+            trust_pair_label: None,
+        });
+        let v = make_gmsa_vuln("v1", "gmsa_svc$", Some("WEB01$"), "contoso.local");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.domain_controllers
+            .insert("contoso.local".into(), "192.168.58.10".into());
+
+        let work = select_gmsa_work(&s);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].gmsa_account, "gmsa_svc$");
+        // The named machine-account reader must win over the generic `alice`
+        // fallback — only it can read the managed password.
+        assert_eq!(work[0].credential.username, "WEB01$");
+        assert_eq!(
+            work[0].reader_hash.as_deref(),
+            Some("aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890")
+        );
+        // The payload carries the hash for -H auth.
+        let payload = build_gmsa_payload(&work[0]);
+        assert_eq!(
+            payload["credential"]["hash"],
+            "aad3b435b51404eeaad3b435b51404ee:abcdef1234567890abcdef1234567890"
+        );
     }
 
     #[test]
@@ -562,8 +688,6 @@ mod tests {
         assert!(select_gmsa_work(&s).is_empty());
     }
 
-    // --- build_gmsa_payload -------------------------------------------
-
     #[test]
     fn build_gmsa_payload_fields() {
         let item = GmsaWork {
@@ -572,6 +696,7 @@ mod tests {
             domain: "contoso.local".into(),
             dc_ip: "192.168.58.10".into(),
             credential: make_cred("alice", "Pw1!", "contoso.local"),
+            reader_hash: None,
         };
         let p = build_gmsa_payload(&item);
         assert_eq!(p["technique"], "gmsa_dump_passwords");
@@ -581,5 +706,7 @@ mod tests {
         assert_eq!(p["credential"]["username"], "alice");
         assert_eq!(p["credential"]["password"], "Pw1!");
         assert_eq!(p["credential"]["domain"], "contoso.local");
+        // No machine-account reader → no hash field in the payload.
+        assert!(p["credential"].get("hash").is_none());
     }
 }

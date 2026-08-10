@@ -46,6 +46,61 @@ pub async fn publish_state_update(
     Ok(0)
 }
 
+/// The only non-terminal operation status. Anything else means the orchestrator
+/// has already finalized and must never be overwritten by a late heartbeat.
+pub const OP_STATUS_RUNNING: &str = "running";
+
+/// How many heartbeat intervals may be missed before a `running` record is
+/// reported as stale rather than live.
+pub const OP_HEARTBEAT_STALE_INTERVALS: u32 = 3;
+
+/// Fallback staleness window for records written before the heartbeat carried
+/// its own interval (or by a producer that never heartbeats at all).
+pub const OP_HEARTBEAT_DEFAULT_INTERVAL_SECS: u64 = 30;
+
+/// Parsed `ares:op:{id}:status` record.
+///
+/// `status_changed_at` is when the status last *changed*; `updated_at` moves on
+/// every heartbeat. Before the heartbeat existed the two were the same field,
+/// which is why a running operation's record looked frozen at its start
+/// timestamp for the whole run and carried no liveness signal at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationStatusRecord {
+    pub status: String,
+    pub operation_id: String,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub status_changed_at: Option<DateTime<Utc>>,
+    pub heartbeat_interval_secs: Option<u64>,
+}
+
+impl OperationStatusRecord {
+    pub fn is_running(&self) -> bool {
+        self.status == OP_STATUS_RUNNING
+    }
+
+    /// Seconds since the last heartbeat, or `None` when the record has no
+    /// parseable `updated_at`.
+    pub fn heartbeat_age_secs(&self, now: DateTime<Utc>) -> Option<i64> {
+        self.updated_at.map(|ts| (now - ts).num_seconds().max(0))
+    }
+
+    /// Whether a `running` record has gone quiet. Terminal records are never
+    /// stale — they are not expected to tick.
+    pub fn is_stale(&self, now: DateTime<Utc>) -> bool {
+        if !self.is_running() {
+            return false;
+        }
+        let interval = self
+            .heartbeat_interval_secs
+            .unwrap_or(OP_HEARTBEAT_DEFAULT_INTERVAL_SECS)
+            .max(1);
+        match self.heartbeat_age_secs(now) {
+            Some(age) => age as u64 > interval * u64::from(OP_HEARTBEAT_STALE_INTERVALS),
+            None => true,
+        }
+    }
+}
+
 /// Set the operation status JSON string.
 ///
 /// Key: `ares:op:{id}:status`.
@@ -55,14 +110,95 @@ pub async fn set_operation_status(
     status: &str,
 ) -> Result<(), redis::RedisError> {
     let key = build_key(operation_id, KEY_STATUS);
+    let now = chrono::Utc::now().to_rfc3339();
     let payload = serde_json::json!({
         "status": status,
         "operation_id": operation_id,
-        "updated_at": chrono::Utc::now().to_rfc3339(),
+        "updated_at": now,
+        "status_changed_at": now,
     });
     let json = serde_json::to_string(&payload).unwrap_or_default();
     conn.set_ex::<_, _, ()>(&key, &json, 86400).await?;
     Ok(())
+}
+
+/// Refresh the liveness timestamp on a `running` status record.
+///
+/// Read-modify-write rather than a blind `SET`: the orchestrator's lock keeper
+/// is the caller, and a tick that raced past finalization would otherwise flip a
+/// `completed` operation back to `running`. Returns whether a heartbeat was
+/// written — `false` means the record was absent or already terminal, both of
+/// which are ordinary and not errors.
+pub async fn heartbeat_operation_status(
+    conn: &mut impl AsyncCommands,
+    operation_id: &str,
+    interval_secs: u64,
+) -> Result<bool, redis::RedisError> {
+    let key = build_key(operation_id, KEY_STATUS);
+    let Some(existing) = read_operation_status(conn, operation_id).await? else {
+        return Ok(false);
+    };
+    if !existing.is_running() {
+        return Ok(false);
+    }
+
+    let status_changed_at = existing
+        .status_changed_at
+        .map(|ts| ts.to_rfc3339())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let payload = serde_json::json!({
+        "status": existing.status,
+        "operation_id": operation_id,
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+        "status_changed_at": status_changed_at,
+        "heartbeat_interval_secs": interval_secs,
+    });
+    let json = serde_json::to_string(&payload).unwrap_or_default();
+    conn.set_ex::<_, _, ()>(&key, &json, 86400).await?;
+    Ok(true)
+}
+
+/// Read and parse `ares:op:{id}:status`.
+///
+/// Returns `None` when the key is absent or holds JSON that will not parse.
+pub async fn read_operation_status(
+    conn: &mut impl AsyncCommands,
+    operation_id: &str,
+) -> Result<Option<OperationStatusRecord>, redis::RedisError> {
+    let key = build_key(operation_id, KEY_STATUS);
+    let raw: Option<String> = conn.get(&key).await?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(None);
+    };
+
+    let ts = |field: &str| {
+        parsed
+            .get(field)
+            .and_then(|v| v.as_str())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+    };
+
+    Ok(Some(OperationStatusRecord {
+        status: parsed
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        operation_id: parsed
+            .get("operation_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(operation_id)
+            .to_string(),
+        updated_at: ts("updated_at"),
+        status_changed_at: ts("status_changed_at").or_else(|| ts("updated_at")),
+        heartbeat_interval_secs: parsed
+            .get("heartbeat_interval_secs")
+            .and_then(|v| v.as_u64()),
+    }))
 }
 
 /// Finalize an operation in Redis — write completion metadata, clean up pointers.
@@ -72,6 +208,7 @@ pub async fn set_operation_status(
 /// 2. Write status key
 /// 3. Delete operation lock
 /// 4. Delete `ares:op:active` if it points to this operation
+/// 5. Apply a retention TTL to every remaining key for this operation
 pub async fn finalize_operation(
     conn: &mut impl AsyncCommands,
     operation_id: &str,
@@ -80,7 +217,6 @@ pub async fn finalize_operation(
     let meta_key = build_key(operation_id, KEY_META);
     let now = Utc::now().to_rfc3339();
 
-    // 1. Mark completed in meta HASH
     let completed_json = serde_json::to_string(&true).unwrap_or_default();
     let completed_at_json = serde_json::to_string(&now).unwrap_or_default();
     conn.hset::<_, _, _, ()>(&meta_key, "completed", &completed_json)
@@ -93,19 +229,29 @@ pub async fn finalize_operation(
         serde_json::to_string(&false).unwrap_or_default(),
     )
     .await?;
-    conn.expire::<_, ()>(&meta_key, 86400).await?;
+    conn.expire::<_, ()>(&meta_key, OP_RETENTION_TTL_SECS)
+        .await?;
 
-    // 2. Write status key
     set_operation_status(conn, operation_id, status).await?;
 
-    // 3. Delete the operation lock
     let lock_key = build_lock_key(operation_id);
     conn.del::<_, ()>(&lock_key).await?;
 
-    // 4. Clear ares:op:active if it points to this operation
     let active: Option<String> = conn.get("ares:op:active").await?;
     if active.as_deref() == Some(operation_id) {
         conn.del::<_, ()>("ares:op:active").await?;
+    }
+
+    // 5. Bound Redis growth: apply a retention TTL to every remaining key for
+    //    this operation. Most per-op keys (hosts, hashes, credentials, loot,
+    //    techniques, ...) are written without a TTL, so under `noeviction` they
+    //    would accumulate across every operation ever run. Best-effort: a scan
+    //    or expire failure must not fail finalization, which already did the
+    //    important cleanup above.
+    if let Ok(keys) = scan_keys(conn, &format!("{KEY_PREFIX}:{operation_id}:*")).await {
+        for key in &keys {
+            let _: redis::RedisResult<i64> = conn.expire(key, OP_RETENTION_TTL_SECS).await;
+        }
     }
 
     Ok(())
@@ -179,7 +325,10 @@ pub async fn list_running_operations(
     Ok(running)
 }
 
-/// Resolve the latest operation ID, preferring running operations.
+/// Resolve the latest operation ID by newest `started_at` (op_id as tiebreaker).
+///
+/// Running status is not considered — a stuck/wedged running op must not shadow
+/// a freshly-submitted newer op that has not yet been marked running.
 pub async fn resolve_latest_operation(
     conn: &mut impl AsyncCommands,
 ) -> Result<Option<String>, redis::RedisError> {
@@ -218,16 +367,6 @@ pub async fn resolve_latest_operation(
         ops.push((started_at, op_id.clone(), is_running));
     }
 
-    // Prefer running operations
-    let running: Vec<_> = ops
-        .iter()
-        .filter(|(_, _, is_running)| *is_running)
-        .collect();
-    if !running.is_empty() {
-        return Ok(Some(pick_latest(&running)));
-    }
-
-    // Fall back to latest by started_at
     let all: Vec<_> = ops.iter().collect();
     Ok(Some(pick_latest(&all)))
 }
@@ -252,7 +391,6 @@ pub async fn delete_operation(
     conn: &mut impl AsyncCommands,
     operation_id: &str,
 ) -> Result<usize, redis::RedisError> {
-    // Find all keys for this operation via SCAN
     let pattern = format!("{KEY_PREFIX}:{operation_id}:*");
     let mut keys = scan_keys(conn, &pattern).await?;
 
@@ -386,7 +524,7 @@ mod tests {
         assert_eq!(pick_latest(&items), "op-solo");
     }
 
-    // -- async tests using MockRedisConnection --------------------------------
+    // async tests using MockRedisConnection
 
     use crate::state::mock_redis::MockRedisConnection;
     use redis::AsyncCommands;
@@ -411,6 +549,114 @@ mod tests {
         assert_eq!(parsed["status"], "running");
         assert_eq!(parsed["operation_id"], "op-1");
         assert!(parsed["updated_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_moves_updated_at_but_not_status_changed_at() {
+        let mut conn = MockRedisConnection::new();
+        set_operation_status(&mut conn, "op-1", "running")
+            .await
+            .unwrap();
+        let before = read_operation_status(&mut conn, "op-1")
+            .await
+            .unwrap()
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert!(heartbeat_operation_status(&mut conn, "op-1", 30)
+            .await
+            .unwrap());
+
+        let after = read_operation_status(&mut conn, "op-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, "running");
+        assert_eq!(after.status_changed_at, before.status_changed_at);
+        assert!(after.updated_at > before.updated_at);
+        assert_eq!(after.heartbeat_interval_secs, Some(30));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_never_resurrects_a_finalized_operation() {
+        let mut conn = MockRedisConnection::new();
+        set_operation_status(&mut conn, "op-1", "completed")
+            .await
+            .unwrap();
+
+        assert!(!heartbeat_operation_status(&mut conn, "op-1", 30)
+            .await
+            .unwrap());
+        let after = read_operation_status(&mut conn, "op-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_is_a_noop_when_no_status_record_exists() {
+        let mut conn = MockRedisConnection::new();
+        assert!(!heartbeat_operation_status(&mut conn, "op-missing", 30)
+            .await
+            .unwrap());
+        assert!(read_operation_status(&mut conn, "op-missing")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn read_operation_status_tolerates_garbage() {
+        let mut conn = MockRedisConnection::new();
+        let key = build_key("op-1", KEY_STATUS);
+        let _: () = conn.set(&key, "not json").await.unwrap();
+        assert!(read_operation_status(&mut conn, "op-1")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn running_record_goes_stale_after_three_missed_intervals() {
+        let now = Utc::now();
+        let record = |age_secs: i64| OperationStatusRecord {
+            status: OP_STATUS_RUNNING.to_string(),
+            operation_id: "op-1".to_string(),
+            updated_at: Some(now - chrono::Duration::seconds(age_secs)),
+            status_changed_at: Some(now - chrono::Duration::seconds(age_secs)),
+            heartbeat_interval_secs: Some(30),
+        };
+
+        assert!(!record(30).is_stale(now));
+        assert!(!record(90).is_stale(now));
+        assert!(record(91).is_stale(now));
+        assert_eq!(record(45).heartbeat_age_secs(now), Some(45));
+    }
+
+    #[test]
+    fn a_finalized_record_is_never_stale() {
+        let now = Utc::now();
+        let record = OperationStatusRecord {
+            status: "completed".to_string(),
+            operation_id: "op-1".to_string(),
+            updated_at: Some(now - chrono::Duration::hours(9)),
+            status_changed_at: Some(now - chrono::Duration::hours(9)),
+            heartbeat_interval_secs: Some(30),
+        };
+        assert!(!record.is_stale(now));
+    }
+
+    #[test]
+    fn a_running_record_with_no_timestamp_is_stale() {
+        let record = OperationStatusRecord {
+            status: OP_STATUS_RUNNING.to_string(),
+            operation_id: "op-1".to_string(),
+            updated_at: None,
+            status_changed_at: None,
+            heartbeat_interval_secs: None,
+        };
+        assert!(record.is_stale(Utc::now()));
     }
 
     #[tokio::test]
@@ -513,6 +759,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finalize_operation_sweeps_op_keys_without_corrupting_state() {
+        let mut conn = MockRedisConnection::new();
+        let meta_key = build_key("op-1", KEY_META);
+        let _: () = conn
+            .hset(&meta_key, "started_at", "\"2024-06-01T00:00:00Z\"")
+            .await
+            .unwrap();
+
+        // Per-op keys that are normally written without a TTL and would leak.
+        let creds_key = build_key("op-1", KEY_CREDENTIALS);
+        let _: () = conn.hset(&creds_key, "c1", "{}").await.unwrap();
+        let hosts_key = build_key("op-1", KEY_HOSTS);
+        let _: () = conn.rpush(&hosts_key, "{}").await.unwrap();
+
+        finalize_operation(&mut conn, "op-1", "completed")
+            .await
+            .unwrap();
+
+        // The retention sweep issues a best-effort EXPIRE per key; the mock
+        // treats EXPIRE as a no-op, so the sweep must leave state readable.
+        let creds_exist: bool = conn.exists(&creds_key).await.unwrap();
+        assert!(creds_exist);
+        let hosts: Vec<String> = conn.lrange(&hosts_key, 0, -1).await.unwrap();
+        assert_eq!(hosts.len(), 1);
+    }
+
+    #[tokio::test]
     async fn list_operation_ids_returns_sorted_ids() {
         let mut conn = MockRedisConnection::new();
 
@@ -605,10 +878,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_latest_operation_prefers_running() {
+    async fn resolve_latest_operation_picks_newest_even_when_older_is_running() {
+        // Regression: a wedged running op used to win over a freshly-submitted
+        // newer op that had not yet been marked running. Newest wins now.
         let mut conn = MockRedisConnection::new();
 
-        // op-new is newer but not running
         let _: () = conn
             .hset(
                 "ares:op:op-new:meta",
@@ -617,7 +891,6 @@ mod tests {
             )
             .await
             .unwrap();
-        // op-old is older but running (has a lock key)
         let _: () = conn
             .hset(
                 "ares:op:op-old:meta",
@@ -629,7 +902,7 @@ mod tests {
         let _: () = conn.set("ares:lock:op-old", "1").await.unwrap();
 
         let result = resolve_latest_operation(&mut conn).await.unwrap();
-        assert_eq!(result.as_deref(), Some("op-old"));
+        assert_eq!(result.as_deref(), Some("op-new"));
     }
 
     #[tokio::test]

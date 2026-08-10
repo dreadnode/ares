@@ -14,7 +14,6 @@ pub(crate) async fn history_mitre_coverage(
 
     let since = since_days.map(|days| Utc::now() - chrono::Duration::days(days));
 
-    // Query timeline events joined with operations to get MITRE techniques
     let rows: Vec<MitreCoverageRow> = if let Some(ref since_ts) = since {
         sqlx::query_as::<_, MitreCoverageRow>(
             "SELECT te.mitre_techniques, o.operation_id \
@@ -39,7 +38,6 @@ pub(crate) async fn history_mitre_coverage(
         .await?
     };
 
-    // Aggregate: technique_id -> set of operation_ids
     let mut coverage: HashMap<String, HashSet<String>> = HashMap::new();
     for row in &rows {
         for technique in &row.mitre_techniques {
@@ -50,7 +48,6 @@ pub(crate) async fn history_mitre_coverage(
         }
     }
 
-    // Sort by occurrence count descending
     let mut sorted: Vec<(String, Vec<String>)> = coverage
         .into_iter()
         .map(|(t, ops)| {

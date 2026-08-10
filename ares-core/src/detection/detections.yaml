@@ -262,7 +262,7 @@ templates:
 
   detect_mssql_linked_server:
     description: "MSSQL Linked Server Exploitation Detection"
-    mitre_id: "T1210"
+    mitre_id: "T1134"
     tactic: lateral_movement
     severity: critical
     connection_types: [mssql]
@@ -384,10 +384,20 @@ templates:
     severity: high
     red_team_tool: kerberoast
     event_ids: ["4769"]
-    patterns:
-      - 'encryption.*type.*(0x17|rc4)'
-      - 'ticket.*encryption.*(0x17|rc4)'
-      - 'servicename.*(mssql|http|ldap|cifs)'
+    # Keyed on the TicketEncryptionType field, same as the golden ticket rule.
+    # The three previous patterns were all broken, verified live vs Loki over a
+    # 24h window (870 total 4769):
+    #   - 'encryption.*type.*(0x17|rc4)'          → 690 matches. `encryption.*type`
+    #     spans the *field name* (ServiceSupportedEncryptionTypes) and `.*rc4` then
+    #     reaches a capability value — RC4 is listed in ServiceAvailableKeys /
+    #     DCAvailableKeys / ClientAdvertizedEncryptionTypes on nearly every event.
+    #   - 'ticket.*encryption.*(0x17|rc4)'        → 690 matches, same span failure.
+    #   - 'servicename.*(mssql|http|ldap|cifs)'   → 0 matches. ServiceName is a SAM
+    #     account name (e.g. svc_sql), never an SPN — the same blackhole that killed
+    #     the S4U rule and that currently zeroes the golden ticket rule.
+    # Net: 690 fired where 28 were real RC4 tickets (4% precision, 662 FPs/day).
+    filter_stages:
+      - ['TicketEncryptionType..u003e0x17']
 
   detect_asrep_roasting:
     description: "AS-REP Roasting Detection (TGT without pre-auth)"
@@ -396,11 +406,22 @@ templates:
     severity: high
     red_team_tool: asrep_roast
     event_ids: ["4768"]
-    patterns:
-      - 'preauthtype.*0'
-      - 'pre.?auth.*type.*0'
-      - 'encryption.*type.*(0x17|rc4)'
-      - 'ticket.*options.*0x4'
+    # AS-REP roasting is PreAuthType=0 (TGT issued with no pre-auth) — match that
+    # field exactly. All four previous patterns were OR'd into one stage and every
+    # one of them over-matched; verified live vs Loki over 24h (590 total 4768):
+    #   - 'preauthtype.*0' / 'pre.?auth.*type.*0' — `.*0` reaches any later 0 on the
+    #     line, so PreAuthType 2/15/16/17 all matched (TicketOptions, SIDs and
+    #     Status 0x0 all carry zeroes).
+    #   - 'encryption.*type.*(0x17|rc4)' — same field-name span as the kerberoast
+    #     rule above; RC4 is listed in AccountAvailableKeys / DCAvailableKeys on
+    #     nearly every 4768.
+    #   - 'ticket.*options.*0x4' — TicketOptions is 0x40810010 on ordinary TGTs.
+    # Net: 411 of 590 fired (70%) where 12 were real no-pre-auth TGTs.
+    # The trailing '.' before u003c matches the single JSON escape between the
+    # value and the closing tag (Name='PreAuthType'>0</Data) — anchoring
+    # the close is what keeps PreAuthType 10/16/17 from matching on the leading 0.
+    filter_stages:
+      - ['PreAuthType..u003e0.u003c']
 
   detect_asrep_roasting_bulk:
     description: "Bulk AS-REP Roasting Spray Detection"
@@ -409,6 +430,49 @@ templates:
     severity: high
     red_team_tool: asrep_roast
     event_ids: ["4768"]
+
+  detect_silver_ticket:
+    description: "Silver Ticket Detection (Kerberos service logon with no KDC-issued ticket)"
+    mitre_id: "T1558.002"
+    tactic: credential_access
+    severity: critical
+    red_team_tool: generate_silver_ticket
+    event_ids: ["4624"]
+    # A Silver Ticket is a TGS forged offline with the SERVICE account's key and
+    # presented straight to that service, so the KDC never mints it and no 4769
+    # exists anywhere. What the service host does log is an ordinary successful
+    # Kerberos network logon: 4624 with LogonType 3 and AuthenticationPackageName
+    # Kerberos (plus a 4672 when the forged PAC claims privileged groups).
+    #
+    # Stages 1 and 2 are that candidate shape, keyed on the fields exactly — the
+    # '..u003e' matches the JSON-escaped `'>` between an EventData field name and
+    # its value, and the trailing '.u003c' anchors the LogonType value so 3 does
+    # not also match 30/13 (same escaping and anchoring as the AS-REP rule above).
+    #
+    # Those two stages ALONE match every legitimate SMB/LDAP/MSSQL/WinRM access in
+    # the domain — thousands of events per day — so on their own this rule would
+    # not detect a silver ticket, it would record T1558.002 on every run and
+    # destroy blue precision. Stage 3 is what makes the rule honest: the only thing
+    # that separates a forged service ticket from a legitimate one is proof the KDC
+    # issued it, and that proof lives in TicketEncryptionType on the DC's 4769 — a
+    # field no 4624 line carries, because by definition the DC never saw this
+    # ticket. A single literal, so Loki takes the fast contains path and the stage
+    # cannot widen the way an alternation could.
+    #
+    # This template therefore cannot fire, by construction. It is kept because the
+    # blue write path refuses any MITRE ID no catalog template covers, and coverage
+    # is an ID join that matches exact or parent/child but NEVER siblings — so
+    # without this entry T1558.002 could not be recorded at all and red's
+    # generate_silver_ticket would be a permanent "missed". The actual detection is
+    # the cross-host correlation no line filter can express — a Kerberos network
+    # logon on a service host with NO 4769 for that principal on any DC —
+    # implemented in code in `ares-cli/src/orchestrator/blue/sweep.rs`, which is
+    # what records T1558.002. Do not "fix" this rule by dropping stage 3; see
+    # detect_golden_ticket for the same structure on the TGT side.
+    filter_stages:
+      - ['LogonType..u003e3.u003c']
+      - ['AuthenticationPackageName..u003eKerberos']
+      - ['TicketEncryptionType']
 
   detect_brute_force:
     description: "Brute Force / Password Spray Detection"
@@ -437,14 +501,24 @@ templates:
     red_team_tool: get_st
     auto_pivot: true
     event_ids: ["4769"]
-    # Match TransmittedServices field (populated during S4U2Proxy) targeting
-    # sensitive SPNs. Matches TransmittedServices patterns from Grafana alert rules.
+    # A 4769 with a POPULATED TransmittedServices field IS S4U2Proxy (constrained
+    # delegation / RBCD in use) — that single stage is the detection. Do NOT add a
+    # service-class stage (cifs/|ldap/|host/|http/|mssql/|krbtgt): in the real 4769
+    # log shape `ServiceName` is the target account SAM name (e.g. DC01$), not
+    # a class/host SPN, so that filter matched ~1% of true S4U events (measured live:
+    # 163 populated-TransmittedServices events → 2) and blackholed the whole rule.
     filter_stages:
       - ['TransmittedServices']
-      - ['cifs/', 'ldap/', 'host/', 'http/', 'mssql/', 'krbtgt']
+    # Drop 4769 events where TransmittedServices is empty (not actually S4U).
+    # The value must be matched in the JSON-escaped XML shape Loki stores, the
+    # same convention as PreAuthType above: a plain-text `TransmittedServices:
+    # -` form matches nothing, so the exclude silently passed every 4769 through
+    # and the rule fired on all of them (measured: 3824 events in, 3824 out).
+    # Do NOT exclude machine-account targets: S4U2Proxy / RBCD abuse legitimately
+    # requests a host's SPN (e.g. cifs/WEB01$), so a `TargetUserName…$` exclude
+    # drops exactly the true positives this rule exists to catch.
     exclude_patterns:
-      - 'TransmittedServices\s*:\s*-\s*$'
-      - 'TargetUserName.{0,30}\$'
+      - 'TransmittedServices..u003e-.u003c'
 
   detect_lsa_secrets_access:
     description: "LSA Secrets Extraction Detection"
@@ -463,16 +537,38 @@ templates:
       - 'lsadump'
       - 'reg.query.*security'
 
-  detect_ntlm_relay:
-    description: "NTLM Relay Attack Detection"
-    mitre_id: "T1557"
+  detect_unsecured_credentials:
+    description: "Unsecured Credential Discovery (GPP / SYSVOL scripts / autologon)"
+    aliases: [detect_gpp_password, detect_credentials_in_files]
+    mitre_id: "T1552"
     tactic: credential_access
     severity: high
-    connection_types: [ntlm_relay]
-    red_team_tool: ntlmrelayx
+    red_team_tool: gpp_password_finder
+    # Scoped by event id first, then by the credential-bearing artifact itself.
+    # The original rule had neither: without `event_ids` the label selector was
+    # the only pre-filter, and both stages were effectively unconditional
+    # ('object.*access' plus bare '\.ps1'/'sysvol'), so it matched 796,922 of
+    # 2,409,887 windows-security lines in 24h — a third of the log. T1552 was
+    # therefore always "detected", fabricating coverage rather than losing it,
+    # and it saturated DETECTION_ENTRY_LIMIT so event_count meant nothing.
+    # Bare path words (sysvol/netlogon) and script extensions are deliberately
+    # NOT here: touching a share is not credential discovery. The artifact names
+    # are what make this T1552 rather than generic file access.
+    event_ids: ["5145", "4663", "4656"]
     filter_stages:
-      - ['ntlm', 'relay', 'responder', 'inveigh']
-      - ['ntlmrelayx', 'smbrelay', 'signing.*not.*required', 'coerce']
+      - ['groups\.xml', 'scheduledtasks\.xml', 'services\.xml', 'datasources\.xml', 'drives\.xml', 'printers\.xml', 'cpassword', 'unattend\.xml', 'sysprep\.inf', 'defaultpassword', 'autologon', 'credman']
+
+  detect_ntlm_relay:
+    description: "Authentication Coercion Detection (PetitPotam / PrinterBug / DFSCoerce)"
+    mitre_id: "T1557"
+    tactic: credential_access
+    severity: critical
+    connection_types: [ntlm_relay]
+    red_team_tool: coercer
+    auto_pivot: true
+    event_ids: ["5145"]
+    filter_stages:
+      - ['efsrpc', 'netdfs', 'spoolss']
 
   detect_certificate_authentication:
     description: "Certificate-Based Authentication Detection"
@@ -485,6 +581,17 @@ templates:
       - ['4768', 'tgt.*request', 'kerberos', 'certipy.*auth']
 
   # ─── Lateral Movement (TA0008) ─────────────────────────────────────────────
+
+  detect_nopac_samaccountname_spoof:
+    description: "NoPac sAMAccountName Spoofing Detection (CVE-2021-42278/42287)"
+    mitre_id: "T1210"
+    tactic: lateral_movement
+    severity: critical
+    red_team_tool: nopac
+    auto_pivot: true
+    event_ids: ["4781", "5136"]
+    filter_stages:
+      - ['samaccountname', 'sam.account.name', 'oldtargetusername', 'newtargetusername']
 
   detect_pass_the_hash:
     description: "Pass-the-Hash Detection"
@@ -503,6 +610,28 @@ templates:
       - 'network.logon'
       - 'crackmapexec'
       - 'netexec'
+
+  detect_valid_account_reuse:
+    description: "Valid Account Reuse Detection (explicit / alternate credentials)"
+    mitre_id: "T1078.002"
+    tactic: defense_evasion
+    severity: high
+    red_team_tool: domain_admin_checker
+    event_ids: ["4648"]
+    # Event 4648 = "a logon was attempted using explicit credentials" (runas
+    # /netonly, alternate creds, tooling that supplies creds directly). That is
+    # the on-wire shape of stolen-credential reuse, distinct from an interactive
+    # logon. TargetServerName/TargetInfo are 4648-specific EventData fields, so
+    # they reliably narrow to genuine 4648 records regardless of message rendering.
+    patterns:
+      - 'TargetServerName'
+      - 'TargetInfo'
+      - 'explicit.credential'
+      - 'runas'
+    # Exclude machine-account targets (ending $) — routine computer/service auth,
+    # not valid-account reuse. Mirrors the DCSync exclude's Loki-escaped form.
+    exclude_patterns:
+      - "TargetUserName'.u003e[A-Z0-9_-]+[$]"
 
   detect_lateral_movement:
     description: "Lateral Movement Detection (PSExec/WMI/WinRM)"
@@ -543,9 +672,16 @@ templates:
     tactic: privilege_escalation
     severity: high
     red_team_tool: "certipy_*"
+    # Stage 2 adds the dangerous-EKU OIDs from Grafana adcs-alerts so ESC2/ESC3
+    # enrollments are caught even without ESC keyword / SAN strings:
+    #   2.5.29.37.0            = Any Purpose EKU (ESC2)
+    #   1.3.6.1.4.1.311.20.2.1 = Certificate Request Agent (ESC3)
+    #   1.3.6.1.4.1.311.76.6.1 = SubCA
     filter_stages:
       - ['4886', '4887', '4876', 'certipy', 'certificate.*request']
-      - ['esc[0-9]', 'enrollee.*supplies.*subject', 'altname', 'upn']
+      - ['esc[0-9]', 'enrollee.*supplies.*subject', 'altname', 'upn',
+         '2\.5\.29\.37\.0', '1\.3\.6\.1\.4\.1\.311\.20\.2\.1',
+         '1\.3\.6\.1\.4\.1\.311\.76\.6\.1', 'certificate.request.agent', 'any.?purpose']
 
   detect_delegation_abuse:
     description: "Kerberos Delegation Abuse Detection (RBCD)"
@@ -562,6 +698,32 @@ templates:
       - 'msds-allowedtoactonbehalf'
       - 'rbcd'
 
+  detect_shadow_credentials:
+    description: "Shadow Credentials Detection (msDS-KeyCredentialLink write)"
+    mitre_id: "T1556.006"
+    tactic: credential_access
+    severity: critical
+    red_team_tool: certipy_shadow
+    auto_pivot: true
+    event_ids: ["5136"]
+    patterns:
+      - 'msDS-KeyCredentialLink'
+      - 'msds-keycredentiallink'
+      - 'keycredential'
+
+  detect_acl_account_manipulation:
+    description: "ACL Edge Abuse Detection (security-group addition / forced password reset)"
+    mitre_id: "T1098"
+    tactic: privilege_escalation
+    severity: critical
+    red_team_tool: bloodyad
+    auto_pivot: true
+    event_ids: ["4724", "4728", "4732", "4756"]
+    filter_stages:
+      - ['member was added to a security.enabled', 'attempt was made to reset an account']
+    exclude_patterns:
+      - "TargetUserName'.u003e[A-Z0-9_-]+[$]"
+
   detect_bloodhound:
     description: "BloodHound/SharpHound Collection Detection"
     aliases: [detect_bloodhound_collection]
@@ -576,15 +738,44 @@ templates:
   # ─── Persistence (TA0003) ──────────────────────────────────────────────────
 
   detect_golden_ticket:
-    description: "Golden Ticket Detection"
+    description: "Golden Ticket Detection (RC4 service ticket for DC SPNs)"
     mitre_id: "T1558.001"
     tactic: persistence
     severity: critical
     red_team_tool: generate_golden_ticket
-    event_ids: ["4768", "4769"]
+    event_ids: ["4769"]
+    # Golden Tickets are forged offline — no 4768 (TGT request) is emitted, so the
+    # old tool-string patterns ('golden ticket', 'ticketer') never appear in
+    # Windows Security logs and never fired. USING the ticket, however, still emits
+    # a 4769 service-ticket request. An RC4 (0x17) service ticket in an AES domain is
+    # the encryption-downgrade signal. Ported from Grafana `ad_golden_ticket_detection`.
+    #
+    # Stage 1 keys on the ACTUAL ticket encryption type, not a bare '0x17'/'rc4'.
+    # Verified live vs Loki: bare 'rc4' matches ~90% of all 4769 (RC4 sits in the
+    # capability-enumeration fields ServiceSupportedEncryptionTypes /
+    # ClientAdvertizedEncryptionTypes on nearly every event), and bare '0x17' still
+    # matches AES tickets because SessionKeyEncryptionType is 0x17 almost always. Only
+    # the TicketEncryptionType field distinguishes a real RC4 ticket. The '..' matches
+    # the JSON-escaped `'>` between the field name and value (Loki stores XML > as
+    # > — same escaping trick as the DCSync exclude).
+    #
+    # Stage 2 (DC service class) currently zeroes recall: in the real 4769 log shape
+    # ServiceName is a SAM name (e.g. SQL01$, svc_sql), never a cifs//ldap//host/ SPN,
+    # so this stage blackholes every real RC4 ticket — the same failure that killed the
+    # S4U rule. Kept because dropping it makes this fire on ALL RC4 downgrades, which is
+    # kerberoasting (T1558.003), not uniquely golden — a single-line 4769 rule genuinely
+    # can't separate the two.
+    #
+    # This template therefore cannot fire, by construction, and is kept only so the
+    # catalog still carries the T1558.001 mapping and the LLM prompts that name it keep
+    # resolving. The actual detection is the cross-event correlation it can't express —
+    # 4769 with NO preceding 4768 — implemented in code in the blue orchestrator's
+    # baseline sweep (`ares-cli/src/orchestrator/blue/sweep.rs`), which is what records
+    # T1558.001. Do not try to "fix" this rule with another filter stage; absence of a
+    # partner event is not expressible as a line filter.
     filter_stages:
-      - ['golden.*ticket', 'krbtgt', 'ticketer', 'krbcred']
-      - ['forged', '4769', 'kerberos.*ticket', 'enterprise.*admin']
+      - ['TicketEncryptionType..u003e0x17']
+      - ['cifs/', 'ldap/', 'host/', 'krbtgt']
 
   # ─── Execution (TA0002) ────────────────────────────────────────────────────
 
@@ -667,6 +858,79 @@ templates:
     filter_stages:
       - ['certsrv', 'certfnsh', 'certenroll', 'ntlmrelayx']
       - ['relay', 'coerce', 'petitpotam', 'printerbug', 'dfscoerce']
+
+  # ─── Cross-Forest / Inter-Realm Trust Abuse (T1134.005) ────────────────────
+  # These cover the child→parent and forest→forest pivots: forged inter-realm
+  # TGTs, SID-history / ExtraSids injection, and trust-key extraction. They are
+  # the crown-jewel techniques blue historically missed — reference them from
+  # threat_hunter.md.tera and the orchestrator dispatch table.
+
+  detect_cross_realm_tgs:
+    description: "Cross-Realm / Inter-Realm TGT/TGS Referral Detection"
+    mitre_id: "T1134.005"
+    tactic: lateral_movement
+    severity: critical
+    red_team_tool: ticketer
+    auto_pivot: true
+    # A krbtgt SPN (krbtgt/<realm>) in a 4768/4769 ServiceName is a cross-realm
+    # referral — a child DC requesting a parent-realm TGT, or a forged
+    # inter-realm ticket presented across a trust. Legitimate intra-realm
+    # traffic references the krbtgt *account*, not a krbtgt/<realm> SPN.
+    event_ids: ["4768", "4769"]
+    patterns:
+      - 'krbtgt/'
+      - 'servicename.{0,40}krbtgt/'
+      - 'service.name.{0,40}krbtgt/'
+
+  detect_child_krbtgt_forge:
+    description: "Child-Domain krbtgt Forge / Inter-Realm Golden Ticket Detection"
+    mitre_id: "T1134.005"
+    tactic: privilege_escalation
+    severity: critical
+    red_team_tool: ticketer
+    auto_pivot: true
+    # A forged inter-realm TGT carries anomalous ticket options / encryption
+    # types alongside a krbtgt reference. Golden/inter-realm forges commonly
+    # show TicketOptions 0x40810000 / 0x50800000 / 0x60810010 and RC4 (0x17)
+    # where a real referral would use AES.
+    event_ids: ["4768", "4769"]
+    filter_stages:
+      - ['krbtgt', 'ticketoptions', 'ticket.options', 'encryptiontype', 'encryption.type']
+      - ['0x40810000', '0x50800000', '0x60810010', '0x17', 'forged', 'child.*dc', 'inter.?realm']
+
+  detect_sid_history_extrasid:
+    description: "SID History / ExtraSids Injection Detection"
+    mitre_id: "T1134.005"
+    tactic: privilege_escalation
+    severity: critical
+    red_team_tool: ticketer
+    auto_pivot: true
+    # ExtraSids / SID-history in a ticket PAC surfaces as enterprise/domain-admin
+    # RIDs (-519 Enterprise Admins, -512 Domain Admins) appearing for a principal
+    # from a different domain. 4662/4627/4672 carry the group SIDs.
+    event_ids: ["4662", "4627", "4672"]
+    patterns:
+      - 'sidhistory'
+      - 'sid.history'
+      - 'extrasids'
+      - 'extra.sids'
+      - 's-1-5-21-.*-519'
+      - 's-1-5-21-.*-512'
+
+  detect_trust_key_exfil:
+    description: "Domain Trust Key Extraction / Cross-Domain Machine Auth Detection"
+    mitre_id: "T1003.006"
+    tactic: credential_access
+    severity: critical
+    red_team_tool: secretsdump
+    auto_pivot: true
+    # Extracting the inter-domain trust key is a DCSync/secretsdump of the
+    # trust account (DOMAIN$ / krbtgt), or cross-domain machine-account NTLM
+    # auth (4776/4624 logon type 3) originating from a DC machine account.
+    event_ids: ["4662", "4776", "4624"]
+    filter_stages:
+      - ['trust', 'interdomain', 'krbtgt', 'drsuapi', '1131f6aa', 'machine.account']
+      - ['secretsdump', 'replication', 'ntlm', 'logon.type.{0,4}3', '\$', '4776']
 
   # ─── BloodHound LDAP Signatures ────────────────────────────────────────────
 

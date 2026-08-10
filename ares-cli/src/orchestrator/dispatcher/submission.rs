@@ -11,14 +11,158 @@ use tracing::{debug, field::Empty, info, info_span, warn, Instrument};
 use crate::orchestrator::deferred::DeferredTask;
 use crate::orchestrator::llm_runner::LlmTaskRunner;
 use crate::orchestrator::routing::ActiveTask;
+use crate::orchestrator::state::DEDUP_SCANNED_TARGETS;
 use crate::orchestrator::task_queue::TaskResult;
 use crate::orchestrator::throttling::ThrottleDecision;
 
 use ares_llm::LoopEndReason;
 
 use super::{Dispatcher, SubmissionOutcome};
+use crate::orchestrator::proposals::{
+    mediation_enabled, mediation_scope_is_all, task_type_is_vetoable, ProposalOutcome,
+};
+
+tokio::task_local! {
+    static ORCHESTRATOR_DIRECTED: bool;
+}
+
+pub async fn as_orchestrator_directed<F, T>(fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    ORCHESTRATOR_DIRECTED.scope(true, fut).await
+}
+
+fn is_orchestrator_directed() -> bool {
+    ORCHESTRATOR_DIRECTED.try_with(|v| *v).unwrap_or(false)
+}
+
+pub(crate) fn should_mediate(
+    caller_wants_mediation: bool,
+    mediation_on: bool,
+    target_role: &str,
+    orchestrator_directed: bool,
+    task_type: &str,
+    scope_is_all: bool,
+) -> bool {
+    caller_wants_mediation
+        && mediation_on
+        && target_role != "orchestrator"
+        && !orchestrator_directed
+        && (scope_is_all || task_type_is_vetoable(task_type))
+}
 
 impl Dispatcher {
+    pub async fn submit_approved(
+        &self,
+        task_type: &str,
+        target_role: &str,
+        payload: serde_json::Value,
+        priority: i32,
+    ) -> Result<SubmissionOutcome> {
+        if let Some(drop) = crate::orchestrator::deferred::payload_dropped_by_containment(
+            task_type,
+            &payload,
+            &self.state,
+        )
+        .await
+        {
+            if drop.deletes {
+                info!(
+                    task_type = %task_type,
+                    target_role = %target_role,
+                    reason = %drop.detail,
+                    "Suppressing approved work — containment invalidated it while it was parked"
+                );
+                self.deferred
+                    .record_blue_invalidation(task_type, target_role, drop.kind, drop.attribution)
+                    .await;
+                return Ok(SubmissionOutcome::Dropped);
+            }
+            self.deferred
+                .record_containment_retention(target_role, drop.kind)
+                .await;
+        }
+
+        let span = info_span!(
+            "automation.dispatch",
+            task_type = task_type,
+            target_role = target_role,
+            priority = priority,
+            "task.id" = Empty,
+            "automation.decision" = Empty,
+        );
+        self.throttled_submit_outcome_inner(
+            task_type,
+            target_role,
+            payload,
+            priority,
+            span.clone(),
+            false,
+        )
+        .instrument(span)
+        .await
+    }
+
+    async fn park_as_proposal(
+        &self,
+        task_type: &str,
+        target_role: &str,
+        payload: serde_json::Value,
+        priority: i32,
+        span: &tracing::Span,
+    ) -> (Option<SubmissionOutcome>, serde_json::Value) {
+        let task = DeferredTask {
+            priority,
+            enqueue_time: Utc::now().timestamp() as f64,
+            task_type: task_type.to_string(),
+            target_role: target_role.to_string(),
+            payload: payload.clone(),
+            source_agent: "automation".to_string(),
+        };
+        let outcome = match self.proposals.propose(task).await {
+            ProposalOutcome::Parked => {
+                span.record("automation.decision", "proposed");
+                debug!(
+                    task_type,
+                    target_role, "Task proposed for orchestrator review"
+                );
+                Some(SubmissionOutcome::Deferred)
+            }
+            ProposalOutcome::Duplicate => {
+                span.record("automation.decision", "proposal_duplicate");
+                Some(SubmissionOutcome::Deferred)
+            }
+            ProposalOutcome::PreviouslyRejected => {
+                span.record("automation.decision", "proposal_rejected");
+                debug!(
+                    task_type,
+                    target_role, "Task suppressed — orchestrator rejected this work"
+                );
+                Some(SubmissionOutcome::Dropped)
+            }
+            ProposalOutcome::Full => {
+                span.record("automation.decision", "proposal_pool_full");
+                warn!(
+                    task_type,
+                    target_role,
+                    "Proposal pool full — dispatching directly so the pool cap cannot stall red"
+                );
+                None
+            }
+            ProposalOutcome::ReviewerBehind => {
+                span.record("automation.decision", "proposal_reviewer_behind");
+                warn!(
+                    task_type,
+                    target_role,
+                    "Orchestrator is not ruling within the window — dispatching directly so review latency cannot stall red"
+                );
+                None
+            }
+        };
+        (outcome, payload)
+    }
+
     /// Submit a task with throttle checking. Returns the task_id if submitted,
     /// None if deferred or rejected.
     pub async fn throttled_submit(
@@ -56,9 +200,16 @@ impl Dispatcher {
             "task.id" = Empty,
             "automation.decision" = Empty,
         );
-        self.throttled_submit_outcome_inner(task_type, target_role, payload, priority, span.clone())
-            .instrument(span)
-            .await
+        self.throttled_submit_outcome_inner(
+            task_type,
+            target_role,
+            payload,
+            priority,
+            span.clone(),
+            true,
+        )
+        .instrument(span)
+        .await
     }
 
     async fn throttled_submit_outcome_inner(
@@ -68,7 +219,26 @@ impl Dispatcher {
         payload: serde_json::Value,
         priority: i32,
         span: tracing::Span,
+        mediate: bool,
     ) -> Result<SubmissionOutcome> {
+        let mut payload = payload;
+        if should_mediate(
+            mediate,
+            mediation_enabled(),
+            target_role,
+            is_orchestrator_directed(),
+            task_type,
+            mediation_scope_is_all(),
+        ) {
+            match self
+                .park_as_proposal(task_type, target_role, payload, priority, &span)
+                .await
+            {
+                (Some(outcome), _) => return Ok(outcome),
+                (None, returned) => payload = returned,
+            }
+        }
+
         // Rate cap: if this (task_type, target, principal) pattern ended
         // with `RequestAssistance` inside the assist-abandoned TTL, refuse
         // to redispatch. The pattern is usually doomed — missing tool
@@ -226,6 +396,19 @@ impl Dispatcher {
         payload: serde_json::Value,
         priority: i32,
     ) -> Result<SubmissionOutcome> {
+        // Once the completion monitor has decided the op is done, drop every new
+        // red task. This is the single choke point for automation dispatch,
+        // direct exploit dispatch, and the deferred-queue drain, so freezing it
+        // halts all red LLM token burn during the post-completion blue-drain
+        // wait. Blue runs on its own runner and is unaffected.
+        if self.is_red_draining() {
+            debug!(
+                task_type,
+                target_role, "Red draining — dropping task (op completion decided)"
+            );
+            return Ok(SubmissionOutcome::Dropped);
+        }
+
         let role = ares_llm::tool_registry::AgentRole::parse(target_role)
             .or_else(|| crate::orchestrator::llm_runner::role_for_task_type(task_type));
 
@@ -301,6 +484,13 @@ impl Dispatcher {
             &uuid::Uuid::new_v4().simple().to_string()[..12]
         );
 
+        if let Some(dedup) = crate::orchestrator::automation::crack_dedup_key_from_payload(&payload)
+        {
+            self.crack_inflight
+                .reserve(&task_id, std::slice::from_ref(&dedup))
+                .await;
+        }
+
         info!(
             task_id = %task_id,
             task_type = task_type,
@@ -315,12 +505,33 @@ impl Dispatcher {
                 role: target_role.to_string(),
                 submitted_at: std::time::Instant::now(),
                 credential_key: cred_key.clone(),
+                abort: None,
             })
             .await;
 
         self.throttler.record_dispatch().await;
 
-        // Set initial task status with full metadata
+        // Record the target as scanned only now that the scan task is actually
+        // being dispatched (past the throttle and per-credential gates). Marking
+        // at submit-request time recorded targets as scanned even when the task
+        // was deferred and later evicted from the deferred queue unrun, which
+        // permanently suppressed the scan via `request_recon`'s scan guards — the
+        // host then never got a service scan (bare IP / no ports in loot).
+        // Idempotent; the deferred queue's signature dedup bounds duplicate
+        // dispatches while a scan is pending.
+        if task_type == "recon" {
+            if let Some(ip) = scan_target_from_payload(&payload) {
+                {
+                    let mut state = self.state.write().await;
+                    state.mark_processed(DEDUP_SCANNED_TARGETS, ip.clone());
+                }
+                let _ = self
+                    .state
+                    .persist_dedup(&self.queue, DEDUP_SCANNED_TARGETS, &ip)
+                    .await;
+            }
+        }
+
         let _ = self
             .queue
             .set_task_status_full(
@@ -367,16 +578,34 @@ impl Dispatcher {
         // spawn can record on RequestAssistance without re-resolving them.
         let state_for_assist = self.state.clone();
         let assist_key_for_spawn = assist_pattern_key(&tt, &payload);
-        tokio::spawn(async move {
-            let outcome = runner.execute_task(&tt, &tid, role, &payload).await;
+        let task_hard_timeout = self.config.task_hard_timeout;
+        let spawned = tokio::spawn(async move {
+            let outcome = match tokio::time::timeout(
+                task_hard_timeout,
+                runner.execute_task(&tt, &tid, role, &payload),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    tracing::error!(
+                        task_id = %tid,
+                        task_type = %tt,
+                        timeout_secs = task_hard_timeout.as_secs(),
+                        "Task exceeded its hard wall-clock ceiling — aborting so it cannot block the operation indefinitely"
+                    );
+                    Err(anyhow::anyhow!(
+                        "task exceeded hard timeout of {}s",
+                        task_hard_timeout.as_secs()
+                    ))
+                }
+            };
 
             // Token usage is now recorded incrementally per-LLM-call via
             // CallbackHandler::on_token_usage — no batch recording needed here.
 
-            // Convert outcome to TaskResult and push to result queue
             let mut result = match outcome {
                 Ok(outcome) => {
-                    // Merge all structured discoveries from tool results
                     let merged_discoveries = if outcome.discoveries.is_empty() {
                         None
                     } else {
@@ -605,6 +834,10 @@ impl Dispatcher {
             }
         });
 
+        self.tracker
+            .set_abort(&task_id, spawned.abort_handle())
+            .await;
+
         Ok(SubmissionOutcome::Submitted(task_id))
     }
 }
@@ -614,6 +847,28 @@ impl Dispatcher {
 /// the original payload.
 ///
 /// Used by `submit_to_llm` when persisting the `TaskInfo` to Redis.
+/// If `payload` is a recon task that performs a network scan (`network_scan`
+/// or `nmap_scan` technique) against a concrete `target_ip`, return that IP.
+///
+/// Callers use this to record `scanned_targets` at actual-dispatch time rather
+/// than at submit-request time. A scan the throttler defers and the deferred
+/// queue later evicts unrun never reaches dispatch, so it no longer leaves a
+/// false "scanned" mark that permanently suppresses the scan.
+fn scan_target_from_payload(payload: &Value) -> Option<String> {
+    let ip = payload.get("target_ip").and_then(Value::as_str)?;
+    if ip.is_empty() {
+        return None;
+    }
+    let runs_scan = payload
+        .get("techniques")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|t| t == "network_scan" || t == "nmap_scan");
+    runs_scan.then(|| ip.to_string())
+}
+
 pub(crate) fn task_params_from_payload(
     payload: &Value,
     cred_key: Option<&str>,
@@ -699,12 +954,14 @@ pub(crate) fn merge_result_extras(
             "domain_admin_path",
             "has_golden_ticket",
             "vuln_id",
-            "domain",
             "target",
             "target_ip",
             "target_spn",
         ] {
             obj.remove(key);
+        }
+        for key in crate::orchestrator::result_processing::parsing::DISCOVERY_PAYLOAD_KEYS {
+            obj.remove(*key);
         }
     }
     if let Some(disc) = merged_discoveries {
@@ -809,6 +1066,40 @@ pub(crate) fn assist_pattern_key(task_type: &str, payload: &serde_json::Value) -
 mod assist_key_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn scan_target_matches_network_scan_technique() {
+        let p = json!({"target_ip": "192.168.58.10", "techniques": ["network_scan", "smb_signing_check"]});
+        assert_eq!(
+            scan_target_from_payload(&p).as_deref(),
+            Some("192.168.58.10")
+        );
+    }
+
+    #[test]
+    fn scan_target_matches_nmap_scan_alias() {
+        let p = json!({"target_ip": "192.168.58.11", "techniques": ["nmap_scan"]});
+        assert_eq!(
+            scan_target_from_payload(&p).as_deref(),
+            Some("192.168.58.11")
+        );
+    }
+
+    #[test]
+    fn scan_target_none_without_scan_technique() {
+        // Share/user enumeration carries no scan technique — dispatching it must
+        // not mark the target scanned (that would suppress the real port scan).
+        let p = json!({"target_ip": "192.168.58.10", "techniques": ["enumerate_shares"]});
+        assert!(scan_target_from_payload(&p).is_none());
+    }
+
+    #[test]
+    fn scan_target_none_without_target_ip() {
+        let p = json!({"techniques": ["network_scan"]});
+        assert!(scan_target_from_payload(&p).is_none());
+        let p = json!({"target_ip": "", "techniques": ["network_scan"]});
+        assert!(scan_target_from_payload(&p).is_none());
+    }
 
     #[test]
     fn pattern_key_includes_target_user_domain() {
@@ -944,8 +1235,6 @@ mod helper_tests {
     use super::*;
     use serde_json::json;
 
-    // --- task_params_from_payload ---------------------------------------
-
     #[test]
     fn task_params_includes_credential_key_when_provided() {
         let payload = json!({"target_ip": "192.168.58.10"});
@@ -988,8 +1277,6 @@ mod helper_tests {
         assert!(p.is_empty());
     }
 
-    // --- inject_vuln_id_into_result --------------------------------------
-
     fn make_result(result: Option<serde_json::Value>) -> TaskResult {
         TaskResult {
             task_id: "t-test".into(),
@@ -1023,8 +1310,6 @@ mod helper_tests {
         // Stayed a string; injection silently no-ops.
         assert_eq!(tr.result.unwrap(), json!("just a string"));
     }
-
-    // --- parse_task_complete_result --------------------------------------
 
     #[test]
     fn parse_complete_result_uses_object_form_when_json() {
@@ -1061,8 +1346,6 @@ mod helper_tests {
         assert_eq!(r["steps"], 5);
         assert_eq!(r["tool_calls"], 10);
     }
-
-    // --- merge_result_extras ---------------------------------------------
 
     #[test]
     fn merge_extras_strips_llm_supplied_keys_first() {
@@ -1146,5 +1429,103 @@ mod helper_tests {
         assert_eq!(m["summary"], "ok");
         assert_eq!(m["steps"], 5);
         assert_eq!(m["tool_calls"], 12);
+    }
+
+    /// The whole payload is LLM-authored — `parse_task_complete_result` takes
+    /// the model's JSON verbatim — so every key the entity parser accepts has to
+    /// be stripped before the parser's own discoveries are attached.
+    #[test]
+    fn merge_extras_strips_every_key_the_entity_parser_reads() {
+        let mut base = json!({"summary": "ok"});
+        let obj = base.as_object_mut().unwrap();
+        for key in crate::orchestrator::result_processing::parsing::DISCOVERY_PAYLOAD_KEYS {
+            obj.insert((*key).into(), json!("fabricated"));
+        }
+
+        let m = merge_result_extras(base, None, None, Vec::new());
+        for key in crate::orchestrator::result_processing::parsing::DISCOVERY_PAYLOAD_KEYS {
+            assert!(
+                m.get(*key).is_none(),
+                "LLM-supplied `{key}` survived into the result payload"
+            );
+        }
+        assert_eq!(m["summary"], "ok");
+    }
+}
+
+#[cfg(test)]
+mod mediation_gate_tests {
+    use super::*;
+
+    #[test]
+    fn mediation_off_leaves_every_dispatch_alone() {
+        assert!(!should_mediate(
+            true, false, "privesc", false, "exploit", false
+        ));
+        assert!(!should_mediate(
+            true, false, "lateral", false, "lateral", false
+        ));
+    }
+
+    #[test]
+    fn only_vetoable_work_is_mediated() {
+        for task_type in ["exploit", "lateral", "coercion", "acl_chain_step"] {
+            assert!(
+                should_mediate(true, true, "privesc", false, task_type, false),
+                "{task_type} is expensive or failure-prone and must be reviewable"
+            );
+        }
+        for task_type in [
+            "recon",
+            "crack",
+            "credential_access",
+            "acl_analysis",
+            "nmap",
+        ] {
+            assert!(
+                !should_mediate(true, true, "recon", false, task_type, false),
+                "{task_type} is routine — mediating it only adds latency"
+            );
+        }
+    }
+
+    #[test]
+    fn scope_all_restores_full_mediation() {
+        assert!(should_mediate(true, true, "recon", false, "recon", true));
+        assert!(should_mediate(true, true, "cracker", false, "crack", true));
+    }
+
+    #[test]
+    fn the_orchestrator_planning_task_is_never_mediated() {
+        assert!(!should_mediate(
+            true,
+            true,
+            "orchestrator",
+            false,
+            "orchestrator_plan",
+            true
+        ));
+    }
+
+    #[test]
+    fn orchestrator_directed_dispatch_bypasses_mediation() {
+        assert!(!should_mediate(
+            true, true, "privesc", true, "exploit", true
+        ));
+    }
+
+    #[test]
+    fn approved_release_is_never_re_mediated() {
+        assert!(!should_mediate(
+            false, true, "privesc", false, "exploit", true
+        ));
+    }
+
+    #[tokio::test]
+    async fn orchestrator_directed_flag_is_scoped_to_the_call() {
+        assert!(!is_orchestrator_directed());
+        let inside = as_orchestrator_directed(async { is_orchestrator_directed() }).await;
+        assert!(inside);
+        assert!(!is_orchestrator_directed());
     }
 }

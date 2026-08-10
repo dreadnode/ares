@@ -1,0 +1,547 @@
+---
+# Proxmox attacker-VM tasks — drive an ares orchestrator running on a Kali
+# VM cloned from the `ares-attack-box` template (VMID 111). Alternative to
+# the k8s `red:multi:*` and `ec2:*` paths when targets are on the same
+# hypervisor as the attacker (e.g. a Ludus range hosted on Proxmox).
+#
+# Architecture: single VM with Redis + NATS + orchestrator + tools
+# (ARES_TOOL_DISPATCH=local). Orch runs under a small wrapper that
+# claims one op at a time from `ares:operations` and exits on stop.
+#
+# Network: attacker sits on the same VLAN as the targets, so no NAT
+# (vmbr1001 tag=10 by default — adjust for your Ludus range).
+#
+# All ops happen via ProxyJump through the Proxmox host because the
+# attacker VLAN is not routable from your laptop.
+#
+# Usage:
+#   task proxmox:status                        # VM running? IP? orch alive? op runtime?
+#   task proxmox:deploy                        # local build + scp + restart orch
+#   task proxmox:submit                        # submit a fresh op against DEFAULT_IPS
+#   task proxmox:loot                          # ares ops loot --latest
+#   task proxmox:logs                          # tail dispatch.log (ANSI cleaned)
+#   task proxmox:exec CMD="pgrep -af ares"     # arbitrary shell on the attacker
+#   task proxmox:clone NEW_VMID=201            # clone template into another attacker
+version: "3"
+
+set: [errexit, pipefail]
+
+vars:
+  INFO: '\033[0;34m[INFO]\033[0m'
+  SUCCESS: '\033[0;32m[SUCCESS]\033[0m'
+  ERROR: '\033[0;31m[ERROR]\033[0m'
+  WARN: '\033[1;33m[WARN]\033[0m'
+  # Proxmox SSH host (jump host). Must be in ~/.ssh/config.
+  PROXMOX_SSH_HOST: '{{.PROXMOX_SSH_HOST | default "proxmox"}}'
+  # Attacker VM identifiers on Proxmox
+  ATTACKER_VMID: '{{.ATTACKER_VMID | default "200"}}'
+  ATTACKER_NAME: '{{.ATTACKER_NAME | default "attacker-1"}}'
+  ATTACKER_USER: '{{.ATTACKER_USER | default "kali"}}'
+  # Source template (built via warpgate-templates/templates/ares-attack-box-proxmox)
+  TEMPLATE_VMID: '{{.TEMPLATE_VMID | default "111"}}'
+  # Network — VLAN-tagged bridge shared with the range targets
+  BRIDGE: '{{.BRIDGE | default "vmbr1001"}}'
+  VLAN_TAG: '{{.VLAN_TAG | default "10"}}'
+  # Defaults for ops submit — override per range
+  DEFAULT_IPS: '{{.DEFAULT_IPS | default "10.1.10.10,10.1.10.11,10.1.10.12,10.1.10.22,10.1.10.23"}}'
+  DEFAULT_DOMAIN: '{{.DEFAULT_DOMAIN | default "sevenkingdoms.local"}}'
+  DEFAULT_TARGET_LABEL: '{{.DEFAULT_TARGET_LABEL | default "goad-ludus"}}'
+  # Model: derived from config/ares.yaml (agents.orchestrator.model) so the
+  # whole pipeline tracks one source of truth. Override per submit with MODEL=.
+  DEFAULT_MODEL:
+    sh: awk '/^  orchestrator:/{f=1} f&&/^[[:space:]]*model:/{gsub(/[",]/,"",$2); print $2; exit}' config/ares.yaml 2>/dev/null || echo "openai/gpt-5"
+  # Build target — attacker-1 is x86_64
+  RUST_TARGET: '{{.RUST_TARGET | default "x86_64-unknown-linux-gnu"}}'
+  # Local binary path produced by `task remote:rust:build`
+  LOCAL_BIN: 'target/{{.RUST_TARGET}}/release/ares'
+  # Remote paths on the attacker
+  REMOTE_BIN: '/usr/local/bin/ares'
+  REMOTE_ENV_FILE: '/etc/default/ares'
+  REMOTE_DISPATCH_LOG: '/var/log/ares/dispatch.log'
+  ATTACKER_IP_CMD: '{{.TASKFILE_DIR}}/scripts/attacker-ip.sh {{.PROXMOX_SSH_HOST}} {{.ATTACKER_VMID}}'
+
+tasks:
+  # ============================================================================
+  # Status / Info
+  # ============================================================================
+
+  status:
+    desc: "Show attacker VM state, IP, orchestrator status, and current op runtime"
+    silent: true
+    cmds:
+      - |
+        echo -e "{{.INFO}} Proxmox: {{.PROXMOX_SSH_HOST}}   VMID: {{.ATTACKER_VMID}} ({{.ATTACKER_NAME}})"
+        VM_STATE=$(ssh -o ConnectTimeout=10 {{.PROXMOX_SSH_HOST}} "qm status {{.ATTACKER_VMID}}" 2>&1 | awk '{print $2}')
+        echo -e "{{.INFO}} VM state: $VM_STATE"
+        if [ "$VM_STATE" != "running" ]; then
+          echo -e "{{.WARN}} VM not running — start with: ssh {{.PROXMOX_SSH_HOST}} 'qm start {{.ATTACKER_VMID}}'"
+          exit 0
+        fi
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then
+          echo -e "{{.WARN}} Could not resolve attacker IP via guest agent — VM may still be booting"
+          exit 0
+        fi
+        echo -e "{{.SUCCESS}} attacker IP: $IP"
+        echo
+        ssh -o ConnectTimeout=10 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP /bin/bash <<'EOF'
+        echo "=== procs ==="
+        pgrep -af "ares orchestrator|ares-dispatch" || echo "  (no ares procs running)"
+        echo
+        echo "=== services ==="
+        systemctl is-active redis nats-server 2>&1 | paste <(echo -e "redis\nnats-server") -
+        echo
+        echo "=== current op ==="
+        ARES_REDIS_URL=redis://localhost:6379 ares ops runtime --latest 2>&1 | head -12 || echo "  (no ops)"
+        EOF
+
+  ip:
+    desc: "Print attacker IP only (for scripting)"
+    silent: true
+    cmds:
+      - '{{.ATTACKER_IP_CMD}}'
+
+  # ============================================================================
+  # Code Deploy
+  # ============================================================================
+
+  deploy:
+    desc: "Build ares for x86_64-linux, scp to attacker, restart orchestrator"
+    silent: true
+    cmds:
+      - task: deploy:build
+      - task: deploy:push
+      - task: deploy:env
+      - task: deploy:restart
+
+  deploy:build:
+    desc: "Cross-compile ares for the attacker (x86_64-linux)"
+    silent: true
+    cmds:
+      - |
+        echo -e "{{.INFO}} Building for {{.RUST_TARGET}}..."
+        task remote:rust:build RUST_TARGET={{.RUST_TARGET}}
+        ls -lh {{.LOCAL_BIN}}
+
+  deploy:push:
+    desc: "SCP the local binary to the attacker via ProxyJump"
+    silent: true
+    preconditions:
+      - sh: test -f {{.LOCAL_BIN}}
+        msg: "Binary not found at {{.LOCAL_BIN}}. Run: task proxmox:deploy:build"
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        echo -e "{{.INFO}} Pushing $(ls -lh {{.LOCAL_BIN}} | awk '{print $5}') to {{.ATTACKER_USER}}@$IP:{{.REMOTE_BIN}}"
+        scp -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.LOCAL_BIN}} {{.ATTACKER_USER}}@$IP:/tmp/ares
+        ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP 'sudo install -m 755 /tmp/ares {{.REMOTE_BIN}} && rm /tmp/ares && ares --version'
+        echo -e "{{.SUCCESS}} binary installed"
+
+  deploy:env:
+    desc: "Sync /etc/default/ares from config/ares.yaml: ARES_LLM_MODEL (orchestrator model) plus the matching *_BASE_URL for the active provider (llm.ollama_base_url / llm.openai_base_url); strips stale base URLs so a real API never inherits a dead LAN endpoint. Run after changing the model or endpoint."
+    silent: true
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        MODEL_SPEC="{{.DEFAULT_MODEL}}"
+        # Pull optional endpoint overrides from the config `llm:` block (empty if commented/absent).
+        cfg_url() { awk -v k="$1" '/^llm:/{f=1;next} f&&/^[^[:space:]#]/{f=0} f&&$0 ~ "^[[:space:]]*"k":[[:space:]]*"{sub("^[[:space:]]*"k":[[:space:]]*","");gsub(/"/,"");print;exit}' config/ares.yaml; }
+        # Pick the base URL matching the active provider; blank => remove the key from the env.
+        WANT_OPENAI=""; WANT_OLLAMA=""
+        case "$MODEL_SPEC" in
+          ollama/*)
+            WANT_OLLAMA="$(cfg_url ollama_base_url)"
+            [ -z "$WANT_OLLAMA" ] && echo -e "{{.WARN}} model is ollama/* but llm.ollama_base_url is unset — provider falls back to http://localhost:11434 on the attacker" ;;
+          openai/*) WANT_OPENAI="$(cfg_url openai_base_url)" ;;
+        esac
+        echo -e "{{.INFO}} Syncing -> {{.REMOTE_ENV_FILE}}: ARES_LLM_MODEL=$MODEL_SPEC  OPENAI_BASE_URL=${WANT_OPENAI:-<unset>}  OLLAMA_BASE_URL=${WANT_OLLAMA:-<unset>}"
+        # reconcile KEY VALUE: upsert when VALUE is set, delete the line when blank. 0600 root file, other lines untouched.
+        ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+          "sudo bash -c '
+            f={{.REMOTE_ENV_FILE}};
+            touch \"\$f\"; chmod 600 \"\$f\"; chown root:root \"\$f\";
+            reconcile() {
+              k=\"\$1\"; v=\"\$2\";
+              if [ -z \"\$v\" ]; then sed -i \"/^\${k}=/d\" \"\$f\";
+              elif grep -q \"^\${k}=\" \"\$f\"; then sed -i \"s|^\${k}=.*|\${k}=\${v}|\" \"\$f\";
+              else echo \"\${k}=\${v}\" >> \"\$f\"; fi;
+            };
+            reconcile ARES_LLM_MODEL \"$MODEL_SPEC\";
+            reconcile OPENAI_BASE_URL \"$WANT_OPENAI\";
+            reconcile OLLAMA_BASE_URL \"$WANT_OLLAMA\";
+            grep -E \"^(ARES_LLM_MODEL|OPENAI_BASE_URL|OLLAMA_BASE_URL)=\" \"\$f\" || true'"
+        echo -e "{{.SUCCESS}} env synced — restart the orchestrator to pick it up (task proxmox:deploy:restart)"
+
+  deploy:restart:
+    desc: "Kill orchestrator + dispatcher, clear stale lock, restart dispatcher"
+    silent: true
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP /bin/bash <<'EOF'
+        ARES_REDIS_URL=redis://localhost:6379 ares ops stop --latest 2>/dev/null | tail -1 || true
+        sudo pkill -f "ares orchestrator$" 2>/dev/null || true
+        sleep 1
+        sudo pkill -f "ares-dispatch" 2>/dev/null || true
+        sleep 1
+        redis-cli --raw KEYS 'ares:lock:*' | xargs -r redis-cli DEL >/dev/null
+        sudo bash -c 'set -a; source /etc/default/ares; [ -f /etc/ares/secrets.env ] && source /etc/ares/secrets.env; set +a; nohup /usr/local/bin/ares-dispatch.sh >>/var/log/ares/dispatch.log 2>&1 &'
+        sleep 2
+        pgrep -af "ares-dispatch|ares orchestrator" | head
+        EOF
+
+  # ============================================================================
+  # Operations
+  # ============================================================================
+
+  submit:
+    desc: "Submit a fresh op against DEFAULT_IPS (override IPS=, DOMAIN=, MODEL=); waits up to 15s to confirm dispatcher claimed it, then auto-spawns a detached watcher that drops the report into ./reports/red/ on completion (NO_WATCH=true to disable)."
+    silent: true
+    vars:
+      IPS: '{{.IPS | default .DEFAULT_IPS}}'
+      DOMAIN: '{{.DOMAIN | default .DEFAULT_DOMAIN}}'
+      TARGET_LABEL: '{{.TARGET_LABEL | default .DEFAULT_TARGET_LABEL}}'
+      MODEL: '{{.MODEL | default .DEFAULT_MODEL}}'
+      NO_WATCH: '{{.NO_WATCH | default ""}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        echo -e "{{.INFO}} Submitting op against {{.IPS}} domain={{.DOMAIN}} model={{.MODEL}}"
+        # `ops submit` does an LLM preflight that requires OPENAI_API_KEY in
+        # the env, but the kali user can't read /etc/default/ares (mode 0600
+        # root). Source it via sudo so the key reaches the submit process.
+        SUBMIT_OUT=$(ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+          "sudo bash -c 'set -a; source {{.REMOTE_ENV_FILE}}; set +a; \
+             ARES_REDIS_URL=redis://localhost:6379 ares ops submit \
+             {{.TARGET_LABEL}} {{.DOMAIN}} \
+             --ips {{.IPS}} \
+             --pin-active \
+             --model {{.MODEL}}'" 2>&1)
+        echo "$SUBMIT_OUT" | tail -3
+        OP_ID=$(echo "$SUBMIT_OUT" | grep -oE 'op-[0-9]{8}-[0-9]{6}' | tail -1)
+        if [ -z "$OP_ID" ]; then exit 0; fi
+
+        spawn_watcher() {
+          if [ "{{.NO_WATCH}}" = "true" ]; then
+            echo -e "{{.INFO}} NO_WATCH=true — skipping auto-report watcher."
+            echo -e "{{.INFO}}   Manual fetch later: task proxmox:report OP_ID=$OP_ID"
+            return
+          fi
+          mkdir -p "{{.OUTPUT_DIR}}/red"
+          WATCH_LOG="/tmp/ares-proxmox-watch-$OP_ID.log"
+          # nohup + </dev/null detaches from this shell so the watcher
+          # survives terminal close. It polls ssh-side until the op hits a
+          # terminal state, then runs proxmox:report and exits.
+          nohup task proxmox:watch OP_ID="$OP_ID" OUTPUT_DIR="{{.OUTPUT_DIR}}" \
+            </dev/null >"$WATCH_LOG" 2>&1 &
+          WATCH_PID=$!
+          echo -e "{{.SUCCESS}} Auto-report watcher detached (PID $WATCH_PID, log: $WATCH_LOG)"
+          echo -e "{{.INFO}}   Report will appear at {{.OUTPUT_DIR}}/red/$OP_ID.md when op completes."
+          echo -e "{{.INFO}}   To stop early: kill $WATCH_PID  |  Manual fetch: task proxmox:report OP_ID=$OP_ID"
+        }
+
+        # Healthcheck: confirm the dispatcher wrapper actually claimed this op
+        # (writes "Starting operation: <id>" to dispatch.log). Silent submit +
+        # wedged dispatcher has happened in the field — this surfaces it
+        # within ~15s instead of letting the user discover empty loot later.
+        for i in 1 2 3 4 5 6 7; do
+          sleep 2
+          if ssh -o ConnectTimeout=8 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+              "sudo grep -qF 'Starting operation: $OP_ID' /var/log/ares/dispatch.log 2>/dev/null"; then
+            echo -e "{{.SUCCESS}} Dispatcher claimed $OP_ID (took ~$((i*2))s)"
+            spawn_watcher
+            exit 0
+          fi
+        done
+        echo -e "{{.WARN}} Dispatcher did NOT claim $OP_ID within 15s — likely a stale wrapper."
+        echo -e "{{.WARN}} Run: task proxmox:deploy:restart  to clear it, then resubmit."
+        # Spawn the watcher anyway — if the user fixes the dispatcher manually,
+        # the op will still complete and the watcher will catch it.
+        spawn_watcher
+
+  stop:
+    desc: "Stop the latest op and kill the orchestrator (dispatcher stays up)"
+    silent: true
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP /bin/bash <<'EOF'
+        ARES_REDIS_URL=redis://localhost:6379 ares ops stop --latest 2>&1 | tail -2
+        sudo pkill -f "ares orchestrator$" 2>/dev/null || true
+        EOF
+
+  loot:
+    desc: "Dump op loot (defaults to latest; pass OP_ID=op-... to target a specific op; WATCH=5 for live watch)"
+    silent: true
+    vars:
+      WATCH: '{{.WATCH | default ""}}'
+      DIFF: '{{.DIFF | default ""}}'
+      OP_ID: '{{.OP_ID | default ""}}'
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        FLAGS=""
+        [ -n "{{.WATCH}}" ] && FLAGS="$FLAGS --watch {{.WATCH}}"
+        [ -n "{{.DIFF}}" ] && FLAGS="$FLAGS --diff"
+        if [ -n "{{.OP_ID}}" ]; then
+          SELECTOR="{{.OP_ID}}"
+        else
+          SELECTOR="--latest"
+        fi
+        ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+          "ARES_REDIS_URL=redis://localhost:6379 ares ops loot $SELECTOR $FLAGS"
+
+  runtime:
+    desc: "Show current op runtime stats (vulns, creds, hashes, tokens, cost). Pass WATCH=N for live refresh every N seconds."
+    silent: true
+    vars:
+      WATCH: '{{.WATCH | default ""}}'
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        FLAGS=""
+        [ -n "{{.WATCH}}" ] && FLAGS="$FLAGS --watch {{.WATCH}}"
+        ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+          "ARES_REDIS_URL=redis://localhost:6379 ares ops runtime --latest $FLAGS"
+
+  ops:list:
+    desc: "List all ops in Redis"
+    silent: true
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+          "ARES_REDIS_URL=redis://localhost:6379 ares ops list"
+
+  report:
+    desc: "Generate the markdown report for OP_ID (or LATEST=true) on the attacker and fetch it to OUTPUT_DIR/red/<op>.md (default ./reports). Pass REGENERATE=true to rebuild from state."
+    silent: true
+    vars:
+      OP_ID: '{{.OP_ID | default ""}}'
+      LATEST: '{{.LATEST | default ""}}'
+      REGENERATE: '{{.REGENERATE | default "false"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+    preconditions:
+      - sh: test -n "{{.OP_ID}}" || test "{{.LATEST}}" = "true"
+        msg: "Either OP_ID=op-... or LATEST=true is required"
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        mkdir -p "{{.OUTPUT_DIR}}/red"
+
+        OP_ARG=""
+        LATEST_FLAG=""
+        if [ -n "{{.OP_ID}}" ]; then
+          OP_ARG="{{.OP_ID}}"
+        else
+          LATEST_FLAG="--latest"
+        fi
+        REGEN_FLAG=""
+        [ "{{.REGENERATE}}" = "true" ] && REGEN_FLAG="--regenerate"
+
+        # Generate the report on the attacker. Write to ~/.cache/ares-reports
+        # (user-writable) — /tmp/reports is owned by the root-running dispatcher
+        # and the kali user can't write into it.
+        REMOTE_OUT='$HOME/.cache/ares-reports'
+        ssh -o ConnectTimeout=30 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+          "mkdir -p $REMOTE_OUT && ARES_REDIS_URL=redis://localhost:6379 ares ops report $OP_ARG $LATEST_FLAG $REGEN_FLAG --output-dir $REMOTE_OUT" \
+          || { echo -e "{{.ERROR}} ares ops report failed on attacker"; exit 1; }
+
+        # Resolve the operation ID locally for the scp filename.
+        if [ -n "{{.OP_ID}}" ]; then
+          RESOLVED_OP="{{.OP_ID}}"
+        else
+          RESOLVED_OP=$(ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+            "ARES_REDIS_URL=redis://localhost:6379 ares ops list --latest 2>/dev/null" | tr -d '\r\n ')
+        fi
+        if [ -z "$RESOLVED_OP" ]; then echo -e "{{.ERROR}} Could not resolve operation ID"; exit 1; fi
+
+        scp -q -o ConnectTimeout=30 -J {{.PROXMOX_SSH_HOST}} \
+          "{{.ATTACKER_USER}}@$IP:.cache/ares-reports/red/${RESOLVED_OP}.md" \
+          "{{.OUTPUT_DIR}}/red/${RESOLVED_OP}.md" \
+          || { echo -e "{{.ERROR}} scp failed (no ~/.cache/ares-reports/red/${RESOLVED_OP}.md on attacker)"; exit 1; }
+
+        echo -e "{{.SUCCESS}} Report saved to: {{.OUTPUT_DIR}}/red/${RESOLVED_OP}.md"
+
+  watch:
+    desc: "Poll the op status over SSH; when it reaches a terminal state, run proxmox:report and exit. Used by proxmox:submit to auto-fetch reports. Pass OP_ID=op-... (or default LATEST), POLL_INTERVAL=30, MAX_WAIT=7200."
+    silent: true
+    vars:
+      OP_ID: '{{.OP_ID | default ""}}'
+      POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
+      MAX_WAIT: '{{.MAX_WAIT | default "7200"}}'
+      OUTPUT_DIR: '{{.OUTPUT_DIR | default "./reports"}}'
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        mkdir -p "{{.OUTPUT_DIR}}/red"
+
+        OP_ARG=""
+        LATEST_FLAG="--latest"
+        if [ -n "{{.OP_ID}}" ]; then
+          OP_ARG="{{.OP_ID}}"
+          LATEST_FLAG=""
+        fi
+
+        START=$(date +%s)
+        echo "Watching proxmox op (poll={{.POLL_INTERVAL}}s, max_wait={{.MAX_WAIT}}s, output={{.OUTPUT_DIR}}/red/)"
+        while true; do
+          ELAPSED=$(( $(date +%s) - START ))
+          if [ $ELAPSED -gt {{.MAX_WAIT}} ]; then
+            echo "ERROR: Max wait ({{.MAX_WAIT}}s) exceeded without terminal state"
+            exit 1
+          fi
+          STATUS_OUT=$(ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+            "ARES_REDIS_URL=redis://localhost:6379 ares ops status $OP_ARG $LATEST_FLAG" 2>&1 || true)
+          STATUS=$(echo "$STATUS_OUT" | grep -E '^Status: ' | head -1 | awk '{print $2}')
+          RESOLVED_OP=$(echo "$STATUS_OUT" | grep -E '^Operation: ' | head -1 | awk '{print $2}')
+          if [ -z "$STATUS" ]; then
+            echo "[${ELAPSED}s] no status yet (waiting for op to register)"
+          else
+            echo "[${ELAPSED}s] op=${RESOLVED_OP:-?} status=$STATUS"
+            case "$STATUS" in
+              completed|stopped|failed|cancelled)
+                if [ -z "$RESOLVED_OP" ]; then
+                  echo "ERROR: Reached terminal state but could not resolve operation ID"
+                  exit 1
+                fi
+                task proxmox:report OP_ID="$RESOLVED_OP" OUTPUT_DIR="{{.OUTPUT_DIR}}"
+                exit 0
+                ;;
+            esac
+          fi
+          sleep {{.POLL_INTERVAL}}
+        done
+
+  # ============================================================================
+  # Logs / Exec
+  # ============================================================================
+
+  logs:
+    desc: "Tail orchestrator dispatch log (ANSI codes stripped). Override LINES= (default 100), FILTER=regex"
+    silent: true
+    vars:
+      LINES: '{{.LINES | default "100"}}'
+      FILTER: '{{.FILTER | default ""}}'
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        if [ -n "{{.FILTER}}" ]; then
+          ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+            "sudo tail -{{.LINES}} {{.REMOTE_DISPATCH_LOG}} | sed 's/\x1b\[[0-9;]*m//g' | grep -E '{{.FILTER}}'"
+        else
+          ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+            "sudo tail -{{.LINES}} {{.REMOTE_DISPATCH_LOG}} | sed 's/\x1b\[[0-9;]*m//g'"
+        fi
+
+  logs:follow:
+    desc: "Follow orchestrator log (ANSI stripped). Ctrl-C to exit. Optional FILTER=regex"
+    silent: true
+    vars:
+      FILTER: '{{.FILTER | default ""}}'
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        if [ -n "{{.FILTER}}" ]; then
+          ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+            "sudo tail -F {{.REMOTE_DISPATCH_LOG}} | sed -u 's/\x1b\[[0-9;]*m//g' | grep --line-buffered -E '{{.FILTER}}'"
+        else
+          ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP \
+            "sudo tail -F {{.REMOTE_DISPATCH_LOG}} | sed -u 's/\x1b\[[0-9;]*m//g'"
+        fi
+
+  exec:
+    desc: "Run an arbitrary shell command on the attacker (usage: task proxmox:exec CMD='pgrep -af ares')"
+    silent: true
+    vars:
+      CMD: '{{.CMD | default "hostname && uptime"}}'
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        ssh -o ConnectTimeout=15 -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP "{{.CMD}}"
+
+  ssh:
+    desc: "Interactive SSH session to the attacker"
+    silent: true
+    interactive: true
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        ssh -J {{.PROXMOX_SSH_HOST}} {{.ATTACKER_USER}}@$IP
+
+  redis:forward:
+    desc: "Port-forward attacker Redis to localhost:16379 (background SSH). Run again to stop and re-establish."
+    silent: true
+    vars:
+      LOCAL_PORT: '{{.LOCAL_PORT | default "16379"}}'
+    cmds:
+      - |
+        IP="$({{.ATTACKER_IP_CMD}})"
+        if [ -z "$IP" ]; then echo -e "{{.ERROR}} Could not resolve attacker IP"; exit 1; fi
+        pkill -f "ssh.*-L {{.LOCAL_PORT}}:127.0.0.1:6379.*{{.ATTACKER_USER}}@$IP" 2>/dev/null || true
+        ssh -fN -J {{.PROXMOX_SSH_HOST}} -L {{.LOCAL_PORT}}:127.0.0.1:6379 {{.ATTACKER_USER}}@$IP
+        echo -e "{{.SUCCESS}} Redis tunneled to localhost:{{.LOCAL_PORT}}"
+        echo -e "{{.INFO}} Use: ARES_REDIS_URL=redis://localhost:{{.LOCAL_PORT}} ares ops loot --latest"
+
+  # ============================================================================
+  # VM Lifecycle
+  # ============================================================================
+
+  clone:
+    desc: "Clone TEMPLATE_VMID into a new attacker (NEW_VMID=201 NEW_NAME=attacker-2 required)"
+    silent: true
+    vars:
+      NEW_VMID: '{{.NEW_VMID | default ""}}'
+      NEW_NAME: '{{.NEW_NAME | default ""}}'
+    preconditions:
+      - sh: test -n "{{.NEW_VMID}}"
+        msg: "NEW_VMID is required. Usage: task proxmox:clone NEW_VMID=201 NEW_NAME=attacker-2"
+      - sh: test -n "{{.NEW_NAME}}"
+        msg: "NEW_NAME is required. Usage: task proxmox:clone NEW_VMID=201 NEW_NAME=attacker-2"
+    cmds:
+      - |
+        echo -e "{{.INFO}} Cloning VMID {{.TEMPLATE_VMID}} → {{.NEW_VMID}} ({{.NEW_NAME}}) on bridge {{.BRIDGE}} tag {{.VLAN_TAG}}"
+        ssh -o ConnectTimeout=15 {{.PROXMOX_SSH_HOST}} /bin/bash <<EOF
+        set -e
+        qm clone {{.TEMPLATE_VMID}} {{.NEW_VMID}} --name {{.NEW_NAME}} --full
+        qm set {{.NEW_VMID}} --net0 virtio,bridge={{.BRIDGE}},tag={{.VLAN_TAG}}
+        qm set {{.NEW_VMID}} --ipconfig0 ip=dhcp
+        qm start {{.NEW_VMID}}
+        echo "--- $(date) — clone started ---"
+        qm config {{.NEW_VMID}} | grep -E '^(name|net0|ipconfig0|cores|memory)'
+        EOF
+        echo -e "{{.SUCCESS}} Clone started. Wait ~30-60s for cloud-init + guest agent, then:"
+        echo -e "{{.INFO}}   task proxmox:status ATTACKER_VMID={{.NEW_VMID}} ATTACKER_NAME={{.NEW_NAME}}"
+
+  destroy:
+    desc: "Stop and destroy the attacker VM (DESTRUCTIVE, requires CONFIRM=yes)"
+    silent: true
+    vars:
+      CONFIRM: '{{.CONFIRM | default ""}}'
+    preconditions:
+      - sh: test "{{.CONFIRM}}" = "yes"
+        msg: "Refusing to destroy without CONFIRM=yes. Usage: task proxmox:destroy ATTACKER_VMID=201 CONFIRM=yes"
+    cmds:
+      - |
+        echo -e "{{.WARN}} Destroying VMID {{.ATTACKER_VMID}} ({{.ATTACKER_NAME}})"
+        ssh -o ConnectTimeout=15 {{.PROXMOX_SSH_HOST}} /bin/bash <<EOF
+        qm stop {{.ATTACKER_VMID}} 2>/dev/null || true
+        sleep 2
+        qm destroy {{.ATTACKER_VMID}} --purge
+        EOF
+        echo -e "{{.SUCCESS}} VMID {{.ATTACKER_VMID}} destroyed"

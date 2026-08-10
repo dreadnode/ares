@@ -272,12 +272,15 @@ impl Strategy {
     /// - `include_techniques` is non-empty and the technique is NOT in it
     pub fn is_technique_allowed(&self, technique: &str) -> bool {
         let t = technique.to_lowercase();
+        let names = technique_aliases(&t);
 
-        if self.exclude_techniques.contains(&t) {
+        if names.iter().any(|n| self.exclude_techniques.contains(*n)) {
             return false;
         }
 
-        if !self.include_techniques.is_empty() && !self.include_techniques.contains(&t) {
+        if !self.include_techniques.is_empty()
+            && !names.iter().any(|n| self.include_techniques.contains(*n))
+        {
             return false;
         }
 
@@ -286,10 +289,18 @@ impl Strategy {
 
     /// Get the effective priority for a vulnerability type.
     ///
-    /// Returns the weight from the merged map, or a default of 5.
+    /// Returns the weight from the merged map — checking the requested name
+    /// first, then its config aliases — or a default of 5.
     pub fn effective_priority(&self, vuln_type: &str) -> i32 {
         let t = vuln_type.to_lowercase();
-        self.weights.get(&t).copied().unwrap_or(5)
+        if let Some(w) = self.weights.get(&t) {
+            return *w;
+        }
+        technique_aliases(&t)
+            .iter()
+            .find_map(|n| self.weights.get(*n))
+            .copied()
+            .unwrap_or(5)
     }
 
     /// Whether exploitation should continue after DA is achieved.
@@ -305,6 +316,27 @@ impl Strategy {
     /// get work dispatched in parallel rather than being serialized.
     pub fn is_comprehensive(&self) -> bool {
         self.preset == StrategyPreset::Comprehensive
+    }
+}
+
+/// Technique names that address the same driver from config.
+///
+/// `config/ares.yaml` and `docs/strategy.md` document `acl_abuse` as the ACL
+/// lever, while the only live ACL driver (`auto_dacl_abuse`) is named
+/// `dacl_abuse`. Both spellings resolve to the same weight and the same
+/// exclude/include decision so neither silently no-ops.
+const TECHNIQUE_ALIAS_GROUPS: &[&[&str]] = &[&["acl_abuse", "dacl_abuse"]];
+
+/// Every config spelling for `technique`, the requested name first.
+fn technique_aliases(technique: &str) -> Vec<&str> {
+    match TECHNIQUE_ALIAS_GROUPS
+        .iter()
+        .find(|g| g.contains(&technique))
+    {
+        Some(group) => std::iter::once(technique)
+            .chain(group.iter().copied().filter(|n| *n != technique))
+            .collect(),
+        None => vec![technique],
     }
 }
 
@@ -358,7 +390,6 @@ fn fast_weights() -> HashMap<String, i32> {
         ("petitpotam_unauth", 4),
         ("winrm_lateral", 5),
         ("group_enumeration", 2),
-        ("krbrelayup", 5),
         ("searchconnector_coercion", 5),
         ("lsassy_dump", 3),
         ("rdp_lateral", 5),
@@ -394,7 +425,7 @@ fn fast_weights() -> HashMap<String, i32> {
 /// The goal: exploit *everything* discovered, not just the fastest path to DA.
 fn comprehensive_weights() -> HashMap<String, i32> {
     [
-        // --- Tier 1: Exploitation breadth (these were starved before) ---
+        // Tier 1: Exploitation breadth (these were starved before)
         ("esc1", 1),
         ("esc4", 1),
         ("esc8", 1),
@@ -411,9 +442,8 @@ fn comprehensive_weights() -> HashMap<String, i32> {
         ("gpo_abuse", 1),
         ("nopac", 1),
         ("certifried", 1),
-        ("krbrelayup", 1),
         ("printnightmare", 1),
-        // --- Tier 2: Credential pipeline + lateral + persistence ---
+        // Tier 2: Credential pipeline + lateral + persistence
         ("dc_secretsdump", 2),
         ("golden_ticket", 2),
         ("forest_trust_escalation", 2),
@@ -437,7 +467,7 @@ fn comprehensive_weights() -> HashMap<String, i32> {
         ("pth_spray", 2),
         ("winrm_lateral", 2),
         ("rdp_lateral", 2),
-        // --- Tier 3: Recon, enumeration, coercion setup ---
+        // Tier 3: Recon, enumeration, coercion setup
         ("smb_signing_disabled", 3),
         ("share_coercion", 3),
         ("mssql_coercion", 3),
@@ -515,7 +545,6 @@ fn stealth_weights() -> HashMap<String, i32> {
         ("petitpotam_unauth", 5),
         ("winrm_lateral", 4),
         ("group_enumeration", 2),
-        ("krbrelayup", 4),
         ("searchconnector_coercion", 6),
         ("lsassy_dump", 5),
         ("rdp_lateral", 4),
@@ -621,6 +650,59 @@ mod tests {
     fn effective_priority_unknown_type() {
         let s = Strategy::default();
         assert_eq!(s.effective_priority("unknown_technique"), 5);
+    }
+
+    #[test]
+    fn acl_abuse_weight_reaches_dacl_abuse_driver() {
+        let mut s = Strategy::from_preset(StrategyPreset::Fast);
+        s.weights.remove("dacl_abuse");
+        s.weights.insert("acl_abuse".to_string(), 3);
+        assert_eq!(s.effective_priority("acl_abuse"), 3);
+        assert_eq!(s.effective_priority("dacl_abuse"), 3);
+    }
+
+    #[test]
+    fn dacl_abuse_weight_still_resolves_when_only_alias_is_set() {
+        let mut s = Strategy::from_preset(StrategyPreset::Fast);
+        s.weights.remove("acl_abuse");
+        s.weights.insert("dacl_abuse".to_string(), 2);
+        assert_eq!(s.effective_priority("acl_abuse"), 2);
+    }
+
+    #[test]
+    fn excluding_acl_abuse_blocks_the_dacl_abuse_driver() {
+        let mut s = Strategy::from_preset(StrategyPreset::Fast);
+        s.exclude_techniques.insert("acl_abuse".to_string());
+        assert!(!s.is_technique_allowed("acl_abuse"));
+        assert!(!s.is_technique_allowed("dacl_abuse"));
+    }
+
+    #[test]
+    fn excluding_dacl_abuse_blocks_the_acl_abuse_name() {
+        let mut s = Strategy::from_preset(StrategyPreset::Fast);
+        s.exclude_techniques.insert("dacl_abuse".to_string());
+        assert!(!s.is_technique_allowed("acl_abuse"));
+    }
+
+    #[test]
+    fn including_acl_abuse_admits_the_dacl_abuse_driver() {
+        let mut s = Strategy::from_preset(StrategyPreset::Fast);
+        s.include_techniques.insert("acl_abuse".to_string());
+        assert!(s.is_technique_allowed("dacl_abuse"));
+        assert!(!s.is_technique_allowed("secretsdump"));
+    }
+
+    #[test]
+    fn technique_aliases_leaves_unaliased_names_alone() {
+        assert_eq!(technique_aliases("secretsdump"), vec!["secretsdump"]);
+        assert_eq!(
+            technique_aliases("acl_abuse"),
+            vec!["acl_abuse", "dacl_abuse"]
+        );
+        assert_eq!(
+            technique_aliases("dacl_abuse"),
+            vec!["dacl_abuse", "acl_abuse"]
+        );
     }
 
     #[test]
@@ -769,6 +851,18 @@ mod tests {
     }
 
     #[test]
+    fn shipped_config_enables_diversity_knobs() {
+        const SHIPPED: &str = include_str!("../../../config/ares.yaml");
+        let cfg: ares_core::config::AresConfig = serde_yaml::from_str(SHIPPED).unwrap();
+        let s = Strategy::resolve(None, Some(&cfg));
+        assert!(s.emit_path_records);
+        assert_eq!(s.selection_temperature, 0.7);
+        assert!(s.novelty_enabled);
+        assert_eq!(s.novelty_scope, "per-campaign");
+        assert!(s.randomize_entry_foothold);
+    }
+
+    #[test]
     fn diversity_knobs_flow_from_yaml() {
         let yaml_str = serde_yaml::to_string(&serde_json::json!({
             "operation": {
@@ -858,7 +952,6 @@ mod tests {
             "petitpotam_unauth",
             "winrm_lateral",
             "group_enumeration",
-            "krbrelayup",
             "searchconnector_coercion",
             "lsassy_dump",
             "rdp_lateral",

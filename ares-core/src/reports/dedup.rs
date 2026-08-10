@@ -74,7 +74,6 @@ pub fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
         }
     }
 
-    // Build a set of (username, hash_value) pairs that have a domain-qualified entry.
     let qualified: HashSet<(String, String)> = result
         .iter()
         .filter(|h| !h.domain.trim().is_empty())
@@ -86,7 +85,6 @@ pub fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
         })
         .collect();
 
-    // Drop empty-domain entries that are duplicated by a domain-qualified entry.
     result.retain(|h| {
         if h.domain.trim().is_empty() {
             let key = (
@@ -127,8 +125,28 @@ pub fn dedup_hashes(hashes: &[Hash]) -> Vec<Hash> {
 /// identity even when LDAP enum was blocked / cross-forest. The user must
 /// already have been authenticated by the KDC during the NTDS dump, so
 /// treating it as verified is safe.
-const TRUSTED_USER_SOURCES: &[&str] =
-    &["kerberos_enum", "netexec_user_enum", "secretsdump_implicit"];
+///
+/// `ldap_extraction` is the high-confidence `sAMAccountName` source (group and
+/// computer objects are filtered out where LDAP records are recognized). It is
+/// trusted so that users first discovered over LDAP — e.g. whole trusted-domain
+/// rosters the recon agent only reaches via cross-realm LDAP — are not dropped
+/// from the report. The state store is first-writer-wins by (domain, username),
+/// so a user recorded under `ldap_extraction` can never be re-tagged by a later
+/// netexec run; excluding the source hid those users entirely.
+const TRUSTED_USER_SOURCES: &[&str] = &[
+    "kerberos_enum",
+    "netexec_user_enum",
+    "secretsdump_implicit",
+    "ldap_extraction",
+];
+
+/// True if `username` is a machine/computer account rather than a real user:
+/// a trailing `$` (sometimes stripped upstream), or a Windows auto-generated
+/// host NetBIOS name (`WIN-…`, `DESKTOP-…`).
+fn is_machine_account(username: &str) -> bool {
+    let lower = username.to_lowercase();
+    username.ends_with('$') || lower.starts_with("win-") || lower.starts_with("desktop-")
+}
 
 /// Deduplicate users by (domain, username) case-insensitively.
 /// Filters to trusted parser sources only and normalizes is_admin for known
@@ -137,8 +155,12 @@ pub fn dedup_users(users: &[User]) -> Vec<User> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for u in users {
-        // Only accept users from trusted parser sources
         if !u.source.is_empty() && !TRUSTED_USER_SOURCES.contains(&u.source.as_str()) {
+            continue;
+        }
+        // Machine accounts leak into `ldap_extraction` via sAMAccountName —
+        // they are hosts, not users.
+        if is_machine_account(&u.username) {
             continue;
         }
         let key = (u.domain.to_lowercase(), u.username.to_lowercase());
@@ -213,6 +235,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: String::new(),
+            member_of: Vec::new(),
         }
     }
 
@@ -310,6 +333,49 @@ mod tests {
     #[test]
     fn dedup_users_empty_input() {
         let result = dedup_users(&[]);
+        assert!(result.is_empty());
+    }
+
+    fn make_user_src(username: &str, domain: &str, source: &str) -> User {
+        User {
+            username: username.to_string(),
+            domain: domain.to_string(),
+            description: String::new(),
+            is_admin: false,
+            source: source.to_string(),
+            member_of: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dedup_users_trusts_ldap_extraction() {
+        let users = vec![make_user_src(
+            "carol",
+            "child.contoso.local",
+            "ldap_extraction",
+        )];
+        let result = dedup_users(&users);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn dedup_users_drops_untrusted_source() {
+        let users = vec![make_user_src(
+            "wordlisthit",
+            "contoso.local",
+            "output_extraction",
+        )];
+        let result = dedup_users(&users);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn dedup_users_filters_machine_accounts() {
+        let users = vec![
+            make_user_src("DC01$", "contoso.local", "ldap_extraction"),
+            make_user_src("WIN-G7FPA5ZZXZV", "contoso.local", "ldap_extraction"),
+        ];
+        let result = dedup_users(&users);
         assert!(result.is_empty());
     }
 

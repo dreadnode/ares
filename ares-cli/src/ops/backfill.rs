@@ -21,7 +21,6 @@ pub(crate) async fn ops_backfill_domains(
 
     let mut inferred_domains = HashSet::new();
 
-    // Extract domains from target
     if let Some(target) = &state.target {
         let d = target.domain.trim().to_lowercase();
         if !d.is_empty() {
@@ -29,7 +28,6 @@ pub(crate) async fn ops_backfill_domains(
         }
     }
 
-    // Extract from credentials
     for cred in &state.all_credentials {
         let d = cred.domain.trim().to_lowercase();
         if !d.is_empty() {
@@ -37,7 +35,6 @@ pub(crate) async fn ops_backfill_domains(
         }
     }
 
-    // Extract from users
     for user in &state.all_users {
         let d = user.domain.trim().to_lowercase();
         if !d.is_empty() {
@@ -45,7 +42,6 @@ pub(crate) async fn ops_backfill_domains(
         }
     }
 
-    // Extract from hashes
     for h in &state.all_hashes {
         let d = h.domain.trim().to_lowercase();
         if !d.is_empty() {
@@ -53,7 +49,6 @@ pub(crate) async fn ops_backfill_domains(
         }
     }
 
-    // Extract from hostnames
     for host in &state.all_hosts {
         if host.hostname.contains('.') {
             let parts: Vec<&str> = host.hostname.split('.').collect();
@@ -104,7 +99,6 @@ pub(crate) async fn ops_offload_cost(
     let mut conn = connect_redis(redis_url).await?;
     let op_id = resolve_operation_id(&mut conn, operation_id, latest).await?;
 
-    // Read token usage from Redis
     let usage = ares_core::token_usage::get_token_usage(&mut conn, &op_id)
         .await?
         .with_context(|| format!("No token usage data in Redis for operation: {op_id}"))?;
@@ -114,10 +108,8 @@ pub(crate) async fn ops_offload_cost(
         return Ok(());
     }
 
-    // Calculate cost
     let (total_cost, breakdown, _unpriced) = ares_core::token_usage::estimate_usage_cost(&usage);
 
-    // Build per-model JSONB payload
     let model_usage_json: serde_json::Value = if !usage.models.is_empty() {
         let mut models = serde_json::Map::new();
         for (model_name, model_usage) in &usage.models {
@@ -140,7 +132,6 @@ pub(crate) async fn ops_offload_cost(
         serde_json::Value::Null
     };
 
-    // Write to PostgreSQL
     let pool = crate::history::connect_postgres().await?;
 
     let rows_affected = sqlx::query(

@@ -1,0 +1,94 @@
+---
+- name: Fail when no S3 bucket is configured
+  ansible.builtin.fail:
+    msg: "vector_s3_bucket is required (DreadOps ares-logging output `bucket_name`)."
+  when: vector_s3_bucket | length == 0
+
+- name: Map kernel arch to Vector release arch
+  ansible.builtin.set_fact:
+    vector_release_arch: >-
+      {{ {
+        'x86_64': 'x86_64',
+        'aarch64': 'aarch64',
+      }[ansible_architecture] }}
+
+- name: Create Vector directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ vector_config_dir }}"
+    - "{{ vector_data_dir }}"
+  become: true
+
+- name: Check installed Vector version
+  ansible.builtin.command:
+    cmd: "{{ vector_install_dir }}/vector --version"
+  register: vector_installed_version
+  changed_when: false
+  failed_when: false
+
+- name: Download Vector release
+  ansible.builtin.unarchive:
+    src: "{{ vector_download_base }}/v{{ vector_version }}/vector-{{ vector_version }}-{{ vector_release_arch }}-unknown-linux-gnu.tar.gz"
+    dest: /tmp
+    remote_src: true
+    creates: "/tmp/vector-{{ vector_release_arch }}-unknown-linux-gnu/bin/vector"
+  when: vector_version not in (vector_installed_version.stdout | default(''))
+  become: true
+
+- name: Install Vector binary
+  ansible.builtin.copy:
+    src: "/tmp/vector-{{ vector_release_arch }}-unknown-linux-gnu/bin/vector"
+    dest: "{{ vector_install_dir }}/vector"
+    mode: '0755'
+    remote_src: true
+  when: vector_version not in (vector_installed_version.stdout | default(''))
+  become: true
+  notify: Restart vector
+
+- name: Clean up Vector release directory
+  ansible.builtin.file:
+    path: "/tmp/vector-{{ vector_release_arch }}-unknown-linux-gnu"
+    state: absent
+  when: vector_version not in (vector_installed_version.stdout | default(''))
+  become: true
+
+- name: Render Vector config
+  ansible.builtin.template:
+    src: vector.yaml.j2
+    dest: "{{ vector_config_dir }}/vector.yaml"
+    owner: root
+    group: root
+    mode: '0644'
+  become: true
+  notify: Restart vector
+
+- name: Validate Vector config
+  ansible.builtin.command:
+    cmd: "{{ vector_install_dir }}/vector validate {{ vector_config_dir }}/vector.yaml"
+  register: vector_validate
+  changed_when: false
+  when: vector_verify_install
+  become: true
+
+- name: Install Vector systemd unit
+  ansible.builtin.template:
+    src: vector.service.j2
+    dest: /etc/systemd/system/vector.service
+    mode: '0644'
+  become: true
+  notify:
+    - Reload systemd
+    - Restart vector
+
+- name: Enable and start Vector
+  ansible.builtin.systemd:
+    name: vector
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true

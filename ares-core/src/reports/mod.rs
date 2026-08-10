@@ -127,7 +127,6 @@ mod tests {
         ];
         let deduped = dedup_hashes(&hashes);
         assert_eq!(deduped.len(), 2);
-        // Administrator should be sorted first
         assert_eq!(deduped[0].username, "administrator");
     }
 
@@ -156,6 +155,7 @@ mod tests {
             all_shares: Vec::new(),
             discovered_vulnerabilities: HashMap::new(),
             exploited_vulnerabilities: HashSet::new(),
+            superseded_vulnerabilities: HashSet::new(),
             has_domain_admin: false,
             has_golden_ticket: false,
             domain_admin_path: None,
@@ -233,6 +233,7 @@ mod tests {
             all_shares: Vec::new(),
             discovered_vulnerabilities: HashMap::new(),
             exploited_vulnerabilities: HashSet::new(),
+            superseded_vulnerabilities: HashSet::new(),
             has_domain_admin: true,
             has_golden_ticket: false,
             domain_admin_path: Some("secretsdump -> administrator hash -> DA".to_string()),
@@ -270,7 +271,10 @@ mod tests {
             host_count: 1,
             user_count: 1,
             highest_pyramid_level: 4,
+            highest_analyst_pyramid_level: 4,
+            analyst_evidence_count: 5,
             ttp_count: 0,
+            analyst_ttp_count: 0,
             escalation_count: 1,
             attack_synopses: vec!["Possible lateral movement detected".to_string()],
             alert_summaries: Vec::new(),
@@ -283,6 +287,8 @@ mod tests {
             recommendations: vec!["Review lateral movement paths".to_string()],
             investigation_details: Vec::new(),
             pyramid_distribution: HashMap::new(),
+            analyst_pyramid_distribution: HashMap::new(),
+            coverage: None,
         };
 
         let result = gen.generate(&input);
@@ -291,6 +297,171 @@ mod tests {
         assert!(report.contains("# Blue Team Operation Report"));
         assert!(report.contains("blue-test-001"));
         assert!(report.contains("ESCALATIONS REQUIRED"));
+    }
+
+    #[cfg(feature = "blue")]
+    #[test]
+    fn blueteam_report_derives_tactics_from_techniques() {
+        use crate::models::SharedBlueTeamState;
+
+        let gen = BlueTeamReportGenerator::new().unwrap();
+        let mut state = SharedBlueTeamState::new("inv-tactics-001".to_string());
+        // Blue agents routinely record techniques and no tactics at all; the
+        // report used to answer that with "MITRE Tactics | 0" and a table of
+        // "Unknown".
+        state.identified_techniques = vec![
+            "T1003.006".to_string(),
+            "T1021.002".to_string(),
+            "T1649".to_string(),
+        ];
+        assert!(state.identified_tactics.is_empty());
+
+        let report = gen
+            .generate_from_states("op-tactics-001", &[state], &HashMap::new(), None)
+            .unwrap();
+
+        assert!(
+            !report.contains("MITRE Tactics | 0"),
+            "tactics must be derived, not zero: {report}"
+        );
+        assert!(report.contains("| MITRE Tactics | 2 |"), "{report}");
+        assert!(report.contains("Credential Access"));
+        assert!(report.contains("Lateral Movement"));
+        assert!(
+            report.contains("| T1003.006 | DCSync | Credential Access |"),
+            "technique rows must carry a resolved name and tactic: {report}"
+        );
+
+        let techniques_table = report
+            .split("## Techniques Identified By Blue Team")
+            .nth(1)
+            .and_then(|s| s.split("## Pyramid").next())
+            .expect("technique section present");
+        assert!(
+            !techniques_table.contains("Unknown"),
+            "no technique should render tactic Unknown: {techniques_table}"
+        );
+    }
+
+    #[cfg(feature = "blue")]
+    #[test]
+    fn blueteam_report_without_red_state_refuses_to_imply_coverage() {
+        let gen = BlueTeamReportGenerator::new().unwrap();
+        let input = BlueTeamReportInput {
+            operation_id: "blue-test-002".to_string(),
+            coverage: None,
+            ..Default::default()
+        };
+
+        let report = gen.generate(&input).unwrap();
+        assert!(report.contains("Red Team Activity Coverage"));
+        assert!(
+            report.contains("Not measured"),
+            "an unmeasurable report must say so: {report}"
+        );
+        assert!(
+            !report.contains("Detection rate |"),
+            "must not print a detection rate it did not compute: {report}"
+        );
+    }
+
+    #[cfg(feature = "blue")]
+    #[test]
+    fn blueteam_report_reports_missed_red_techniques() {
+        use crate::reports::blueteam::RedTeamCoverage;
+
+        let gen = BlueTeamReportGenerator::new().unwrap();
+        let mut red = crate::models::SharedRedTeamState::new("op-test-003".to_string());
+        red.all_techniques = vec![
+            "T1003.006".to_string(),
+            "T1078.002".to_string(),
+            "T1210".to_string(),
+            "T1558.003".to_string(),
+        ];
+        let mut blue = crate::models::SharedBlueTeamState::new("inv-test-003".to_string());
+        blue.identified_techniques = vec!["T1003.006".to_string(), "T1615".to_string()];
+
+        let input = BlueTeamReportInput {
+            operation_id: "op-test-003".to_string(),
+            coverage: Some(RedTeamCoverage::compute(&red, &[blue])),
+            ..Default::default()
+        };
+
+        let report = gen.generate(&input).unwrap();
+        assert!(
+            report.contains("25% (1/4)"),
+            "detection rate must be stated against red's real total: {report}"
+        );
+        assert!(report.contains("T1210"), "missed techniques must be named");
+        assert!(report.contains("T1558.003"));
+        assert!(
+            report.contains("T1615"),
+            "blue-only detections must be separated out"
+        );
+    }
+
+    #[cfg(feature = "blue")]
+    #[test]
+    fn blueteam_report_weights_the_rate_and_shows_the_silent_tail() {
+        use crate::models::Evidence;
+        use crate::reports::blueteam::RedTeamCoverage;
+
+        let gen = BlueTeamReportGenerator::new().unwrap();
+        let mut red = crate::models::SharedRedTeamState::new("op-test-004".to_string());
+        let event = |technique: &str, ts: &str| {
+            serde_json::json!({
+                "id": format!("evt-{technique}-{ts}"),
+                "timestamp": ts,
+                "description": format!("red ran {technique}"),
+                "mitre_techniques": [technique],
+            })
+        };
+        red.all_timeline_events = vec![
+            event("T1046", "2026-07-28T21:28:00Z"),
+            event("T1046", "2026-07-28T21:29:00Z"),
+            event("T1046", "2026-07-28T21:30:00Z"),
+            event("T1003.006", "2026-07-28T21:53:14Z"),
+        ];
+
+        let mut blue = crate::models::SharedBlueTeamState::new("inv-test-004".to_string());
+        blue.identified_techniques = vec!["T1046".to_string(), "T1003.006".to_string()];
+        blue.evidence = vec![Evidence {
+            id: "ev-sweep-1".to_string(),
+            evidence_type: "technique".to_string(),
+            value: "T1046".to_string(),
+            source: "detection_sweep:detect_port_scan".to_string(),
+            timestamp: Some("2026-07-28T21:28:00Z".to_string()),
+            pyramid_level: 6,
+            mitre_techniques: vec!["T1046".to_string()],
+            confidence: 0.8,
+            metadata: HashMap::new(),
+            source_query_id: None,
+            validated: true,
+        }];
+
+        let input = BlueTeamReportInput {
+            operation_id: "op-test-004".to_string(),
+            coverage: Some(RedTeamCoverage::compute(&red, &[blue])),
+            ..Default::default()
+        };
+        let report = gen.generate(&input).unwrap();
+
+        assert!(
+            report.contains("| Detection rate | 75% (3/4) |"),
+            "the headline rate must weight each technique by red's action count: {report}"
+        );
+        assert!(
+            report.contains("| Technique coverage (set join) | 100% (2/2) |"),
+            "the set join must stay visible, and stay separate: {report}"
+        );
+        assert!(
+            report.contains("| Taken after blue's last detection | 1 |"),
+            "red actions past blue's last detection must be counted: {report}"
+        );
+        assert!(
+            report.contains("| T1003.006 | 1 | blue named it"),
+            "a technique blue named but never observed must say so: {report}"
+        );
     }
 
     #[cfg(feature = "blue")]
@@ -444,7 +615,7 @@ mod tests {
         let states = vec![state1, state2];
         let queries_by_inv = HashMap::new();
 
-        let result = gen.generate_from_states("op-test-001", &states, &queries_by_inv);
+        let result = gen.generate_from_states("op-test-001", &states, &queries_by_inv, None);
         assert!(result.is_ok(), "Generate failed: {:?}", result.err());
         let report = result.unwrap();
         assert!(report.contains("# Blue Team Operation Report"));
@@ -452,7 +623,6 @@ mod tests {
         assert!(report.contains("BruteForce"));
         assert!(report.contains("MalwareDetected"));
         assert!(report.contains("ESCALATIONS REQUIRED"));
-        // Should have 2 investigations
         assert!(report.contains("Investigations | 2"));
     }
 }

@@ -201,8 +201,6 @@ pub fn make_output(body: &str) -> ToolOutput {
 mod tests {
     use super::*;
 
-    // ── pyramid_level_name ──────────────────────────────────────────
-
     #[test]
     fn pyramid_level_name_known_levels() {
         assert_eq!(pyramid_level_name("hash_values"), "Hash Values");
@@ -221,8 +219,6 @@ mod tests {
         assert_eq!(pyramid_level_name("something_else"), "something_else");
     }
 
-    // ── pyramid_level_value ─────────────────────────────────────────
-
     #[test]
     fn pyramid_level_value_ordering() {
         assert_eq!(pyramid_level_value("hash_values"), 1);
@@ -237,8 +233,6 @@ mod tests {
     fn pyramid_level_value_unknown_is_zero() {
         assert_eq!(pyramid_level_value("unknown"), 0);
     }
-
-    // ── technique_to_recipe ─────────────────────────────────────────
 
     #[test]
     fn technique_to_recipe_known_mappings() {
@@ -257,8 +251,6 @@ mod tests {
         let map = technique_to_recipe();
         assert!(map.get("T9999").is_none());
     }
-
-    // ── attack_chains lazy cache ────────────────────────────────────
 
     #[test]
     fn attack_chains_loads_and_is_nonempty() {
@@ -283,8 +275,6 @@ mod tests {
         }
     }
 
-    // ── detection_recipes lazy cache ────────────────────────────────
-
     #[test]
     fn detection_recipes_loads_and_is_nonempty() {
         let recipes = detection_recipes();
@@ -302,8 +292,6 @@ mod tests {
         }
     }
 
-    // ── climb_strategies lazy cache ─────────────────────────────────
-
     #[test]
     fn climb_strategies_loads_and_is_nonempty() {
         let strategies = climb_strategies();
@@ -320,8 +308,6 @@ mod tests {
             }
         }
     }
-
-    // ── make_output ─────────────────────────────────────────────────
 
     #[test]
     fn make_output_returns_success() {

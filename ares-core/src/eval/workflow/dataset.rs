@@ -293,6 +293,7 @@ pub fn load_red_state_from_file(
             description: String::new(),
             is_admin: u.is_admin,
             source: u.source,
+            member_of: Vec::new(),
         });
     }
 

@@ -18,11 +18,9 @@ pub fn extract_delegations(output: &str) -> Vec<DelegationEntry> {
             continue;
         }
 
-        // Detect header row
         if !header_found {
             let lower = trimmed.to_lowercase();
             if lower.contains("accountname") && lower.contains("delegationtype") {
-                // Parse column start positions from the header
                 let account_name_idx = lower.find("accountname").unwrap_or(0);
                 let account_type_idx = lower.find("accounttype").unwrap_or(0);
                 let delegation_type_idx = lower.find("delegationtype").unwrap_or(0);
@@ -38,7 +36,6 @@ pub fn extract_delegations(output: &str) -> Vec<DelegationEntry> {
             continue;
         }
 
-        // Skip separator line (dashes)
         if trimmed.chars().all(|c| c == '-' || c.is_whitespace()) {
             continue;
         }
@@ -57,8 +54,6 @@ pub fn extract_delegations(output: &str) -> Vec<DelegationEntry> {
         // For the table format, the columns may have multi-word values
         // (e.g., "Constrained w/ Protocol Trans."). Use fixed-width column
         // parsing based on the header positions when possible.
-        // Extract column values using fixed-width positions from the header.
-        // Fall back to whitespace splitting for short lines.
         let (account_str, account_type_string, delegation_type_string, target_spn_string);
         if line.len() >= _col_indices.3 {
             account_str = line

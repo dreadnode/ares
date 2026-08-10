@@ -19,13 +19,14 @@
 |--------|-------|
 | Investigations | {{ investigation_count }} |
 | Alerts Processed | {{ alert_count }} |
-| Evidence Collected | {{ evidence_count }} |
+| Evidence Collected | {{ evidence_count }} ({{ analyst_evidence_count }} analyst, {{ sweep_evidence_count }} baseline sweep) |
 | MITRE Techniques | {{ technique_count }} |
 | MITRE Tactics | {{ tactic_count }} |
 | Hosts Investigated | {{ host_count }} |
 | Users Investigated | {{ user_count }} |
-| Highest Pyramid Level | {{ highest_pyramid_level }}/6 |
-| TTPs Identified | {{ ttp_count }} |
+| Highest Pyramid Level (analyst) | {{ highest_analyst_pyramid_level }}/6 |
+| Highest Pyramid Level (incl. baseline sweep) | {{ highest_pyramid_level }}/6 |
+| TTPs Identified | {{ ttp_count }} ({{ analyst_ttp_count }} analyst, {{ sweep_ttp_count }} baseline sweep) |
 | Escalations | {{ escalation_count }} |
 
 {% if attack_synopses | length > 0 %}
@@ -42,10 +43,9 @@
 ## Investigation Summary
 
 {% if alert_summaries | length > 0 %}
-| Investigation | Alert | Severity | Evidence | Pyramid | Status |
-|--------------|-------|----------|----------|---------|--------|
-{% for alert in alert_summaries %}
-| {{ alert.investigation_id_short }}... | {{ alert.alert_name }} | {{ alert.severity }} | {{ alert.evidence_count }} | {{ alert.highest_pyramid_level }}/6 | {{ alert.status_display }} |
+| Investigation | Alert | Severity | Evidence | Pyramid (analyst/all) | Status |
+|--------------|-------|----------|----------|-----------------------|--------|
+{% for alert in alert_summaries %}| {{ alert.investigation_id_short }}... | {{ alert.alert_name }} | {{ alert.severity }} | {{ alert.evidence_count }} | {{ alert.highest_analyst_pyramid_level }}/{{ alert.highest_pyramid_level }} | {{ alert.status_display }} |
 {% endfor %}
 {% else %}
 No investigations recorded.
@@ -53,7 +53,95 @@ No investigations recorded.
 
 ---
 
-## MITRE ATT&CK Coverage
+## Red Team Activity Coverage
+
+{% if coverage %}
+Measured against the red team operation's own record of what it executed. Every red
+timeline event is one action, and an action counts as detected only when a matching
+blue detection observed telemetry around the time it happened — so a technique red ran
+109 times weighs 109 times as much as one it ran once, and a detection that stopped
+before red did stops earning credit.
+
+| Measure | Value |
+|---------|-------|
+| Detection rate | {{ coverage.detection_rate_display }} |
+| Red actions | {{ coverage.action_count }} |
+| Detected while red was running them | {{ coverage.detected_action_count }} |
+| Taken after blue's last detection | {{ coverage.actions_after_last_detection }} |
+| Blue's last detection | {{ coverage.blue_last_detection_display }} |
+| Red's last action | {{ coverage.red_last_action_display }} |
+
+Technique coverage, the unweighted set join, is reported for continuity only: it asks
+whether blue ever named each technique, ignoring how often red ran it and when blue
+said so.
+
+| Measure | Value |
+|---------|-------|
+| Technique coverage (set join) | {{ coverage.technique_rate_display }} |
+| Techniques red executed | {{ coverage.red_technique_count }} |
+| Detected by blue | {{ coverage.detected_count }} |
+| Missed by blue | {{ coverage.missed_count }} |
+
+### Detected
+
+{% if coverage.detected | length > 0 %}
+| Red Technique | Red Actions | Detected | Matched By Blue |
+|---------------|-------------|----------|-----------------|
+{% for d in coverage.detected %}| {{ d.id }} | {{ d.executions }} | {{ d.detected_executions }} | {{ d.matched_by }} |
+{% endfor %}
+{% else %}
+None. Blue detected no technique the red team actually executed.
+{% endif %}
+
+### Missed
+
+{% if coverage.missed | length > 0 %}
+Red executed these and blue produced no detection covering them, heaviest first:
+
+| Red Technique | Red Actions | Why It Scored Zero |
+|---------------|-------------|--------------------|
+{% for m in coverage.missed %}| {{ m.id }} | {{ m.executions }} | {{ m.reason }} |
+{% endfor %}
+{% else %}
+None — every technique red executed was detected.
+{% endif %}
+
+### Blue Detections Not In Red's Record
+
+{% if coverage.blue_only | length > 0 %}
+Either false positives, or activity red did not record. Not counted toward the detection rate either way:
+
+{% for b in coverage.blue_only %}
+- {{ b }}
+{% endfor %}
+{% else %}
+None.
+{% endif %}
+
+{% if coverage.untimed_technique_claims | length > 0 %}
+### Named Without Timestamped Evidence
+
+Blue named these techniques but recorded nothing timestamped behind them, so they
+cannot show that blue saw red running them. Excluded from the detection rate:
+
+{% for t in coverage.untimed_technique_claims %}
+- {{ t }}
+{% endfor %}
+{% endif %}
+
+{% if coverage.unattributed_action_count > 0 %}
+{{ coverage.unattributed_action_count }} red timeline event(s) carried no MITRE technique
+and were scored on neither side of the rate.
+{% endif %}
+{% else %}
+**Not measured.** The red team operation state was unavailable, so blue's detections
+could not be compared against what the red team actually did. The techniques listed
+below are what blue reported finding — they are not a coverage measurement.
+{% endif %}
+
+---
+
+## Techniques Identified By Blue Team
 
 ### Tactics
 
@@ -70,8 +158,7 @@ No tactics identified.
 {% if techniques | length > 0 %}
 | ID | Name | Tactic |
 |----|------|--------|
-{% for tech in techniques %}
-| {{ tech.id }} | {{ tech.name }} | {{ tech.tactic }} |
+{% for tech in techniques %}| {{ tech.id }} | {{ tech.name }} | {{ tech.tactic }} |
 {% endfor %}
 {% else %}
 No techniques identified.
@@ -81,20 +168,30 @@ No techniques identified.
 
 ## Pyramid of Pain Assessment
 
-| Level | Category | Count | Adversary Pain |
-|-------|----------|-------|----------------|
-{% for entry in pyramid_entries %}
-| {{ entry.level }} | {{ entry.category }} | {{ entry.count }} | {{ entry.pain }} |
+| Level | Category | Analyst | Baseline Sweep | Total | Adversary Pain |
+|-------|----------|---------|----------------|-------|----------------|
+{% for entry in pyramid_entries %}| {{ entry.level }} | {{ entry.category }} | {{ entry.analyst_count }} | {{ entry.sweep_count }} | {{ entry.count }} | {{ entry.pain }} |
 {% endfor %}
 
-{% if highest_pyramid_level >= 6 %}
-**Assessment**: Investigation reached TTP level - actionable intelligence produced.
-{% elif highest_pyramid_level >= 5 %}
-**Assessment**: Tool-level indicators identified. Consider further elevation to TTPs.
-{% elif highest_pyramid_level >= 3 %}
-**Assessment**: Moderate indicators identified. Deeper analysis recommended.
+{% if sweep_evidence_count > 0 %}
+The deterministic detection sweep records every fired detection at level 6 by construction — each one is a MITRE-keyed detection template, so "TTPs" is accurate per detection, but the level is a property of the catalog rather than a finding. {{ sweep_evidence_count }} of {{ evidence_count }} evidence items came from it. The Analyst column is what the investigation loop produced on its own.
+{% endif %}
+
+{% if analyst_evidence_count == 0 and evidence_count > 0 %}
+**Assessment**: Every evidence item came from the deterministic sweep. The investigation loop contributed nothing beyond the detection catalog.
+{% elif highest_analyst_pyramid_level >= 6 %}
+**Assessment**: Investigation independently reached TTP level - actionable intelligence produced.
+{% elif highest_analyst_pyramid_level >= 5 %}
+**Assessment**: Analyst evidence reached tool level. Consider further elevation to TTPs.
+{% elif highest_analyst_pyramid_level >= 3 %}
+**Assessment**: Analyst evidence reached artifact level. Consider elevation to tools and TTPs.
+{% elif highest_analyst_pyramid_level > 0 %}
+**Assessment**: Analyst evidence limited to trivial indicators. More investigation may be needed.
 {% else %}
-**Assessment**: Limited to trivial indicators. More investigation may be needed.
+**Assessment**: No evidence collected.
+{% endif %}
+{% if sweep_ttp_count > 0 and analyst_ttp_count == 0 %}
+The TTP rows above are baseline-sweep detections, not analyst findings.
 {% endif %}
 
 ---
@@ -107,8 +204,7 @@ No techniques identified.
 
 | ID | Type | Value | Techniques | Confidence |
 |----|------|-------|------------|------------|
-{% for ev in level_group.evidence %}
-| {{ ev.id_short }}... | {{ ev.type }} | `{{ ev.value }}` | {{ ev.techniques_display }} | {{ ev.confidence_display }} |
+{% for ev in level_group.evidence %}| {{ ev.id_short }}... | {{ ev.type }} | `{{ ev.value }}` | {{ ev.techniques_display }} | {{ ev.confidence_display }} |
 {% endfor %}
 
 {% endif %}
@@ -125,8 +221,7 @@ No evidence collected.
 {% if timeline | length > 0 %}
 | Time (UTC) | Event | Techniques | Confidence |
 |------------|-------|------------|------------|
-{% for event in timeline %}
-| {{ event.timestamp }} | {{ event.description_short }} | {{ event.mitre_display }} | {{ event.confidence_display }} |
+{% for event in timeline %}| {{ event.timestamp }} | {{ event.description_short }} | {{ event.mitre_display }} | {{ event.confidence_display }} |
 {% endfor %}
 {% else %}
 No timeline events recorded.
@@ -178,11 +273,15 @@ No specific recommendations generated.
 
 ### Detection Improvements
 
-{% if techniques | length > 0 %}
-Consider adding or tuning detection rules for:
+{% if detection_techniques | length > 0 %}
+Red executed these with no matching blue detection — add or tune rules for:
 {% for tech in detection_techniques %}
-- **{{ tech.id }}** ({{ tech.name }})
+- **{{ tech }}**
 {% endfor %}
+{% elif coverage %}
+_No gaps: blue matched every technique red executed._
+{% else %}
+_Not measured: no red team ground truth available for this operation._
 {% endif %}
 
 ---

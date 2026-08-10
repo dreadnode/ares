@@ -31,7 +31,6 @@ pub(crate) fn ops_correlate(
             println!("{md}");
         }
 
-        // Summary line
         println!();
         println!(
             "Correlation: {} | Activities: {} | Detected: {} ({:.0}%) | Gaps: {} | FP: {} | MTTD: {}",

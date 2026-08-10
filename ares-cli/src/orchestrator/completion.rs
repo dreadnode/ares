@@ -14,10 +14,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use redis::AsyncCommands;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::SharedState;
@@ -63,23 +63,28 @@ pub fn compute_undominated_forests(
         return Vec::new();
     }
 
-    // Only count a domain as covering a forest root when that domain IS the
-    // forest root.  Dominating a child domain (e.g. contoso.local)
-    // does NOT mean the forest root (contoso.local) is compromised — its
-    // DC has a separate krbtgt.  The child-to-parent escalation (ExtraSid /
-    // trust key) must still happen before we declare the forest dominated.
-    let dominated_roots: HashSet<String> = dominated_domains
-        .iter()
-        .filter(|d| {
-            let root = forest_root_of(d);
-            root == d.to_lowercase()
-        })
-        .map(|d| forest_root_of(d))
-        .collect();
+    let dominated_roots = dominated_forest_roots(dominated_domains);
 
     required_forests
         .difference(&dominated_roots)
         .cloned()
+        .collect()
+}
+
+/// The set of forest root domains that are fully dominated.
+///
+/// Only count a domain as covering a forest root when that domain IS the
+/// forest root. Dominating a child domain (e.g. `child.contoso.local`) does
+/// NOT mean the forest root (`contoso.local`) is compromised — its DC has a
+/// separate krbtgt. The child-to-parent escalation (ExtraSid / trust key) must
+/// still happen before we declare the forest dominated. Shared by
+/// [`compute_undominated_forests`] and [`has_pending_cross_forest_escalation`]
+/// so the two completion guards can't drift.
+fn dominated_forest_roots(dominated_domains: &HashSet<String>) -> HashSet<String> {
+    dominated_domains
+        .iter()
+        .filter(|d| forest_root_of(d) == d.to_lowercase())
+        .map(|d| forest_root_of(d))
         .collect()
 }
 
@@ -97,6 +102,206 @@ pub async fn undominated_forests(state: &SharedState) -> Vec<String> {
         &inner.dominated_domains,
         &inner.domain_controllers,
     )
+}
+
+/// Whether any discovered `forest_trust_escalation` vuln is still unexploited
+/// and not written off — cross-forest work the op must not abandon.
+///
+/// Pure over the two vuln collections so it unit-tests without a live
+/// `SharedState`.
+fn has_pending_cross_forest_escalation(
+    discovered: &std::collections::HashMap<String, ares_core::models::VulnerabilityInfo>,
+    exploited: &HashSet<String>,
+    dominated_domains: &HashSet<String>,
+) -> bool {
+    let dominated_roots = dominated_forest_roots(dominated_domains);
+    discovered.values().any(|v| {
+        v.vuln_type == "forest_trust_escalation"
+            && !exploited.contains(&v.vuln_id)
+            && !is_trust_escalation_written_off(v)
+            && !escalation_target_forest_dominated(v, &dominated_roots)
+    })
+}
+
+/// True when a `forest_trust_escalation` vuln targets a forest whose root is
+/// already dominated. Such an escalation is satisfied-by-domination: the op
+/// reached that forest's krbtgt by another path (native ADCS ESC13, a direct
+/// DCSync) so the trust forge is moot and must not pin the op open. Without
+/// this, a discovered-but-never-exploited trust forge — the SID-filtered
+/// dead-ends that are never `written_off` — keeps `is_multi_forest_op_complete`
+/// false and runs a fully-owned op out to the hard max-runtime cap.
+///
+/// A missing or blank `target_domain` is treated as NOT dominated so the vuln
+/// stays pending — the conservative default.
+fn escalation_target_forest_dominated(
+    vuln: &ares_core::models::VulnerabilityInfo,
+    dominated_roots: &HashSet<String>,
+) -> bool {
+    vuln.details
+        .get("target_domain")
+        .and_then(serde_json::Value::as_str)
+        .filter(|d| !d.is_empty())
+        .map(|d| dominated_roots.contains(&forest_root_of(d)))
+        .unwrap_or(false)
+}
+
+/// A cross-forest escalation is "written off" when `details["written_off"]` is
+/// `true`.
+///
+/// Nothing in the orchestrator writes that flag today — the trust automation
+/// leaves a SID-filtered forge unexploited and un-flagged, so this predicate is
+/// false for every escalation a live op produces. The only writer is the test
+/// helper below. The escape valve that actually retires a dead trust is
+/// [`escalation_target_forest_dominated`]: the op stops waiting once the target
+/// forest falls by another path (native ADCS ESC13, a direct DCSync). Absent
+/// that, a cross-forest escalation pins the op open to `max_runtime`.
+fn is_trust_escalation_written_off(vuln: &ares_core::models::VulnerabilityInfo) -> bool {
+    vuln.details
+        .get("written_off")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Backstop for [`undominated_forests`]: false while any cross-forest
+/// `forest_trust_escalation` remains unexploited and not written off.
+///
+/// [`compute_undominated_forests`] only marks a forest required when its trust
+/// is classified `is_cross_forest()` or a DC is keyed under the forest root. A
+/// `forest_trust_escalation` vuln can sit in state (queued against the foreign
+/// DC's IP) while neither holds — that gap let a two-forest op self-terminate
+/// with the parent forest still unowned and its escalation un-fired. Gating
+/// completion on the vuln directly closes it: the op runs on (bounded by
+/// max_runtime) until the escalation is exploited or explicitly written off.
+///
+/// An escalation whose target forest is already dominated does not count — see
+/// [`escalation_target_forest_dominated`].
+async fn is_multi_forest_op_complete(state: &SharedState) -> bool {
+    let inner = state.read().await;
+    !has_pending_cross_forest_escalation(
+        &inner.discovered_vulnerabilities,
+        &inner.exploited_vulnerabilities,
+        &inner.dominated_domains,
+    )
+}
+
+/// Timeout the blue runner applies to a single investigation. The drain budget
+/// is derived from it, so the two must not drift; the assertion below fails the
+/// build if they ever do.
+const BLUE_INVESTIGATION_TIMEOUT_SECS: u64 = 2700;
+
+#[cfg(feature = "blue")]
+const _: () = assert!(
+    BLUE_INVESTIGATION_TIMEOUT_SECS
+        == crate::orchestrator::blue::runner::INVESTIGATION_TIMEOUT_SECS
+);
+
+/// Headroom the drain wait allows on top of one investigation timeout, covering
+/// runner pickup latency and final report generation.
+///
+/// The budget MUST exceed the investigation timeout. When the two were equal the
+/// drain deadline and the investigation's own timeout fired at the same instant,
+/// so an investigation submitted at red completion was always abandoned
+/// mid-flight instead of being allowed to finish or time out on its own terms.
+const BLUE_DRAIN_SLACK_SECS: u64 = 600;
+
+/// A blue investigation the drain wait is blocking on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WatchedInvestigation {
+    pub id: String,
+    /// Whether an absent status means "still outstanding".
+    ///
+    /// True for an investigation this monitor just submitted — the runner has
+    /// not registered it yet, and treating that gap as finished would race the
+    /// op to shutdown before blue ever starts. False for pre-existing ones,
+    /// whose status key may simply have outlived its TTL from an earlier run of
+    /// the same operation.
+    pub wait_when_status_missing: bool,
+}
+
+/// Whether a watched investigation is still worth waiting for.
+pub(crate) fn still_outstanding(status: Option<&str>, wait_when_status_missing: bool) -> bool {
+    match status {
+        Some(s) => !ares_core::state::blue_status_is_terminal(s),
+        None => wait_when_status_missing,
+    }
+}
+
+/// Resolve the blue drain budget, honouring `ARES_BLUE_DRAIN_MAX_SECS`.
+pub(crate) fn resolve_blue_drain_budget(override_secs: Option<&str>) -> Duration {
+    override_secs
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| {
+            Duration::from_secs(BLUE_INVESTIGATION_TIMEOUT_SECS + BLUE_DRAIN_SLACK_SECS)
+        })
+}
+
+/// Filter `watched` down to the investigations that have not reached a terminal
+/// status yet.
+async fn outstanding_investigations(
+    conn: &mut redis::aio::ConnectionManager,
+    watched: &[WatchedInvestigation],
+) -> Vec<String> {
+    let mut outstanding = Vec::new();
+    for w in watched {
+        let status = ares_core::state::read_blue_status(conn, &w.id)
+            .await
+            .unwrap_or(None);
+        if still_outstanding(status.as_deref(), w.wait_when_status_missing) {
+            outstanding.push(w.id.clone());
+        }
+    }
+    outstanding
+}
+
+/// This operation's investigations that are not known to have finished, i.e.
+/// everything the terminal investigation must be freed from.
+///
+/// A member with **no status key is included**. Blue runs investigations
+/// serially, so a mid-op investigation that is still queued has not written a
+/// status yet — and that is exactly the one that will start later, seize the
+/// runner, and hold the terminal investigation behind it until the drain
+/// deadline. Excluding it stranded the terminal investigation of a live
+/// operation: a queued mid-op investigation escaped supersede, started 14
+/// minutes into the drain, and ran past the budget while the investigation the
+/// orchestrator was actually waiting for never began.
+///
+/// The result is only ever superseded, never waited on, so the 7-day operation
+/// set / 1-day status TTL skew that motivated excluding them is not a hazard
+/// here: superseding an investigation that expired last week is a no-op, and a
+/// supersede that fails is re-watched with `wait_when_status_missing: false`,
+/// which keeps a ghost from consuming the drain budget.
+/// Whether an investigation still needs superseding, given its status.
+///
+/// `None` means unfinished. Blue writes a status only once an investigation
+/// starts, so a queued one reads as `None` — and that is precisely the case
+/// that must be superseded, because it is next in line for the serial runner.
+pub(crate) fn is_unfinished(status: Option<&str>) -> bool {
+    !status.is_some_and(ares_core::state::blue_status_is_terminal)
+}
+
+async fn unfinished_op_investigations(
+    conn: &mut redis::aio::ConnectionManager,
+    operation_id: &str,
+) -> Vec<String> {
+    let key = format!("ares:blue:op:{operation_id}:investigations");
+    let ids: Vec<String> = redis::cmd("SMEMBERS")
+        .arg(&key)
+        .query_async(conn)
+        .await
+        .unwrap_or_default();
+
+    let mut unfinished = Vec::new();
+    for id in ids {
+        let status = ares_core::state::read_blue_status(conn, &id)
+            .await
+            .unwrap_or(None);
+        if is_unfinished(status.as_deref()) {
+            unfinished.push(id);
+        }
+    }
+    unfinished
 }
 
 /// Redis-authoritative count of red-team tasks still pending completion.
@@ -149,6 +354,35 @@ pub(crate) struct CompletionSnapshot {
     /// `Some(elapsed_since_dominance)` when the `all_forests_dominated_at`
     /// timestamp has been recorded; `None` before it's been set.
     pub all_dominated_for: Option<Duration>,
+    /// Time since the advancement watermark (exploited vulns + credentials +
+    /// hashes) last increased. `None` before the first tick establishes a
+    /// baseline. Only consulted past the soft cap.
+    pub since_last_advance: Option<Duration>,
+}
+
+const DEFAULT_EXTENSION_STALL_SECS: u64 = 600;
+
+fn extension_stall_timeout_from_env() -> Duration {
+    Duration::from_secs(
+        std::env::var("ARES_COMPLETION_EXTENSION_STALL_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_EXTENSION_STALL_SECS),
+    )
+}
+
+/// Runtime budget and stop-condition policy the decision helper applies.
+#[derive(Debug, Clone)]
+pub(crate) struct CompletionPolicy {
+    pub soft_max_runtime: Duration,
+    pub hard_max_runtime: Duration,
+    pub stop_on_da: bool,
+    pub stop_on_gt: bool,
+    pub grace_period: Duration,
+    /// How long the advancement watermark may sit still before a post-soft-cap
+    /// extension is treated as wedged rather than progressing.
+    pub extension_stall_timeout: Duration,
 }
 
 /// Outcome of a single completion check.
@@ -167,40 +401,63 @@ pub(crate) enum CompletionDecision {
 /// Decide whether the completion loop should stop, begin the post-DA grace
 /// period, or continue waiting. Pure — no Redis, no tokio sleeps.
 ///
-/// Decision priority (matches the inline logic this replaces):
+/// Runtime is bounded by a **soft** and a **hard** cap. The soft cap is the
+/// normal budget; the hard cap is a strict ceiling that always terminates.
+/// The soft cap yields to `Continue` only when the op has achieved DA on at
+/// least one domain *and* still has an undominated forest — i.e. the run is
+/// visibly progressing on multi-forest work but ran out of the primary
+/// budget. Without DA there's no evidence the op is close enough to warrant
+/// more time; with DA but all forests done, the op is just idling.
+///
+/// Decision priority:
 /// 1. `completed` flag set externally → Stop("operation marked completed")
-/// 2. `elapsed >= max_runtime` → Stop("max runtime exceeded")
-/// 3. `has_domain_admin && stop_on_da` → Stop on DA
-/// 4. `has_domain_admin && stop_on_gt`:
+/// 2. `elapsed >= hard_max_runtime` → Stop("hard max runtime exceeded")
+/// 3. `elapsed >= soft_max_runtime`:
+///     - DA achieved AND undominated forests remain AND the advancement
+///       watermark moved within `extension_stall_timeout` → fall through
+///       (extend)
+///     - DA achieved AND undominated forests remain AND the watermark is
+///       stale → Stop("extension stalled — no advancement")
+///     - otherwise → Stop("max runtime exceeded")
+/// 4. `has_domain_admin && stop_on_da` → Stop on DA
+/// 5. `has_domain_admin && stop_on_gt`:
 ///     - `has_golden_ticket` → Stop on GT
 ///     - otherwise → Continue (still waiting for GT)
-/// 5. `has_domain_admin` (default mode):
+/// 6. `has_domain_admin` (default mode):
 ///     - undominated forests remain → Continue
 ///     - all dominated, grace timer set, `elapsed_since >= grace_period` → Stop
 ///     - all dominated, grace timer set, still inside grace → Continue
 ///     - all dominated, grace timer unset → BeginGracePeriod
-/// 6. otherwise → Continue
+/// 7. otherwise → Continue
 pub(crate) fn evaluate_completion(
     snapshot: &CompletionSnapshot,
     elapsed: Duration,
-    max_runtime: Duration,
-    stop_on_da: bool,
-    stop_on_gt: bool,
-    grace_period: Duration,
+    policy: &CompletionPolicy,
 ) -> CompletionDecision {
     if snapshot.completed {
         return CompletionDecision::Stop("operation marked completed");
     }
-    if elapsed >= max_runtime {
-        return CompletionDecision::Stop("max runtime exceeded");
+    if elapsed >= policy.hard_max_runtime {
+        return CompletionDecision::Stop("hard max runtime exceeded");
+    }
+    if elapsed >= policy.soft_max_runtime {
+        if !snapshot.has_domain_admin || snapshot.undominated_forests_empty {
+            return CompletionDecision::Stop("max runtime exceeded");
+        }
+        if snapshot
+            .since_last_advance
+            .is_some_and(|since| since >= policy.extension_stall_timeout)
+        {
+            return CompletionDecision::Stop("extension stalled — no advancement");
+        }
     }
     if !snapshot.has_domain_admin {
         return CompletionDecision::Continue;
     }
-    if stop_on_da {
+    if policy.stop_on_da {
         return CompletionDecision::Stop("domain admin achieved (stop_on_domain_admin)");
     }
-    if stop_on_gt {
+    if policy.stop_on_gt {
         return if snapshot.has_golden_ticket {
             CompletionDecision::Stop("golden ticket forged (stop_on_golden_ticket)")
         } else {
@@ -211,12 +468,41 @@ pub(crate) fn evaluate_completion(
         return CompletionDecision::Continue;
     }
     match snapshot.all_dominated_for {
-        Some(since) if since >= grace_period => {
+        Some(since) if since >= policy.grace_period => {
             CompletionDecision::Stop("all forests dominated (post-exploitation complete)")
         }
         Some(_) => CompletionDecision::Continue,
         None => CompletionDecision::BeginGracePeriod,
     }
+}
+
+async fn snapshot_unless_hard_capped(
+    state: &SharedState,
+    elapsed: Duration,
+    hard_max_runtime: Duration,
+) -> Option<(bool, bool, bool, Option<Duration>, u64)> {
+    if elapsed >= hard_max_runtime {
+        return None;
+    }
+    let inner = state.read().await;
+    Some((
+        inner.has_domain_admin,
+        inner.has_golden_ticket,
+        inner.completed,
+        inner.all_forests_dominated_at.map(|t| t.elapsed()),
+        advancement_watermark(
+            inner.exploited_vulnerabilities.len(),
+            inner.credentials.len(),
+            inner.hashes.len(),
+        ),
+    ))
+}
+
+/// Forward-progress signal for the post-soft-cap extension: material the op can
+/// only gain, never lose. A run that is genuinely closing on an undominated
+/// forest moves at least one of these; a wedged run moves none.
+pub(crate) fn advancement_watermark(exploited: usize, credentials: usize, hashes: usize) -> u64 {
+    exploited as u64 + credentials as u64 + hashes as u64
 }
 
 pub async fn wait_for_completion(
@@ -225,6 +511,7 @@ pub async fn wait_for_completion(
     mut shutdown_rx: watch::Receiver<bool>,
     max_runtime: Duration,
     interval: Duration,
+    blue_enabled: bool,
 ) {
     let start = tokio::time::Instant::now();
 
@@ -240,39 +527,69 @@ pub async fn wait_for_completion(
         })
         .unwrap_or((false, false));
 
+    // Hard cap = 2× the configured budget. The soft cap (max_runtime) is the
+    // normal ceiling; the hard cap is the strict upper bound that fires even
+    // when the op is still visibly progressing on an undominated forest.
+    let hard_max_runtime = max_runtime.saturating_mul(2);
+    let extension_stall_timeout = extension_stall_timeout_from_env();
+
     info!(
         max_runtime_secs = max_runtime.as_secs(),
+        hard_max_runtime_secs = hard_max_runtime.as_secs(),
+        extension_stall_timeout_secs = extension_stall_timeout.as_secs(),
         stop_on_domain_admin = stop_on_da,
         stop_on_golden_ticket = stop_on_gt,
         "Completion monitor started"
     );
 
+    let mut last_advancement: Option<u64> = None;
+    let mut last_advance_at = tokio::time::Instant::now();
+
     loop {
-        // Check shutdown
         if *shutdown_rx.borrow() {
             info!("Completion monitor interrupted by shutdown");
             return;
         }
 
         let elapsed = start.elapsed();
-        let (has_da, has_gt, completed, all_dominated_for) = {
-            let inner = state.read().await;
-            (
-                inner.has_domain_admin,
-                inner.has_golden_ticket,
-                inner.completed,
-                inner.all_forests_dominated_at.map(|t| t.elapsed()),
+
+        let Some((has_da, has_gt, completed, all_dominated_for, advancement)) =
+            snapshot_unless_hard_capped(state, elapsed, hard_max_runtime).await
+        else {
+            error!(
+                elapsed_secs = elapsed.as_secs(),
+                hard_max_runtime_secs = hard_max_runtime.as_secs(),
+                "Hard max runtime exceeded — stopping operation without reading shared state"
+            );
+            ares_core::state::request_stop_operation(
+                &mut dispatcher.queue.connection(),
+                &dispatcher.config.operation_id,
             )
+            .await
+            .unwrap_or_else(|e| warn!(err = %e, "Failed to signal stop after hard cap"));
+            return;
         };
 
         // The grace-period check needs to know whether ALL forests are dominated.
         // That helper takes the SharedState (it reads inner under a fresh lock)
         // and is async, so it can't live inside the pure decision helper.
+        //
+        // Also require that no cross-forest `forest_trust_escalation` is left
+        // unexploited-and-not-written-off: `undominated_forests` misses a forest
+        // whose trust wasn't classified `is_cross_forest()` and whose DC isn't
+        // keyed under its root, so the vuln is the authoritative "cross-forest
+        // work remains" signal. Both must clear before the op is eligible to
+        // stop.
         let undominated_forests_empty = if has_da && !stop_on_da && !stop_on_gt {
-            undominated_forests(state).await.is_empty()
+            undominated_forests(state).await.is_empty() && is_multi_forest_op_complete(state).await
         } else {
             false
         };
+
+        if last_advancement.is_none_or(|seen| advancement > seen) {
+            last_advancement = Some(advancement);
+            last_advance_at = tokio::time::Instant::now();
+        }
 
         let snapshot = CompletionSnapshot {
             has_domain_admin: has_da,
@@ -280,15 +597,20 @@ pub async fn wait_for_completion(
             completed,
             undominated_forests_empty,
             all_dominated_for,
+            since_last_advance: Some(last_advance_at.elapsed()),
         };
         let grace_period = Duration::from_secs(180);
         let decision = evaluate_completion(
             &snapshot,
             elapsed,
-            max_runtime,
-            stop_on_da,
-            stop_on_gt,
-            grace_period,
+            &CompletionPolicy {
+                soft_max_runtime: max_runtime,
+                hard_max_runtime,
+                stop_on_da,
+                stop_on_gt,
+                grace_period,
+                extension_stall_timeout,
+            },
         );
 
         let reason = match decision {
@@ -315,87 +637,18 @@ pub async fn wait_for_completion(
                 "Completion condition met"
             );
 
-            let blue_enabled = std::env::var("ARES_BLUE_ENABLED").as_deref() == Ok("1");
+            // Freeze red dispatch immediately. Everything past this point is
+            // teardown — the blue-drain wait and the red-task drain below. Without
+            // this, the automation loops and deferred queue keep spawning new
+            // exploit/recon agent loops (burning tokens on the un-exploitable
+            // ACL/ADCS backlog) for the entire blue-drain window, which can run
+            // up to 45 minutes. Blue investigations run on their own runner and
+            // are unaffected.
+            dispatcher.mark_red_draining();
+            info!("Red dispatch frozen — draining in-flight tasks; blue investigations continue");
+
             if let Err(e) = mark_red_completion_for_loot(dispatcher, reason, blue_enabled).await {
                 warn!(err = %e, "Failed to persist red completion metadata");
-            }
-
-            // When blue team is enabled, auto-submit an investigation from the
-            // operation state if none have been submitted yet, then wait for all
-            // investigations to drain before signalling stop.
-            // Cap at 45 minutes to avoid hanging forever if an investigation is stuck.
-            if blue_enabled {
-                info!("Blue team enabled — waiting for investigations to finish before shutdown");
-                let mut conn = dispatcher.queue.connection();
-
-                // Check if any blue investigations already exist for this operation.
-                // If not, auto-submit one so blue always gets at least one run.
-                let op_inv_key = format!(
-                    "ares:blue:op:{}:investigations",
-                    dispatcher.config.operation_id
-                );
-                let existing: i64 = redis::cmd("SCARD")
-                    .arg(&op_inv_key)
-                    .query_async(&mut conn)
-                    .await
-                    .unwrap_or(0);
-                if existing == 0 {
-                    info!("No blue investigations found — auto-submitting from operation state");
-                    if let Err(e) =
-                        auto_submit_blue_investigation(state, dispatcher, &mut conn).await
-                    {
-                        warn!(err = %e, "Failed to auto-submit blue investigation");
-                    }
-                }
-                let blue_deadline = tokio::time::Instant::now() + Duration::from_secs(2700);
-                loop {
-                    if *shutdown_rx.borrow() {
-                        info!("Completion monitor interrupted by shutdown while waiting for blue");
-                        break;
-                    }
-
-                    if tokio::time::Instant::now() >= blue_deadline {
-                        warn!("Blue team wait deadline reached (45m) — proceeding with shutdown");
-                        break;
-                    }
-
-                    let active: i64 = redis::cmd("SCARD")
-                        .arg(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS)
-                        .query_async(&mut conn)
-                        .await
-                        .unwrap_or(0);
-                    let queued: i64 = match dispatcher.queue.nats_broker() {
-                        Some(nats) => match nats
-                            .jetstream()
-                            .get_stream(ares_core::nats::BLUE_TASKS_STREAM)
-                            .await
-                        {
-                            Ok(stream) => stream.cached_info().state.messages as i64,
-                            Err(_) => 0,
-                        },
-                        None => 0,
-                    };
-
-                    if active == 0 && queued == 0 {
-                        info!("All blue investigations finished");
-                        break;
-                    }
-
-                    info!(
-                        active_investigations = active,
-                        queued_investigations = queued,
-                        "Waiting for blue team to finish..."
-                    );
-
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
-                        _ = shutdown_rx.changed() => {
-                            if *shutdown_rx.borrow() {
-                                break;
-                            }
-                        }
-                    }
-                }
             }
 
             // Wait for active red team tasks and deferred queue to drain
@@ -450,6 +703,150 @@ pub async fn wait_for_completion(
                 }
             }
 
+            // Revert this operation's target mutations now that red has
+            // drained and no further mutations can be journaled.
+            //
+            // Ordering is the whole point: this runs *after* the red drain and
+            // *before* the blue wait. Blue investigations read telemetry and
+            // mutate nothing on the target, so waiting on them first is pure
+            // delay — a live run reported `completed` at 17:06 and did not
+            // revert until 17:24, eighteen minutes during which the operator
+            // had been told the run was finished and the range was still
+            // dirty. A fresh `ec2:launch` in that window flushes Redis and
+            // takes the journal with it, leaving nothing to revert from.
+            if crate::orchestrator::cleanup::auto_teardown_enabled() {
+                let mut conn = dispatcher.queue.connection();
+                match crate::orchestrator::cleanup::run_teardown_once(
+                    &mut conn,
+                    &dispatcher.config.operation_id,
+                    &crate::orchestrator::cleanup::TeardownOptions {
+                        dry_run: false,
+                        only: None,
+                    },
+                )
+                .await
+                {
+                    Ok(Some(report)) => info!(
+                        total = report.total,
+                        reverted = report.reverted,
+                        verified = report.verified,
+                        unverified = report.unverified,
+                        skipped = report.skipped,
+                        failed = report.failed,
+                        "Post-operation teardown complete"
+                    ),
+                    Ok(None) => debug!("Post-operation teardown already ran for this operation"),
+                    Err(e) => warn!(
+                        err = %e,
+                        "Post-operation teardown failed — mutations remain on the target"
+                    ),
+                }
+            }
+
+            // When blue team is enabled, submit the terminal investigation — the
+            // only one built from the complete loot and the full attack window —
+            // then wait for it and it alone. Every other unfinished mid-op
+            // investigation is superseded rather than waited on: the blue runner
+            // executes investigations serially, so leaving one alive holds the
+            // terminal investigation behind it for up to a full investigation
+            // timeout, which is what strands the terminal one unfinished at the
+            // drain deadline.
+            //
+            // "Unfinished" must include the ones still *queued*, not just the
+            // ones already running — a queued investigation has written no
+            // status yet, and it is the one that will grab the runner the moment
+            // the current investigation releases it.
+            if blue_enabled {
+                info!("Blue team enabled — waiting for investigations to finish before shutdown");
+                let mut conn = dispatcher.queue.connection();
+                let op_id = dispatcher.config.operation_id.clone();
+
+                // Snapshot before submitting so the terminal investigation can
+                // never appear in its own supersede list.
+                let unfinished = unfinished_op_investigations(&mut conn, &op_id).await;
+
+                let mut watched: Vec<WatchedInvestigation> = Vec::new();
+                match auto_submit_blue_investigation(state, dispatcher, &mut conn).await {
+                    Ok(inv_id) => {
+                        info!(
+                            investigation_id = %inv_id,
+                            "Submitted terminal blue investigation from operation state"
+                        );
+                        watched.push(WatchedInvestigation {
+                            id: inv_id,
+                            wait_when_status_missing: true,
+                        });
+                    }
+                    Err(e) => {
+                        warn!(err = %e, "Failed to submit terminal blue investigation");
+                    }
+                }
+
+                for id in &unfinished {
+                    match ares_core::state::request_blue_supersede(&mut conn, id).await {
+                        Ok(()) => info!(
+                            investigation_id = %id,
+                            "Superseded mid-op investigation to free the blue runner slot"
+                        ),
+                        Err(e) => {
+                            // Couldn't cancel it, so it will keep holding the
+                            // runner — wait for it instead of stranding it.
+                            warn!(err = %e, investigation_id = %id, "Failed to request supersede");
+                            watched.push(WatchedInvestigation {
+                                id: id.clone(),
+                                wait_when_status_missing: false,
+                            });
+                        }
+                    }
+                }
+
+                if watched.is_empty() {
+                    info!("No blue investigations to wait for");
+                } else {
+                    let budget = resolve_blue_drain_budget(
+                        std::env::var("ARES_BLUE_DRAIN_MAX_SECS").ok().as_deref(),
+                    );
+                    let blue_deadline = tokio::time::Instant::now() + budget;
+                    loop {
+                        if *shutdown_rx.borrow() {
+                            info!(
+                                "Completion monitor interrupted by shutdown while waiting for blue"
+                            );
+                            break;
+                        }
+
+                        if tokio::time::Instant::now() >= blue_deadline {
+                            warn!(
+                                budget_secs = budget.as_secs(),
+                                "Blue team wait deadline reached — proceeding with shutdown"
+                            );
+                            break;
+                        }
+
+                        let outstanding = outstanding_investigations(&mut conn, &watched).await;
+                        if outstanding.is_empty() {
+                            info!("All blue investigations finished");
+                            break;
+                        }
+
+                        info!(
+                            outstanding_investigations = outstanding.len(),
+                            ids = ?outstanding,
+                            "Waiting for blue team to finish..."
+                        );
+
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                            _ = shutdown_rx.changed() => {
+                                if *shutdown_rx.borrow() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Signal the main loop to stop via Redis so it breaks out of its
             // select! within the next 5-second poll cycle.
             {
@@ -472,7 +869,6 @@ pub async fn wait_for_completion(
             return;
         }
 
-        // Sleep until next check or shutdown
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
             _ = shutdown_rx.changed() => {
@@ -513,19 +909,33 @@ async fn mark_red_completion_for_loot(
         .expire(&key, 86400)
         .query_async::<()>(&mut conn)
         .await?;
+
+    // Eagerly render + cache the red report from live state so the Taskfile
+    // watch loop's `ops report` fetch (which fires as soon as `ops status`
+    // reports completed) hits the cached copy instead of racing on partial
+    // Redis reads. Best-effort: a render failure must not fail red completion.
+    if let Err(e) =
+        crate::ops::report::generate_and_cache_report(&mut conn, &dispatcher.config.operation_id)
+            .await
+    {
+        warn!(err = %e, "Failed to eagerly cache red report on completion");
+    }
+
     Ok(())
 }
 
-/// Auto-submit a blue team investigation from the current red team operation state.
+/// Submit the terminal blue investigation for this operation and return its id.
 ///
 /// Mirrors the logic in `ares-cli/src/blue/submit.rs::blue_from_operation()` but
-/// runs inline within the orchestrator process so blue always gets at least one
-/// investigation even when the red operation completes before blue's first poll.
+/// runs inline within the orchestrator process, so the investigation that sees
+/// the complete loot and the true attack window is submitted deterministically
+/// at red completion rather than racing the milestone loop in
+/// [`crate::orchestrator::blue::auto_submit`].
 async fn auto_submit_blue_investigation(
     state: &SharedState,
     dispatcher: &Arc<Dispatcher>,
     conn: &mut redis::aio::ConnectionManager,
-) -> Result<(), anyhow::Error> {
+) -> Result<String, anyhow::Error> {
     let op_id = &dispatcher.config.operation_id;
     let now = Utc::now();
     let inv_id = format!("inv-{}", now.format("%Y%m%d-%H%M%S"));
@@ -555,7 +965,6 @@ async fn auto_submit_blue_investigation(
         )
     };
 
-    // Collect attack techniques from Redis
     let techniques_key = format!("ares:op:{op_id}:techniques");
     let techniques: Vec<String> = redis::cmd("SMEMBERS")
         .arg(&techniques_key)
@@ -563,9 +972,24 @@ async fn auto_submit_blue_investigation(
         .await
         .unwrap_or_default();
 
+    // Read the op's real start time from Redis — bootstrap.rs writes it once
+    // via HSETNX so this survives restarts. Falling back to `now` would give
+    // blue a zero-width window and score 0.
+    let meta_key = format!("ares:op:{op_id}:meta");
+    let started_at_raw: Option<String> = redis::cmd("HGET")
+        .arg(&meta_key)
+        .arg("started_at")
+        .query_async(conn)
+        .await
+        .unwrap_or_default();
+    let attack_window_start = started_at_raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<DateTime<Utc>>(s).ok())
+        .unwrap_or(now);
+
     let operation_context = serde_json::json!({
         "operation_id": op_id,
-        "attack_window_start": now.to_rfc3339(),
+        "attack_window_start": attack_window_start.to_rfc3339(),
         "attack_window_end": now.to_rfc3339(),
         "techniques_used": &techniques[..std::cmp::min(techniques.len(), 20)],
         "deployment": target_env,
@@ -652,12 +1076,10 @@ async fn auto_submit_blue_investigation(
         .expire(ares_core::state::BLUE_ACTIVE_INVESTIGATIONS, 86400)
         .await?;
 
-    // Track investigation against operation
     let op_inv_key = format!("ares:blue:op:{op_id}:investigations");
     let _: () = conn.sadd(&op_inv_key, &inv_id).await?;
     let _: () = conn.expire(&op_inv_key, 7 * 24 * 3600).await?;
 
-    // Publish investigation request to NATS
     let nats = dispatcher
         .queue
         .nats_broker()
@@ -671,12 +1093,51 @@ async fn auto_submit_blue_investigation(
         "Auto-submitted blue investigation from operation state"
     );
 
-    Ok(())
+    Ok(inv_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The live stranding: a mid-op investigation was still queued when the
+    /// terminal one was submitted, so it had written no status. Treating that
+    /// as "finished" let it escape supersede; it then seized the serial runner
+    /// and the terminal investigation never started before the drain deadline.
+    #[test]
+    fn queued_investigation_with_no_status_is_unfinished() {
+        assert!(
+            is_unfinished(None),
+            "a queued investigation must be superseded, not assumed finished"
+        );
+    }
+
+    #[test]
+    fn running_investigation_is_unfinished() {
+        assert!(is_unfinished(Some("in_progress")));
+        assert!(is_unfinished(Some("queued")));
+    }
+
+    #[test]
+    fn terminal_investigations_are_finished() {
+        for s in [
+            "completed",
+            "escalated",
+            "failed",
+            "timed_out",
+            "superseded",
+        ] {
+            assert!(!is_unfinished(Some(s)), "{s} is terminal");
+        }
+    }
+
+    /// A supersede that fails is re-watched with `wait_when_status_missing:
+    /// false`, so including status-less members cannot make the drain wait on
+    /// an investigation whose status key expired.
+    #[test]
+    fn status_less_entries_still_do_not_burn_the_drain_budget() {
+        assert!(!still_outstanding(None, false));
+    }
 
     #[test]
     fn forest_root_of_simple() {
@@ -691,6 +1152,169 @@ mod tests {
     #[test]
     fn forest_root_of_deep_child() {
         assert_eq!(forest_root_of("sub.child.contoso.local"), "contoso.local");
+    }
+
+    fn make_forest_escalation_vuln(
+        vuln_id: &str,
+        target_domain: &str,
+        written_off: bool,
+    ) -> ares_core::models::VulnerabilityInfo {
+        let mut details = std::collections::HashMap::new();
+        details.insert(
+            "target_domain".to_string(),
+            serde_json::json!(target_domain),
+        );
+        if written_off {
+            details.insert("written_off".to_string(), serde_json::json!(true));
+        }
+        ares_core::models::VulnerabilityInfo {
+            vuln_id: vuln_id.to_string(),
+            vuln_type: "forest_trust_escalation".to_string(),
+            target: "192.168.58.159".to_string(),
+            discovered_by: "trust_automation".to_string(),
+            discovered_at: Utc::now(),
+            details,
+            recommended_agent: "privesc".to_string(),
+            priority: 100,
+        }
+    }
+
+    #[test]
+    fn pending_escalation_blocks_completion() {
+        // A discovered, unexploited forest_trust_escalation into an un-owned
+        // forest keeps the op alive.
+        let mut discovered = std::collections::HashMap::new();
+        discovered.insert(
+            "v1".to_string(),
+            make_forest_escalation_vuln("v1", "fabrikam.local", false),
+        );
+        let exploited = HashSet::new();
+        assert!(has_pending_cross_forest_escalation(
+            &discovered,
+            &exploited,
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn exploited_escalation_allows_completion() {
+        let mut discovered = std::collections::HashMap::new();
+        discovered.insert(
+            "v1".to_string(),
+            make_forest_escalation_vuln("v1", "fabrikam.local", false),
+        );
+        let mut exploited = HashSet::new();
+        exploited.insert("v1".to_string());
+        assert!(!has_pending_cross_forest_escalation(
+            &discovered,
+            &exploited,
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn written_off_escalation_allows_completion() {
+        // The escape valve: a flagged-dead trust must not pin the op open.
+        let mut discovered = std::collections::HashMap::new();
+        discovered.insert(
+            "v1".to_string(),
+            make_forest_escalation_vuln("v1", "fabrikam.local", true),
+        );
+        let exploited = HashSet::new();
+        assert!(!has_pending_cross_forest_escalation(
+            &discovered,
+            &exploited,
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn non_forest_vulns_ignored_by_completion_gate() {
+        // Only forest_trust_escalation gates multi-forest completion; a stray
+        // unexploited esc1 (single-forest) must not block the op forever.
+        let mut discovered = std::collections::HashMap::new();
+        let mut esc1 = make_forest_escalation_vuln("v1", "fabrikam.local", false);
+        esc1.vuln_type = "esc1".to_string();
+        discovered.insert("v1".to_string(), esc1);
+        let exploited = HashSet::new();
+        assert!(!has_pending_cross_forest_escalation(
+            &discovered,
+            &exploited,
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn escalation_into_dominated_forest_allows_completion() {
+        // Regression: both forests were owned via direct paths (native ADCS /
+        // DCSync), leaving an un-exploited, never-written-off trust forge in
+        // state. Its target forest is already dominated, so it must NOT pin the
+        // op open to the hard max-runtime cap.
+        let mut discovered = std::collections::HashMap::new();
+        discovered.insert(
+            "v1".to_string(),
+            make_forest_escalation_vuln("v1", "fabrikam.local", false),
+        );
+        let exploited = HashSet::new();
+        let dominated: HashSet<String> = ["fabrikam.local".to_string()].into_iter().collect();
+        assert!(!has_pending_cross_forest_escalation(
+            &discovered,
+            &exploited,
+            &dominated
+        ));
+    }
+
+    #[test]
+    fn escalation_into_undominated_forest_still_blocks() {
+        // A different forest being owned must not satisfy an escalation whose
+        // own target forest is still un-owned.
+        let mut discovered = std::collections::HashMap::new();
+        discovered.insert(
+            "v1".to_string(),
+            make_forest_escalation_vuln("v1", "fabrikam.local", false),
+        );
+        let exploited = HashSet::new();
+        let dominated: HashSet<String> = ["contoso.local".to_string()].into_iter().collect();
+        assert!(has_pending_cross_forest_escalation(
+            &discovered,
+            &exploited,
+            &dominated
+        ));
+    }
+
+    #[test]
+    fn escalation_target_dominated_via_child_only_still_blocks() {
+        // Dominating a child domain does not own the forest root, so a trust
+        // forge into that root stays pending.
+        let mut discovered = std::collections::HashMap::new();
+        discovered.insert(
+            "v1".to_string(),
+            make_forest_escalation_vuln("v1", "contoso.local", false),
+        );
+        let exploited = HashSet::new();
+        let dominated: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
+        assert!(has_pending_cross_forest_escalation(
+            &discovered,
+            &exploited,
+            &dominated
+        ));
+    }
+
+    #[test]
+    fn escalation_missing_target_domain_stays_pending() {
+        // Conservative default: a vuln with no target_domain can't be proven
+        // moot, so it keeps blocking.
+        let mut discovered = std::collections::HashMap::new();
+        let mut v = make_forest_escalation_vuln("v1", "fabrikam.local", false);
+        v.details.remove("target_domain");
+        discovered.insert("v1".to_string(), v);
+        let exploited = HashSet::new();
+        let dominated: HashSet<String> = ["fabrikam.local".to_string()].into_iter().collect();
+        assert!(has_pending_cross_forest_escalation(
+            &discovered,
+            &exploited,
+            &dominated
+        ));
     }
 
     fn make_trust(domain: &str, trust_type: &str) -> ares_core::models::TrustInfo {
@@ -814,13 +1438,11 @@ mod tests {
             &dominated,
             &dcs,
         );
-        // Child DA does not satisfy the forest root requirement
         assert_eq!(result, vec!["contoso.local"]);
     }
 
     #[test]
     fn undominated_forest_root_dominated_directly() {
-        // Dominating the forest root itself should satisfy the requirement
         let trusted = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
         dominated.insert("contoso.local".to_string());
@@ -876,7 +1498,6 @@ mod tests {
 
     #[test]
     fn undominated_no_target_no_first_domain() {
-        // Both target_domain and first_domain are None
         let trusted = std::collections::HashMap::new();
         let dominated = HashSet::new();
         let dcs = std::collections::HashMap::new();
@@ -896,7 +1517,6 @@ mod tests {
 
     #[test]
     fn undominated_only_first_domain() {
-        // target_domain is None but first_domain is set
         let trusted = std::collections::HashMap::new();
         let dominated = HashSet::new();
         let dcs = std::collections::HashMap::new();
@@ -1000,7 +1620,6 @@ mod tests {
 
     #[test]
     fn undominated_empty_dc_key_ignored() {
-        // Empty string DC key should be ignored
         let trusted = std::collections::HashMap::new();
         let mut dominated = HashSet::new();
         dominated.insert("contoso.local".to_string());
@@ -1077,8 +1696,6 @@ mod tests {
         assert!(!parent_child.is_cross_forest());
     }
 
-    // ── tests for evaluate_completion ─────────────────────────────────
-
     fn empty_snapshot() -> CompletionSnapshot {
         CompletionSnapshot {
             has_domain_admin: false,
@@ -1086,14 +1703,113 @@ mod tests {
             completed: false,
             undominated_forests_empty: false,
             all_dominated_for: None,
+            since_last_advance: None,
         }
     }
 
     fn ten_min() -> Duration {
         Duration::from_secs(600)
     }
+    fn twenty_min() -> Duration {
+        Duration::from_secs(1200)
+    }
     fn three_min() -> Duration {
         Duration::from_secs(180)
+    }
+    fn policy(stop_on_da: bool, stop_on_gt: bool) -> CompletionPolicy {
+        CompletionPolicy {
+            soft_max_runtime: ten_min(),
+            hard_max_runtime: twenty_min(),
+            stop_on_da,
+            stop_on_gt,
+            grace_period: three_min(),
+            extension_stall_timeout: ten_min(),
+        }
+    }
+
+    fn extending_snapshot(since_last_advance: Duration) -> CompletionSnapshot {
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.undominated_forests_empty = false;
+        snap.since_last_advance = Some(since_last_advance);
+        snap
+    }
+
+    #[test]
+    fn extension_continues_while_the_watermark_is_still_moving() {
+        let snap = extending_snapshot(Duration::from_secs(60));
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
+            CompletionDecision::Continue,
+            "an op still gaining material must keep its extension"
+        );
+    }
+
+    #[test]
+    fn extension_stops_once_the_watermark_goes_stale() {
+        let snap = extending_snapshot(Duration::from_secs(600));
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
+            CompletionDecision::Stop("extension stalled — no advancement"),
+            "a wedged op must not ride the extension to the hard cap"
+        );
+    }
+
+    #[test]
+    fn a_stalled_watermark_below_the_soft_cap_does_not_stop_the_op() {
+        let snap = extending_snapshot(Duration::from_secs(6000));
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(60), &policy(false, false)),
+            CompletionDecision::Continue,
+            "the stall gate is an extension guard, not a general watchdog"
+        );
+    }
+
+    #[test]
+    fn an_unmeasured_watermark_preserves_the_old_extension_behaviour() {
+        let mut snap = extending_snapshot(Duration::ZERO);
+        snap.since_last_advance = None;
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
+            CompletionDecision::Continue
+        );
+    }
+
+    #[test]
+    fn the_hard_cap_still_wins_over_a_moving_watermark() {
+        let snap = extending_snapshot(Duration::ZERO);
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(1201), &policy(false, false)),
+            CompletionDecision::Stop("hard max runtime exceeded")
+        );
+    }
+
+    #[test]
+    fn the_watermark_only_counts_material_the_op_gained() {
+        assert_eq!(advancement_watermark(0, 0, 0), 0);
+        assert!(advancement_watermark(1, 2, 3) > advancement_watermark(1, 2, 2));
+        assert_eq!(advancement_watermark(2, 3, 4), 9);
+    }
+
+    #[test]
+    fn extension_stall_timeout_rejects_zero_and_garbage() {
+        let key = "ARES_COMPLETION_EXTENSION_STALL_SECS";
+        std::env::remove_var(key);
+        assert_eq!(
+            extension_stall_timeout_from_env(),
+            Duration::from_secs(DEFAULT_EXTENSION_STALL_SECS)
+        );
+        for bad in ["0", "abc", "", "-5"] {
+            std::env::set_var(key, bad);
+            assert_eq!(
+                extension_stall_timeout_from_env(),
+                Duration::from_secs(DEFAULT_EXTENSION_STALL_SECS),
+                "{bad} must fall back to the default"
+            );
+        }
+        std::env::set_var(key, "120");
+        assert_eq!(extension_stall_timeout_from_env(), Duration::from_secs(120));
+        std::env::remove_var(key);
     }
 
     #[test]
@@ -1101,7 +1817,7 @@ mod tests {
         let mut snap = empty_snapshot();
         snap.completed = true;
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Stop("operation marked completed")
         );
     }
@@ -1110,14 +1826,7 @@ mod tests {
     fn completion_max_runtime_exceeded() {
         let snap = empty_snapshot();
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::from_secs(601),
-                ten_min(),
-                false,
-                false,
-                three_min()
-            ),
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
             CompletionDecision::Stop("max runtime exceeded")
         );
     }
@@ -1126,7 +1835,7 @@ mod tests {
     fn completion_no_da_continues() {
         let snap = empty_snapshot();
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Continue
         );
     }
@@ -1136,7 +1845,7 @@ mod tests {
         let mut snap = empty_snapshot();
         snap.has_domain_admin = true;
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), true, false, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(true, false)),
             CompletionDecision::Stop("domain admin achieved (stop_on_domain_admin)")
         );
     }
@@ -1146,12 +1855,12 @@ mod tests {
         let mut snap = empty_snapshot();
         snap.has_domain_admin = true;
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, true, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, true)),
             CompletionDecision::Continue
         );
         snap.has_golden_ticket = true;
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, true, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, true)),
             CompletionDecision::Stop("golden ticket forged (stop_on_golden_ticket)")
         );
     }
@@ -1162,7 +1871,7 @@ mod tests {
         snap.has_domain_admin = true;
         snap.undominated_forests_empty = false;
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Continue
         );
     }
@@ -1172,9 +1881,8 @@ mod tests {
         let mut snap = empty_snapshot();
         snap.has_domain_admin = true;
         snap.undominated_forests_empty = true;
-        // Grace timer not set yet → BeginGracePeriod.
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::BeginGracePeriod
         );
     }
@@ -1185,9 +1893,8 @@ mod tests {
         snap.has_domain_admin = true;
         snap.undominated_forests_empty = true;
         snap.all_dominated_for = Some(Duration::from_secs(60));
-        // 60s elapsed, grace is 180s → still continuing.
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Continue
         );
     }
@@ -1199,40 +1906,176 @@ mod tests {
         snap.undominated_forests_empty = true;
         snap.all_dominated_for = Some(Duration::from_secs(181));
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Stop("all forests dominated (post-exploitation complete)")
         );
     }
 
     #[test]
     fn completion_stop_on_da_beats_completed_priority() {
-        // `completed` runs first; even with stop_on_da configured, the
-        // external completed flag wins because it's priority 1.
         let mut snap = empty_snapshot();
         snap.has_domain_admin = true;
         snap.completed = true;
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), true, false, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(true, false)),
             CompletionDecision::Stop("operation marked completed")
         );
     }
 
     #[test]
-    fn completion_max_runtime_beats_da_grace() {
+    fn completion_soft_cap_stops_when_all_forests_done() {
+        // DA achieved and all forests dominated → the soft cap fires; no
+        // reason to extend beyond it once there's nothing left to compromise.
         let mut snap = empty_snapshot();
         snap.has_domain_admin = true;
         snap.undominated_forests_empty = true;
         assert_eq!(
-            evaluate_completion(
-                &snap,
-                Duration::from_secs(601),
-                ten_min(),
-                false,
-                false,
-                three_min(),
-            ),
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
             CompletionDecision::Stop("max runtime exceeded")
         );
+    }
+
+    #[test]
+    fn completion_soft_cap_extends_when_forest_still_owed() {
+        // DA on one domain but a trusted forest is still uncompromised — this
+        // is the case that used to lose the second forest to the guillotine.
+        // The soft cap must yield to Continue so the op keeps working the
+        // remaining forest until it lands DA or hits the hard cap.
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.undominated_forests_empty = false;
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(601), &policy(false, false)),
+            CompletionDecision::Continue
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_cap_fires_while_shared_state_is_locked() {
+        let state = SharedState::new("op-wedged".to_string());
+        let _held = state.write().await;
+
+        let decided = tokio::time::timeout(
+            Duration::from_secs(2),
+            snapshot_unless_hard_capped(
+                &state,
+                Duration::from_secs(7201),
+                Duration::from_secs(7200),
+            ),
+        )
+        .await
+        .expect("hard-cap check must not block on the state lock");
+
+        assert!(decided.is_none(), "blown cap must short-circuit the read");
+    }
+
+    #[tokio::test]
+    async fn under_the_cap_the_snapshot_still_waits_for_the_lock() {
+        let state = SharedState::new("op-wedged".to_string());
+        let _held = state.write().await;
+
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(250),
+            snapshot_unless_hard_capped(&state, Duration::from_secs(1), Duration::from_secs(7200)),
+        )
+        .await;
+
+        assert!(
+            blocked.is_err(),
+            "a held write lock must block the read path"
+        );
+    }
+
+    #[test]
+    fn completion_hard_cap_stops_even_with_forest_owed() {
+        // The hard cap is the strict upper bound — even if a forest is still
+        // uncompromised, the op must terminate rather than run forever.
+        let mut snap = empty_snapshot();
+        snap.has_domain_admin = true;
+        snap.undominated_forests_empty = false;
+        assert_eq!(
+            evaluate_completion(&snap, Duration::from_secs(1201), &policy(false, false)),
+            CompletionDecision::Stop("hard max runtime exceeded")
+        );
+    }
+
+    #[test]
+    fn drain_budget_must_outlast_one_investigation() {
+        // The regression this guards: when the budget equalled the investigation
+        // timeout, an investigation submitted at red completion was guaranteed to
+        // be abandoned at the exact instant it would have timed out.
+        assert!(
+            resolve_blue_drain_budget(None) > Duration::from_secs(BLUE_INVESTIGATION_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn drain_budget_default() {
+        assert_eq!(
+            resolve_blue_drain_budget(None),
+            Duration::from_secs(BLUE_INVESTIGATION_TIMEOUT_SECS + BLUE_DRAIN_SLACK_SECS)
+        );
+    }
+
+    #[test]
+    fn drain_budget_env_override() {
+        assert_eq!(
+            resolve_blue_drain_budget(Some("120")),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            resolve_blue_drain_budget(Some("  900 ")),
+            Duration::from_secs(900)
+        );
+    }
+
+    #[test]
+    fn drain_budget_rejects_junk_and_zero() {
+        let default = resolve_blue_drain_budget(None);
+        assert_eq!(resolve_blue_drain_budget(Some("")), default);
+        assert_eq!(resolve_blue_drain_budget(Some("soon")), default);
+        assert_eq!(resolve_blue_drain_budget(Some("-5")), default);
+        assert_eq!(resolve_blue_drain_budget(Some("0")), default);
+    }
+
+    #[test]
+    fn outstanding_while_status_is_non_terminal() {
+        for status in ["queued", "in_progress", "triage", "hunting"] {
+            assert!(still_outstanding(Some(status), true), "{status}");
+            assert!(still_outstanding(Some(status), false), "{status}");
+        }
+    }
+
+    #[test]
+    fn not_outstanding_once_status_is_terminal() {
+        for status in [
+            "completed",
+            "escalated",
+            "failed",
+            "timed_out",
+            "superseded",
+        ] {
+            assert!(!still_outstanding(Some(status), true), "{status}");
+            assert!(!still_outstanding(Some(status), false), "{status}");
+        }
+    }
+
+    #[test]
+    fn missing_status_follows_the_wait_flag() {
+        // Just-submitted investigation: the runner hasn't registered it yet, so
+        // the gap must count as outstanding or the op shuts down before blue
+        // starts.
+        assert!(still_outstanding(None, true));
+        // Pre-existing investigation whose status key expired: not worth waiting
+        // out the whole budget for.
+        assert!(!still_outstanding(None, false));
+    }
+
+    #[test]
+    fn superseded_status_is_terminal_for_the_drain_wait() {
+        // A superseded investigation must release the drain wait — otherwise
+        // freeing the runner slot would trade one stall for another.
+        assert!(ares_core::state::blue_status_is_terminal("superseded"));
     }
 
     #[test]
@@ -1242,7 +2085,7 @@ mod tests {
         snap.undominated_forests_empty = true;
         snap.all_dominated_for = Some(three_min());
         assert_eq!(
-            evaluate_completion(&snap, Duration::ZERO, ten_min(), false, false, three_min()),
+            evaluate_completion(&snap, Duration::ZERO, &policy(false, false)),
             CompletionDecision::Stop("all forests dominated (post-exploitation complete)")
         );
     }

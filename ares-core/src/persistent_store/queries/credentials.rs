@@ -1,7 +1,6 @@
 //! Credential and hash search queries across all operations.
 
 use anyhow::Result;
-use sqlx::AssertSqlSafe;
 
 use super::rows::{CredentialRow, HashRow};
 use super::HistoricalQueryService;
@@ -137,7 +136,6 @@ impl HistoricalQueryService {
         cracked_only: bool,
         limit: i64,
     ) -> Result<Vec<HashRow>> {
-        // Base query with computed is_cracked
         let base = "SELECT h.id, o.operation_id, h.username, h.domain, h.hash_type,
                            (h.cracked_password_hash IS NOT NULL) as is_cracked,
                            h.source, h.attack_step, h.discovered_at
@@ -169,7 +167,6 @@ impl HistoricalQueryService {
                 .await?
             }
         } else {
-            // Build WHERE clause dynamically
             let mut where_parts = Vec::new();
             let mut bind_values: Vec<String> = Vec::new();
 
@@ -202,14 +199,14 @@ impl HistoricalQueryService {
             // so we use query_scalar pattern with explicit bind count
             match bind_values.len() {
                 1 => {
-                    sqlx::query_as::<_, HashRow>(AssertSqlSafe(sql))
+                    sqlx::query_as::<_, HashRow>(sqlx::AssertSqlSafe(sql.as_str()))
                         .bind(&bind_values[0])
                         .bind(limit)
                         .fetch_all(&self.pool)
                         .await?
                 }
                 2 => {
-                    sqlx::query_as::<_, HashRow>(AssertSqlSafe(sql))
+                    sqlx::query_as::<_, HashRow>(sqlx::AssertSqlSafe(sql.as_str()))
                         .bind(&bind_values[0])
                         .bind(&bind_values[1])
                         .bind(limit)
@@ -217,7 +214,7 @@ impl HistoricalQueryService {
                         .await?
                 }
                 3 => {
-                    sqlx::query_as::<_, HashRow>(AssertSqlSafe(sql))
+                    sqlx::query_as::<_, HashRow>(sqlx::AssertSqlSafe(sql.as_str()))
                         .bind(&bind_values[0])
                         .bind(&bind_values[1])
                         .bind(&bind_values[2])

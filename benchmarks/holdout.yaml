@@ -1,0 +1,51 @@
+---
+# Held-out attack set for generalization scoring.
+#
+# This file lists ops reserved for GENERALIZATION CHECKS ONLY. It is a strict
+# firewall between the tuning corpus and the evaluation corpus:
+#
+#   * NO tuning code, prompt-search driver, RL loop, or Vibe Gepa run may read
+#     from this file during training. If you're iterating on prompts, configs,
+#     or agent scaffolding to raise a score, you must ignore these ops.
+#   * The ONLY consumer is `task benchmark:generalize`, which runs the current
+#     blue config against each entry and reports per-op + aggregate scores.
+#   * Operators curate this list MANUALLY. Do not auto-populate it from the
+#     latest ops (that would silently reintroduce overfitting) — pick ops
+#     across attack classes that were captured before the tuning window.
+#
+# Placeholder entries below use realistic-shaped op IDs
+# (op-YYYYMMDD-HHMMSS) that do NOT correspond to real captures. Replace them
+# with lab-curated ops and set `snapshot_uri` (or leave blank and rely on
+# `SNAPSHOT_DIR` at replay time).
+#
+# Schema per entry:
+#   op_id:         op-YYYYMMDD-HHMMSS
+#   description:   one-line generic summary (no lab-specific names)
+#   attack_class:  short tag — adcs-esc1, kerberoast, mssql-linked-server, ...
+#   snapshot_uri:  s3://<bucket>/snapshots/<op_id>/  (blank = resolve locally)
+
+holdout:
+  - op_id: op-20260901-000001
+    description: ADCS ESC1 chain on child domain to forest root DA
+    attack_class: adcs-esc1
+    snapshot_uri: ""
+
+  - op_id: op-20260901-000002
+    description: Kerberoast of a service account with RC4 hash to DA
+    attack_class: kerberoast
+    snapshot_uri: ""
+
+  - op_id: op-20260901-000003
+    description: MSSQL linked-server pivot across forest trust
+    attack_class: mssql-linked-server
+    snapshot_uri: ""
+
+  - op_id: op-20260901-000004
+    description: Constrained delegation abuse to escalate to domain admin
+    attack_class: constrained-delegation
+    snapshot_uri: ""
+
+  - op_id: op-20260901-000005
+    description: NTLM relay from coerced machine account to LDAP shadow credential
+    attack_class: ntlm-relay-shadow-cred
+    snapshot_uri: ""
