@@ -17,7 +17,6 @@ pub(crate) async fn ops_kill(
 ) -> Result<()> {
     let mut conn = connect_redis(redis_url).await?;
 
-    // Single-operation kill
     if let Some(ref id) = operation_id {
         kill_one(&mut conn, id).await?;
         return Ok(());
@@ -34,7 +33,6 @@ pub(crate) async fn ops_kill(
 
     println!("Found {} running operation(s)", running.len());
 
-    // Determine which operations to kill
     let to_kill: Vec<&String> = if all {
         running.iter().collect()
     } else {

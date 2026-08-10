@@ -1,5 +1,0 @@
----
-- name: Restart alloy service
-  ansible.windows.win_service:
-    name: "{{ alloy_service_name }}"
-    state: restarted

@@ -44,8 +44,18 @@ pub async fn query_instant(args: &Value) -> Result<ToolOutput> {
 
     let client = http_client();
     let mut params = vec![("query", promql.to_string())];
-    if let Some(t) = time {
-        params.push(("time", t.to_string()));
+    match time {
+        // Cap a caller-supplied instant at the replay clock (unfolding modes) so
+        // the agent can't sample metrics from its own future; no-op passthrough
+        // in static/frozen replay and live.
+        Some(t) => params.push(("time", super::loki::clamp_end_to_replay(t))),
+        // During replay, pin an omitted `time` to the replay clock so "now"
+        // resolves to attack-time instead of the Prometheus server's wall clock.
+        None => {
+            if super::replay_clock::is_replay() {
+                params.push(("time", super::replay_clock::replay_now().to_rfc3339()));
+            }
+        }
     }
 
     let resp = client
@@ -69,7 +79,8 @@ pub async fn query_instant(args: &Value) -> Result<ToolOutput> {
 pub async fn query_range(args: &Value) -> Result<ToolOutput> {
     let promql = required_str(args, "promql")?;
     let start_time = required_str(args, "start_time")?;
-    let end_time = required_str(args, "end_time")?;
+    let end_time_owned = super::loki::clamp_end_to_replay(required_str(args, "end_time")?);
+    let end_time = end_time_owned.as_str();
     let step = optional_str(args, "step").unwrap_or("60s");
 
     let client = http_client();
@@ -215,8 +226,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── format_prometheus_response ──────────────────────────────────
-
     #[test]
     fn format_no_results() {
         let body = r#"{"status":"success","data":{"resultType":"vector","result":[]}}"#;
@@ -309,8 +318,6 @@ mod tests {
         assert!(result.contains("instance=\"a\""));
         assert!(result.contains("instance=\"b\""));
     }
-
-    // ── make_output / make_error ────────────────────────────────────
 
     #[test]
     fn make_output_success() {

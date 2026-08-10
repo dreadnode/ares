@@ -14,12 +14,10 @@ pub(crate) fn generate_detection_markdown(playbook: &DetectionPlaybook) -> Strin
     ));
     md.push_str("---\n\n");
 
-    // Executive Summary
     md.push_str("## Executive Summary\n\n");
     md.push_str(&playbook.executive_summary);
     md.push_str("\n\n---\n\n");
 
-    // Attack Statistics
     md.push_str("## Attack Statistics\n\n");
     md.push_str(&format!(
         "- **Techniques Used:** {}\n",
@@ -46,7 +44,6 @@ pub(crate) fn generate_detection_markdown(playbook: &DetectionPlaybook) -> Strin
     }
     md.push_str("\n---\n\n");
 
-    // Priority Detection Queries
     md.push_str("## Priority Detection Queries\n\n");
     if !playbook.priority_queries.is_empty() {
         md.push_str(
@@ -84,7 +81,6 @@ pub(crate) fn generate_detection_markdown(playbook: &DetectionPlaybook) -> Strin
     }
     md.push_str("---\n\n");
 
-    // Detection Targets (IOCs)
     md.push_str("## Detection Targets (IOCs)\n\n");
     if !playbook.detection_targets.is_empty() {
         md.push_str("| Type | Value | Pyramid Level | Detection |\n");
@@ -108,7 +104,6 @@ pub(crate) fn generate_detection_markdown(playbook: &DetectionPlaybook) -> Strin
     }
     md.push_str("\n---\n\n");
 
-    // Technique-Specific Detections
     md.push_str("## Technique-Specific Detections\n\n");
     let mut sorted_techniques: Vec<_> = playbook.technique_detections.iter().collect();
     sorted_techniques.sort_by_key(|(a, _)| *a);

@@ -212,8 +212,6 @@ mod tests {
         assert_eq!(host_domain_from_fqdn("   "), None);
     }
 
-    // ── select_share_enumeration_work ───────────────────────────────────
-
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
             id: format!("c-{user}-{domain}"),

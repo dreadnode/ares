@@ -75,9 +75,7 @@ pub async fn auto_ntlm_relay(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
                         "listener_ip": item.listener,
                         "coercion_source": item.coercion_source,
                     });
-                    if let Some(cred) = credential_json.as_ref() {
-                        p["credential"] = cred.clone();
-                    }
+                    insert_credential(&mut p, credential_json.as_ref());
                     p
                 }
                 RelayType::Esc8 { ca_name, domain } => {
@@ -89,14 +87,18 @@ pub async fn auto_ntlm_relay(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
                         "domain": domain,
                         "coercion_source": item.coercion_source,
                     });
-                    if let Some(cred) = credential_json.as_ref() {
-                        p["credential"] = cred.clone();
-                    }
+                    insert_credential(&mut p, credential_json.as_ref());
                     p
                 }
             };
 
             let priority = dispatcher.effective_priority("ntlm_relay");
+            // Serialize all relay-bearing dispatches against the
+            // listener's port-445 mutex — see `Dispatcher::relay_slot`
+            // doc. Held across the throttled_submit so a concurrent
+            // ESC8 or auto_coercion dispatch in another task waits its
+            // turn instead of racing the bind.
+            let _relay_guard = dispatcher.relay_slot.lock().await;
             match dispatcher
                 .throttled_submit("coercion", "coercion", payload, priority)
                 .await
@@ -127,6 +129,14 @@ pub async fn auto_ntlm_relay(dispatcher: Arc<Dispatcher>, mut shutdown: watch::R
                 }
             }
         }
+    }
+}
+
+/// Attach the optional relay `credential` to a payload. Extracted so the three
+/// relay-type arms don't each repeat the same insertion.
+fn insert_credential(payload: &mut serde_json::Value, credential: Option<&serde_json::Value>) {
+    if let Some(cred) = credential {
+        payload["credential"] = cred.clone();
     }
 }
 
@@ -720,8 +730,6 @@ mod tests {
         assert_eq!(format!("{esc8}"), "esc8_adcs");
     }
 
-    // --- collect_relay_work integration tests ---
-
     use crate::orchestrator::state::SharedState;
 
     fn make_cred() -> ares_core::models::Credential {
@@ -1015,7 +1023,7 @@ mod tests {
         );
     }
 
-    // ── Forest-aware coercion / credential pairing ──────────────────────
+    // Forest-aware coercion / credential pairing
 
     fn make_fabrikam_cred() -> ares_core::models::Credential {
         ares_core::models::Credential {

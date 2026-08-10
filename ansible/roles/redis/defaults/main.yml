@@ -1,23 +1,77 @@
 ---
 # Redis configuration
+# description: Address Redis binds to; loopback keeps the broker host-local.
 redis_bind_address: "127.0.0.1"
+# description: TCP port Redis listens on.
 redis_port: 6379
-redis_maxmemory: "256mb"
-redis_maxmemory_policy: "allkeys-lru"
+# Redis holds live operational state (creds, hashes, hosts, per-op meta), not a
+# disposable cache. Under memory pressure an evicting policy like `allkeys-lru`
+# would silently drop op keys — losing loot with no error and corrupting the
+# recorded state an operation is judged on. Use `noeviction` so writes fail
+# loudly at the cap instead. The cap is sized well above any observed op (a
+# multi-forest run peaks around ~120MB) yet far below the instance RAM and the
+# system-ares.slice cap, so hitting it signals a real problem, not routine
+# growth. Raise redis_maxmemory before ever switching back to an evicting policy.
+# description: Redis memory cap; sized far above any observed op so hitting it signals a real problem.
+redis_maxmemory: "2gb"
+# description: Eviction policy; noeviction fails writes loudly at the cap instead of silently dropping op state.
+redis_maxmemory_policy: "noeviction"
 
 # Ares worker configuration
+# description: Whether to install the per-role ares worker systemd template unit.
 redis_install_ares_worker_unit: true
+# description: Path to the ares binary the worker units execute.
 redis_ares_worker_binary: "/usr/local/bin/ares"
+# description: Directory for Ares worker logs.
 redis_ares_log_dir: "/var/log/ares"
+# description: Directory for Ares config and the optional worker EnvironmentFile.
 redis_ares_config_dir: "/etc/ares"
+# description: HOME for the worker units. systemd sets none for system services,
+# but ares reads $HOME to locate hashcat's potfile for the per-op wipe; the
+# workers run as root, so this must match root's home.
+redis_ares_worker_home: "/root"
 
 # Worker cgroup resource limits (per-role instance).
 # Workers spawn tool subprocesses (netexec, hashcat, nmap) that inherit the
 # service cgroup. Without limits these can exhaust system memory and OOM-kill
-# unrelated services like the SSM agent.
-redis_ares_worker_memory_high: "2G"
-redis_ares_worker_memory_max: "3G"
+# unrelated services like the SSM agent. The per-instance ceiling stays under
+# the system-ares.slice global cap below.
+# description: Per-worker soft memory limit (MemoryHigh); throttles before the hard cap.
+redis_ares_worker_memory_high: "1500M"
+# description: Per-worker hard memory cap (MemoryMax); the cgroup OOM-kills the worker past this.
+redis_ares_worker_memory_max: "2G"
+# description: Per-worker max task (thread/process) count (TasksMax).
 redis_ares_worker_tasks_max: 256
 
+# Global cgroup cap for the whole Ares fleet (orchestrator + all workers),
+# enforced by system-ares.slice. Backstops the per-instance limits so the
+# fleet in aggregate cannot exhaust the instance.
+# description: Fleet-wide soft memory limit (system-ares.slice MemoryHigh).
+redis_ares_slice_memory_high: "10G"
+# description: Fleet-wide hard memory cap (system-ares.slice MemoryMax).
+redis_ares_slice_memory_max: "12G"
+# description: Fleet-wide max task count (system-ares.slice TasksMax).
+redis_ares_slice_tasks_max: 8192
+
+# Extra environment threaded into each worker unit.
+# EnvironmentFile is optional (leading '-'): operators can drop per-op
+# overrides in {{ redis_ares_config_dir }}/env without editing the unit.
+# description: OTEL resource attributes exported by each worker for trace/log tagging.
+redis_ares_otel_resource_attributes: "deployment.environment=staging,attack.team=red"
+
+# ares@<role>.service instances to enable. Each subscribes to ares.tools.exec.<role>;
+# a missing role means the orchestrator's tool calls for that role hang.
+# Must match the role keys in ares-cli/tools.yaml.
+# description: Worker role instances to enable; must match the role keys in ares-cli/tools.yaml.
+redis_ares_worker_roles:
+  - recon
+  - credential_access
+  - cracker
+  - acl
+  - privesc
+  - lateral
+  - coercion
+
 # Verification
+# description: Whether to run the post-install Redis connectivity check.
 redis_verify_install: false

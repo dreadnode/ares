@@ -108,7 +108,6 @@ pub async fn get_investigation_context(args: &Value) -> Result<ToolOutput> {
         Err(e) => return Ok(make_error(&format!("Redis connection failed: {e}"))),
     };
 
-    // Check existence
     let meta_key = blue_key(investigation_id, BLUE_KEY_META);
     let exists: bool = conn.exists(&meta_key).await?;
 
@@ -128,16 +127,13 @@ pub async fn get_investigation_context(args: &Value) -> Result<ToolOutput> {
         .and_then(|s| serde_json::from_str::<bool>(s).ok())
         .unwrap_or(false);
 
-    // Evidence
     let evidence_key = blue_key(investigation_id, BLUE_KEY_EVIDENCE);
     let evidence: std::collections::HashMap<String, String> =
         conn.hgetall(&evidence_key).await.unwrap_or_default();
 
-    // Timeline
     let timeline_key = blue_key(investigation_id, BLUE_KEY_TIMELINE);
     let timeline: Vec<String> = conn.lrange(&timeline_key, 0, -1).await.unwrap_or_default();
 
-    // Techniques
     let techniques_key = blue_key(investigation_id, BLUE_KEY_TECHNIQUES);
     let techniques: std::collections::HashSet<String> =
         conn.smembers(&techniques_key).await.unwrap_or_default();
@@ -145,7 +141,6 @@ pub async fn get_investigation_context(args: &Value) -> Result<ToolOutput> {
     let technique_names: std::collections::HashMap<String, String> =
         conn.hgetall(&names_key).await.unwrap_or_default();
 
-    // Hosts & Users
     let hosts_key = blue_key(investigation_id, BLUE_KEY_HOSTS);
     let hosts: std::collections::HashSet<String> =
         conn.smembers(&hosts_key).await.unwrap_or_default();
@@ -153,17 +148,14 @@ pub async fn get_investigation_context(args: &Value) -> Result<ToolOutput> {
     let users: std::collections::HashSet<String> =
         conn.smembers(&users_key).await.unwrap_or_default();
 
-    // Lateral
     let lateral_key = blue_key(investigation_id, BLUE_KEY_LATERAL);
     let lateral: Vec<String> = conn.lrange(&lateral_key, 0, -1).await.unwrap_or_default();
 
-    // Build comprehensive context
     let mut parts = Vec::new();
     parts.push(format!("=== Investigation Context: {investigation_id} ==="));
     parts.push(format!("Stage: {stage}"));
     parts.push(format!("Escalated: {escalated}"));
 
-    // Evidence summary
     parts.push(format!("\n--- Evidence ({} items) ---", evidence.len()));
     let mut high_confidence = Vec::new();
     for json_str in evidence.values() {
@@ -190,7 +182,6 @@ pub async fn get_investigation_context(args: &Value) -> Result<ToolOutput> {
         ));
     }
 
-    // Techniques with implied capabilities
     if !techniques.is_empty() {
         parts.push(format!("\n--- Techniques ({}) ---", techniques.len()));
         let mut sorted: Vec<&String> = techniques.iter().collect();
@@ -213,7 +204,6 @@ pub async fn get_investigation_context(args: &Value) -> Result<ToolOutput> {
         }
     }
 
-    // Timeline (last 10 events)
     if !timeline.is_empty() {
         parts.push(format!(
             "\n--- Timeline ({} events, last 10) ---",
@@ -231,7 +221,6 @@ pub async fn get_investigation_context(args: &Value) -> Result<ToolOutput> {
         }
     }
 
-    // Hosts, Users, Lateral
     if !hosts.is_empty() {
         let mut h: Vec<&String> = hosts.iter().collect();
         h.sort();
@@ -294,7 +283,6 @@ pub async fn get_investigation_summary(args: &Value) -> Result<ToolOutput> {
         Err(e) => return Ok(make_error(&format!("Redis connection failed: {e}"))),
     };
 
-    // Check if investigation exists
     let meta_key = blue_key(investigation_id, BLUE_KEY_META);
     let exists: bool = conn.exists(&meta_key).await?;
     if !exists {
@@ -303,46 +291,37 @@ pub async fn get_investigation_summary(args: &Value) -> Result<ToolOutput> {
         )));
     }
 
-    // Read meta
     let meta: std::collections::HashMap<String, String> = conn.hgetall(&meta_key).await?;
     let stage = meta
         .get("stage")
         .and_then(|s| serde_json::from_str::<String>(s).ok())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Evidence count
     let evidence_key = blue_key(investigation_id, BLUE_KEY_EVIDENCE);
     let evidence_count: usize = conn.hlen(&evidence_key).await.unwrap_or(0);
 
-    // Timeline count
     let timeline_key = blue_key(investigation_id, BLUE_KEY_TIMELINE);
     let timeline_count: usize = conn.llen(&timeline_key).await.unwrap_or(0);
 
-    // Techniques
     let techniques_key = blue_key(investigation_id, BLUE_KEY_TECHNIQUES);
     let techniques: std::collections::HashSet<String> =
         conn.smembers(&techniques_key).await.unwrap_or_default();
 
-    // Technique names
     let names_key = blue_key(investigation_id, BLUE_KEY_TECHNIQUE_NAMES);
     let technique_names: std::collections::HashMap<String, String> =
         conn.hgetall(&names_key).await.unwrap_or_default();
 
-    // Hosts
     let hosts_key = blue_key(investigation_id, BLUE_KEY_HOSTS);
     let hosts: std::collections::HashSet<String> =
         conn.smembers(&hosts_key).await.unwrap_or_default();
 
-    // Users
     let users_key = blue_key(investigation_id, BLUE_KEY_USERS);
     let users: std::collections::HashSet<String> =
         conn.smembers(&users_key).await.unwrap_or_default();
 
-    // Lateral connections count
     let lateral_key = blue_key(investigation_id, BLUE_KEY_LATERAL);
     let lateral_count: usize = conn.llen(&lateral_key).await.unwrap_or(0);
 
-    // Format output
     let mut parts = Vec::new();
     parts.push(format!("=== Investigation Summary: {investigation_id} ==="));
     parts.push(format!("Stage: {stage}"));

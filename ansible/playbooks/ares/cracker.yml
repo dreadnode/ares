@@ -24,7 +24,7 @@
       vars:
         base_update_cache: "{{ not _container_build }}"
 
-    - role: dreadnode.nimbus_range.cracking_tools
+    - role: l50.arsenal.cracking_tools
       vars:
         cracking_tools_update_cache: "{{ not _container_build }}"
 

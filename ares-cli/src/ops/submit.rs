@@ -17,6 +17,11 @@ pub(crate) const BLUE_ENV_VAR_NAMES: &[&str] = &[
     "LOKI_URL",
     "LOKI_AUTH_TOKEN",
     "PROMETHEUS_URL",
+    "TEMPO_URL",
+    "ARES_REPLAY_CLOCK_START",
+    "ARES_REPLAY_CLOCK_END",
+    "ARES_REPLAY_CLOCK_MODE",
+    "ARES_REPLAY_MAX_STEPS",
     "DREADNODE_API_KEY",
     "DREADNODE_SERVER_URL",
     "DREADNODE_ORGANIZATION",
@@ -114,11 +119,9 @@ pub(crate) async fn ops_submit(p: OpsSubmitParams) -> Result<String> {
         );
     }
 
-    // Generate operation ID if not provided
     let op_id =
         operation_id.unwrap_or_else(|| format!("op-{}", Utc::now().format("%Y%m%d-%H%M%S")));
 
-    // Build initial credential if username provided
     let initial_cred = username.as_ref().map(|uname| {
         let mut cred = serde_json::Map::new();
         cred.insert(
@@ -148,7 +151,6 @@ pub(crate) async fn ops_submit(p: OpsSubmitParams) -> Result<String> {
     info!("Target: {target} ({domain})");
     info!("IPs: {}", ips.join(", "));
 
-    // Collect environment variables
     let env_vars = collect_env_vars(OPS_ENV_VAR_NAMES);
     if !env_vars.is_empty() {
         let mut keys: Vec<&str> = env_vars.keys().map(|s| s.as_str()).collect();
@@ -158,7 +160,6 @@ pub(crate) async fn ops_submit(p: OpsSubmitParams) -> Result<String> {
         warn!("No env vars found to submit with operation request");
     }
 
-    // Resolve model
     let effective_model = resolve_model(&model);
     if let Some(ref m) = effective_model {
         if m.starts_with("gpt-") && std::env::var("OPENAI_API_KEY").is_err() {
@@ -240,14 +241,12 @@ pub(crate) async fn follow_operation(
 
         let now = chrono::Utc::now().format("%H:%M:%S");
 
-        // Check if operation has been picked up
         let is_running = reader.is_running(&mut conn).await.unwrap_or(false);
         if !started && is_running {
             started = true;
             println!("[{now}] Operation started");
         }
 
-        // Read current state
         let Ok(meta) = reader.get_meta(&mut conn).await else {
             continue; // operation not yet initialized
         };
@@ -268,7 +267,6 @@ pub(crate) async fn follow_operation(
             .map(|v| v.len())
             .unwrap_or(0);
 
-        // Print milestones
         if meta.has_domain_admin && !prev_da {
             println!("[{now}] *** DOMAIN ADMIN ACHIEVED ***");
             prev_da = true;
@@ -278,7 +276,6 @@ pub(crate) async fn follow_operation(
             prev_gt = true;
         }
 
-        // Print count changes
         if creds != prev_creds || hosts != prev_hosts || vulns != prev_vulns {
             println!(
                 "[{now}] credentials: {} (+{})  hosts: {} (+{})  vulns: {} (+{})",
@@ -294,7 +291,6 @@ pub(crate) async fn follow_operation(
             prev_vulns = vulns;
         }
 
-        // Check for completion
         if meta.completed_at.is_some() {
             println!("[{now}] Operation completed");
             break;
@@ -324,7 +320,6 @@ mod tests {
         const NAME_B: &str = "ARES_TEST_SUBMIT_COLLECT_B_9c1a";
         const NAME_C: &str = "ARES_TEST_SUBMIT_COLLECT_C_9c1a";
 
-        // --- collect_env_vars ---
         std::env::remove_var(NAME_A);
         std::env::remove_var(NAME_B);
         std::env::remove_var(NAME_C);
@@ -343,7 +338,6 @@ mod tests {
         std::env::remove_var(NAME_A);
         std::env::remove_var(NAME_B);
 
-        // --- resolve_model ---
         const ORCH: &str = "ARES_ORCHESTRATOR_MODEL";
         const LEGACY: &str = "ARES_MODEL";
         // Snapshot + clear so we don't trample a developer-set var.

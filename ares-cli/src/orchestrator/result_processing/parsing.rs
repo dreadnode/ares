@@ -61,18 +61,90 @@ pub(crate) fn resolve_parent_id(
     (None, 0)
 }
 
+/// Every key [`parse_discoveries`] reads out of a payload.
+///
+/// `merge_result_extras` strips these from an LLM-authored task result before
+/// attaching the parser's own `discoveries`. Today only the nested `discoveries`
+/// sub-object is ever fed to `parse_discoveries`, so a top-level `credentials`
+/// array is inert — but nothing enforces that, and pointing the extraction at
+/// the payload would hand the model the whole entity parser. One list, used by
+/// both sides, so the strip cannot fall behind what the parser accepts.
+pub(crate) const DISCOVERY_PAYLOAD_KEYS: &[&str] = &[
+    "credentials",
+    "credential",
+    "cracked_password",
+    "username",
+    "domain",
+    "hashes",
+    "hosts",
+    "discovered_users",
+    "vulnerabilities",
+    "vulnerability",
+    "shares",
+];
+
+/// Every `source` an `ares-tools` parser stamps on a credential (a row carrying
+/// a password, not a hash).
+///
+/// Two things key off this list. `credential_source_trust` ranks these into
+/// tiers and rejects a lower-tier realm claim as a phantom — so an unranked
+/// source loses to `description_field`, which is the ranking inverted. And
+/// `attested_credential_source` refuses to carry any *other* label into state,
+/// so a model emitting `"source": "secretsdump"` cannot buy a tier it did not
+/// earn.
+pub(crate) const PARSER_CREDENTIAL_SOURCES: &[&str] = &[
+    "lsassy",
+    "laps_dump",
+    "add_computer",
+    "netexec_auth",
+    "password_spray",
+    "cracked:hashcat",
+    "cracked:john",
+    "description_field",
+    "ldap_description",
+    "autologon_registry",
+    "sysvol_script",
+    "user_description_leak",
+    "lsa_secrets",
+];
+
+/// Label for a credential whose `source` no parser is known to produce.
+///
+/// It ranks 0 in `credential_source_trust`, which is exactly where an
+/// unrecognized source already sat — relabeling costs a real-but-unlisted
+/// parser nothing, and takes the trust claim away from a fabricated one.
+pub(crate) const UNATTESTED_CREDENTIAL_SOURCE: &str = "llm_reported";
+
+/// Strip a provenance claim this crate cannot attest to.
+///
+/// The credential arm of `parse_discoveries` deserializes straight into
+/// `Credential` via serde, so `source` is whatever the payload said. Users, 40
+/// lines below, are gated by `TRUSTED_USER_SOURCES`; credentials were not,
+/// which left the *higher-value* half of the same channel ungated. Dropping the
+/// row would lose real credentials from any parser missing from the list above,
+/// so the claim is neutralized rather than the row discarded.
+fn attested_credential_source(source: &str) -> String {
+    if PARSER_CREDENTIAL_SOURCES.contains(&source) {
+        source.to_string()
+    } else {
+        UNATTESTED_CREDENTIAL_SOURCE.to_string()
+    }
+}
+
 pub(crate) fn parse_discoveries(payload: &Value) -> ParsedDiscoveries {
     let mut result = ParsedDiscoveries::default();
 
     if let Some(creds) = payload.get("credentials").and_then(|v| v.as_array()) {
         for cred_val in creds {
-            if let Ok(cred) = serde_json::from_value::<Credential>(cred_val.clone()) {
+            if let Ok(mut cred) = serde_json::from_value::<Credential>(cred_val.clone()) {
+                cred.source = attested_credential_source(&cred.source);
                 result.credentials.push(cred);
             }
         }
     }
     if let Some(cred_val) = payload.get("credential") {
-        if let Ok(cred) = serde_json::from_value::<Credential>(cred_val.clone()) {
+        if let Ok(mut cred) = serde_json::from_value::<Credential>(cred_val.clone()) {
+            cred.source = attested_credential_source(&cred.source);
             result.credentials.push(cred);
         }
     }
@@ -84,7 +156,9 @@ pub(crate) fn parse_discoveries(payload: &Value) -> ParsedDiscoveries {
                 username: username.to_string(),
                 password: cracked.to_string(),
                 domain: domain.to_string(),
-                source: "cracked".to_string(),
+                // Free text out of the payload, not a cracker's stdout — it
+                // must not share a tier with regex-verified `cracked:hashcat`.
+                source: UNATTESTED_CREDENTIAL_SOURCE.to_string(),
                 discovered_at: Some(chrono::Utc::now()),
                 is_admin: false,
                 parent_id: None,
@@ -170,8 +244,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── has_domain_admin_indicator ──
-
     #[test]
     fn domain_admin_flag_true_ignored() {
         // Agent self-reporting is not accepted — must have a krbtgt hash.
@@ -247,8 +319,6 @@ mod tests {
         });
         assert!(has_domain_admin_indicator(&payload));
     }
-
-    // ── resolve_parent_id ──
 
     fn make_credential(id: &str, username: &str, domain: &str, step: i32) -> Credential {
         Credential {

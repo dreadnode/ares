@@ -25,7 +25,7 @@ pub use runner::{run_agent_loop, HostnameMap, RunAgentLoopParams};
 pub use session_log::{replay_messages, SessionLog};
 pub use types::{
     AgentLoopOutcome, CallbackHandler, CallbackResult, LoopEndReason, ToolDispatcher,
-    ToolExecResult, ToolOutput,
+    ToolExecResult, ToolFailureKind, ToolOutput,
 };
 
 mod types;

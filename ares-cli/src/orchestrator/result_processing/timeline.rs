@@ -59,7 +59,25 @@ pub(crate) fn is_critical_hash(username: &str) -> bool {
     matches!(username.to_lowercase().as_str(), "krbtgt" | "administrator")
 }
 
-pub(crate) async fn create_credential_timeline_event(
+pub(crate) async fn publish_credential_credited(
+    dispatcher: &Arc<Dispatcher>,
+    cred: ares_core::models::Credential,
+) -> anyhow::Result<bool> {
+    let source = cred.source.clone();
+    let username = cred.username.clone();
+    let domain = cred.domain.clone();
+    let is_admin = cred.is_admin;
+    let published = dispatcher
+        .state
+        .publish_credential(&dispatcher.queue, cred)
+        .await?;
+    if published {
+        create_credential_timeline_event(dispatcher, &source, &username, &domain, is_admin).await;
+    }
+    Ok(published)
+}
+
+async fn create_credential_timeline_event(
     dispatcher: &Arc<Dispatcher>,
     source: &str,
     username: &str,
@@ -116,23 +134,51 @@ pub(crate) async fn create_hash_timeline_event(
 }
 
 /// Emit a timeline event when a credential is upgraded to admin (Pwn3d! detected).
+/// Description for the admin-upgrade timeline event, naming the host the grant
+/// was proven on.
+///
+/// `Credential::is_admin` is a single global bool, so the host that produced the
+/// `Pwn3d!` was extracted and then dropped by the same function that found it —
+/// ares discovered all three of the lab's local-admin grants and recorded none
+/// of their scope. The timeline event is the one consumer that reaches a report,
+/// so the host goes here.
+///
+/// The `Admin access confirmed: ` prefix is load-bearing: the corpus
+/// reproduction greps in `GAPS.md` key off it, as do 32 historical events.
+/// Extend it, never reword it.
+pub(crate) fn admin_upgrade_description(
+    username: &str,
+    domain: &str,
+    pwned_host: Option<&str>,
+) -> String {
+    match pwned_host {
+        Some(host) => format!("Admin access confirmed: {domain}\\{username} on {host} (Pwn3d!)"),
+        None => format!("Admin access confirmed: {domain}\\{username} (Pwn3d!)"),
+    }
+}
+
 pub(crate) async fn create_admin_upgrade_timeline_event(
     dispatcher: &Arc<Dispatcher>,
     username: &str,
     domain: &str,
+    pwned_host: Option<&str>,
 ) {
     let techniques = vec!["T1078".to_string()]; // Valid Accounts
     let event_id = format!(
         "evt-admin-{}",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     );
-    let event = serde_json::json!({
+    let description = admin_upgrade_description(username, domain, pwned_host);
+    let mut event = serde_json::json!({
         "id": event_id,
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "source": "admin_upgrade",
-        "description": format!("Admin access confirmed: {domain}\\{username} (Pwn3d!)"),
+        "description": description,
         "mitre_techniques": techniques,
     });
+    if let Some(host) = pwned_host {
+        event["target_ip"] = serde_json::json!(host);
+    }
     let _ = dispatcher
         .state
         .persist_timeline_event(&dispatcher.queue, &event, &techniques)
@@ -154,6 +200,7 @@ pub(crate) async fn create_exploitation_timeline_event(
         "id": event_id,
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "source": "exploitation",
+        "outcome": "succeeded",
         "description": format!("Vulnerability exploited: {vuln_id} (task {task_id})"),
         "mitre_techniques": techniques,
     });
@@ -219,35 +266,71 @@ pub(crate) async fn create_domain_admin_timeline_event(
 }
 
 /// Map vulnerability IDs to MITRE ATT&CK technique IDs.
-fn exploitation_techniques(vuln_id: &str) -> Vec<String> {
+pub(super) fn exploitation_techniques(vuln_id: &str) -> Vec<String> {
     let vuln_lower = vuln_id.to_lowercase();
-    let mut techniques = vec!["T1210".to_string()]; // Exploitation of Remote Services (base)
-    if vuln_lower.contains("constrained_delegation") {
-        techniques.push("T1558.003".to_string()); // Kerberoasting (S4U)
-    }
+    let mut techniques: Vec<String> = Vec::new();
     if vuln_lower.contains("unconstrained_delegation") {
-        techniques.push("T1558".to_string()); // Steal or Forge Kerberos Tickets
+        techniques.push("T1558".to_string());
+    } else if vuln_lower.contains("constrained_delegation") {
+        techniques.push("T1558.003".to_string());
     }
-    if vuln_lower.contains("mssql") {
-        techniques.push("T1505".to_string()); // Server Software Component
+    if vuln_lower.contains("coerce") {
+        techniques.push("T1557".to_string());
+    } else if vuln_lower.contains("mssql") {
+        techniques.push("T1134".to_string());
     }
-    if vuln_lower.contains("esc1") || vuln_lower.contains("esc4") || vuln_lower.contains("esc8") {
-        techniques.push("T1649".to_string()); // Steal or Forge Authentication Certificates
+    if is_adcs_vuln(&vuln_lower) {
+        techniques.push("T1649".to_string());
     }
     if vuln_lower.contains("rbcd") {
-        techniques.push("T1134.001".to_string()); // Access Token Manipulation: Token Impersonation
+        techniques.push("T1134.001".to_string());
     }
     if vuln_lower.contains("smb_signing") {
-        techniques.push("T1557.001".to_string()); // LLMNR/NBT-NS Poisoning (relay)
+        techniques.push("T1557.001".to_string());
+    }
+    if vuln_lower.starts_with("acl_") || vuln_lower.contains("_acl_") {
+        techniques.push("T1098".to_string());
+    }
+    if vuln_lower.contains("winrm") {
+        techniques.push("T1021.006".to_string());
+    }
+    if vuln_lower.contains("child_to_parent")
+        || vuln_lower.contains("forest_trust")
+        || vuln_lower.contains("sid_history")
+    {
+        techniques.push("T1134.005".to_string());
+    }
+    if vuln_lower.contains("golden_ticket") {
+        techniques.push("T1558.001".to_string());
+    }
+    if vuln_lower.contains("dc_secretsdump") {
+        techniques.push("T1003.006".to_string());
+    }
+    if vuln_lower.contains("ntlm_relay") {
+        techniques.push("T1557.001".to_string());
+    }
+    if vuln_lower.contains("nopac") {
+        techniques.push("T1210".to_string());
     }
     techniques
+}
+
+fn is_adcs_vuln(vuln_lower: &str) -> bool {
+    if vuln_lower.contains("adcs")
+        || vuln_lower.contains("certificate")
+        || vuln_lower.contains("certipy")
+    {
+        return true;
+    }
+    vuln_lower
+        .split("esc")
+        .skip(1)
+        .any(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- credential_techniques ---
 
     #[test]
     fn credential_techniques_admin() {
@@ -299,8 +382,6 @@ mod tests {
         let t = credential_techniques("KERBEROAST", false);
         assert!(t.contains(&"T1558.003".to_string()));
     }
-
-    // --- hash_techniques ---
 
     #[test]
     fn hash_techniques_base() {
@@ -368,8 +449,6 @@ mod tests {
         assert!(!t.contains(&"T1003.006".to_string()));
     }
 
-    // --- is_critical_hash ---
-
     #[test]
     fn critical_hash_krbtgt() {
         assert!(is_critical_hash("krbtgt"));
@@ -385,12 +464,13 @@ mod tests {
         assert!(!is_critical_hash("jsmith"));
     }
 
-    // --- exploitation_techniques ---
-
     #[test]
     fn exploitation_techniques_base() {
         let t = exploitation_techniques("some_vuln");
-        assert!(t.contains(&"T1210".to_string()));
+        assert!(
+            t.is_empty(),
+            "an unclassified vuln must claim no technique at all: {t:?}"
+        );
     }
 
     #[test]
@@ -400,9 +480,27 @@ mod tests {
     }
 
     #[test]
+    fn mssql_coercion_is_forced_auth_not_token_manipulation() {
+        let t = exploitation_techniques("mssql_ntlm_coerce_192_168_58_51_192_168_58_1");
+        assert!(
+            t.contains(&"T1557".to_string()),
+            "coercing NTLM off a SQL host is what detect_ntlm_relay watches for: {t:?}"
+        );
+        assert!(
+            !t.contains(&"T1134".to_string()),
+            "an MSSQL impersonation alert must not credit coverage for a coercion vuln \
+             just because the id starts with mssql_: {t:?}"
+        );
+    }
+
+    #[test]
     fn exploitation_techniques_mssql() {
         let t = exploitation_techniques("mssql_impersonation_sql01");
-        assert!(t.contains(&"T1505".to_string()));
+        assert!(t.contains(&"T1134".to_string()));
+        assert!(
+            !t.contains(&"T1505".to_string()),
+            "T1505 is persistence via a malicious stored procedure, which ares never installs"
+        );
     }
 
     #[test]
@@ -424,6 +522,80 @@ mod tests {
     }
 
     #[test]
+    fn acl_edge_abuse_is_account_manipulation_not_the_fallback() {
+        for vuln in [
+            "acl_genericall_alice_dc01",
+            "acl_genericwrite_alice_domain admins",
+            "acl_writeproperty_alice_bob",
+            "acl_addmember_alice_ca01",
+            "acl_forcechangepassword_alice_bob",
+        ] {
+            let t = exploitation_techniques(vuln);
+            assert!(
+                t.contains(&"T1098".to_string()),
+                "{vuln} must map to T1098, which blue's delegation-abuse rule emits"
+            );
+            assert!(
+                !t.contains(&"T1210".to_string()),
+                "{vuln} must not land in the unclassified bucket: {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_esc_number_is_adcs_not_the_fallback() {
+        for vuln in [
+            "adcs_esc9__esc9",
+            "esc3_template",
+            "esc13_template",
+            "esc16_template",
+            "certificate_obtained_dc01",
+        ] {
+            let t = exploitation_techniques(vuln);
+            assert!(
+                t.contains(&"T1649".to_string()),
+                "{vuln} must map to T1649: {t:?}"
+            );
+            assert!(!t.contains(&"T1210".to_string()), "{vuln} -> {t:?}");
+        }
+    }
+
+    #[test]
+    fn escalate_is_not_mistaken_for_an_esc_template() {
+        let t = exploitation_techniques("escalate_local_admin");
+        assert!(
+            !t.contains(&"T1649".to_string()),
+            "the esc<N> probe must require a digit, not match the word 'escalate': {t:?}"
+        );
+    }
+
+    #[test]
+    fn winrm_access_is_remote_management_not_the_fallback() {
+        let t = exploitation_techniques("winrm_access_192.168.58.10");
+        assert!(t.contains(&"T1021.006".to_string()), "{t:?}");
+        assert!(!t.contains(&"T1210".to_string()), "{t:?}");
+    }
+
+    #[test]
+    fn nopac_keeps_t1210_so_the_id_still_means_exploitation() {
+        let t = exploitation_techniques("nopac_dc01");
+        assert!(
+            t.contains(&"T1210".to_string()),
+            "NoPac is genuine remote-service exploitation, so T1210 here is a real \
+             claim rather than the unclassified fallback: {t:?}"
+        );
+    }
+
+    #[test]
+    fn cross_domain_trust_abuse_is_sid_history() {
+        for vuln in ["child_to_parent_contoso_fabrikam", "forest_trust_contoso"] {
+            let t = exploitation_techniques(vuln);
+            assert!(t.contains(&"T1134.005".to_string()), "{vuln} -> {t:?}");
+            assert!(!t.contains(&"T1210".to_string()), "{vuln} -> {t:?}");
+        }
+    }
+
+    #[test]
     fn exploitation_techniques_smb_signing() {
         let t = exploitation_techniques("smb_signing_disabled_192.168.58.10");
         assert!(t.contains(&"T1557.001".to_string()));
@@ -433,5 +605,138 @@ mod tests {
     fn exploitation_techniques_unconstrained() {
         let t = exploitation_techniques("unconstrained_delegation_ws01");
         assert!(t.contains(&"T1558".to_string()));
+        assert!(
+            !t.contains(&"T1558.003".to_string()),
+            "unconstrained delegation is not S4U/kerberoasting"
+        );
+    }
+
+    #[test]
+    fn every_emitted_technique_is_coverable_by_the_blue_catalog() {
+        // A red technique with no exact or parent/child match in the detection
+        // catalog can never be credited, so it lands in the report as "missed"
+        // however well blue actually detected the activity. Retiring the blanket
+        // T1210 first left mssql on T1505, which nothing covered; mapping it to
+        // T1134 puts it back under detect_mssql_impersonation.
+        let blue: Vec<&str> = ares_core::detection::detection_config()
+            .templates
+            .values()
+            .map(|t| t.mitre_id.as_str())
+            .collect();
+
+        for vuln in [
+            "unconstrained_delegation_ws01",
+            "constrained_delegation_dc01",
+            "mssql_impersonation_sql01",
+            "esc1_template",
+            "esc4_template",
+            "esc8_ca01",
+            "rbcd_dc01",
+            "smb_signing_disabled_192.168.58.10",
+            "acl_genericall_alice_dc01",
+            "acl_forcechangepassword_alice_bob",
+            "adcs_esc9__esc9",
+            "certificate_obtained_dc01",
+            "winrm_access_192.168.58.10",
+            "nopac_dc01",
+            "child_to_parent_contoso_fabrikam",
+            "forest_trust_contoso",
+            "sid_history_contoso",
+            "golden_ticket_contoso",
+            "dc_secretsdump_dc01",
+            "ntlm_relay_192.168.58.10",
+            "mssql_ntlm_coerce_192_168_58_51_192_168_58_1",
+            "some_unmapped_vuln",
+        ] {
+            for red in exploitation_techniques(vuln) {
+                assert!(
+                    blue.iter().any(|b| {
+                        ares_core::correlation::redblue::RedBlueCorrelator::techniques_match(
+                            Some(&red),
+                            Some(b),
+                        )
+                    }),
+                    "{vuln} emits {red}, which no detection template can cover"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exploitation_techniques_specific_vuln_omits_t1210() {
+        for vuln in [
+            "esc1_template",
+            "esc8_ca01",
+            "constrained_delegation_dc01",
+            "unconstrained_delegation_ws01",
+            "rbcd_dc01",
+            "mssql_impersonation_sql01",
+            "smb_signing_disabled_192.168.58.10",
+        ] {
+            let t = exploitation_techniques(vuln);
+            assert!(
+                !t.contains(&"T1210".to_string()),
+                "{vuln} is not exploitation of a remote service"
+            );
+        }
+    }
+
+    #[test]
+    fn families_blue_actually_detects_keep_a_technique_after_the_fallback_dies() {
+        for (vuln, want) in [
+            ("golden_ticket_contoso", "T1558.001"),
+            ("dc_secretsdump_dc01", "T1003.006"),
+            ("ntlm_relay_192.168.58.10", "T1557.001"),
+            ("sid_history_contoso", "T1134.005"),
+        ] {
+            let t = exploitation_techniques(vuln);
+            assert!(
+                t.contains(&want.to_string()),
+                "{vuln} rode the T1210 fallback; blue has an exact rule for it, so dropping \
+                 the fallback must not leave it silent: want {want}, got {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognized_vuln_claims_no_technique_instead_of_t1210() {
+        for vuln in ["zerologon_dc01", "printnightmare_web01", "some_vuln"] {
+            let t = exploitation_techniques(vuln);
+            assert!(
+                t.is_empty(),
+                "{vuln} is unclassified, and emitting T1210 for it lets any blue rule \
+                 carrying T1210 claim coverage red never earned: {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mssql_linked_server_rule_matches_mssql_and_not_nopac() {
+        let (_, entry) = ares_core::detection::find_template("detect_mssql_linked_server")
+            .expect("detect_mssql_linked_server must exist");
+        let matches = |red: &str| {
+            ares_core::correlation::redblue::RedBlueCorrelator::techniques_match(
+                Some(red),
+                Some(&entry.mitre_id),
+            )
+        };
+
+        for red in exploitation_techniques("mssql_linked_server_sql01") {
+            assert!(
+                matches(&red),
+                "a blue MSSQL rule that no MSSQL vuln can match is coverage red never gets \
+                 credited for: red={red} blue={}",
+                entry.mitre_id
+            );
+        }
+
+        for red in exploitation_techniques("nopac_dc01") {
+            assert!(
+                !matches(&red),
+                "an MSSQL linked-server alert must not credit NoPac coverage: red={red} \
+                 blue={}",
+                entry.mitre_id
+            );
+        }
     }
 }

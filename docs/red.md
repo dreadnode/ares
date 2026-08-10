@@ -60,40 +60,49 @@ Each worker agent has:
 - No knowledge of other workers' activities (except via shared state)
 - Responsibility to report results back to the orchestrator
 
-### 3. Shared State via Redis, Tasks via NATS
+### 3. NATS Is the Source of Truth, Redis Is a Derived Cache
 
-Ares splits transport from state:
+Ares splits transport from state, but state itself has two tiers:
 
 - **NATS JetStream** carries task dispatch and tool RPC between orchestrator
-  and workers (durable work queues, pull consumers, explicit acks)
-- **Redis** holds durable shared state: credentials, hashes, hosts,
-  vulnerabilities, locks, heartbeats, and operation metadata
+  and workers (durable work queues, pull consumers, explicit acks), and
+  hosts the durable op-state event log (`ARES_OPSTATE`) that is the source
+  of truth for what happened during an operation.
+- **Redis** is a fast, indexed *materialized view* of op state derived from
+  the event log: credentials, hashes, hosts, vulnerabilities, locks,
+  heartbeats, and operation metadata. On orchestrator restart, `recover_operation()`
+  rehydrates Redis from the NATS event log via
+  `orchestrator/state/replay.rs`.
 - Discovered credentials are automatically broadcast via Redis state updates
-- Hashes are tracked for cracking status
-- Hosts and vulnerabilities are cataloged
-- Task status is visible to all agents
+  (fire-and-forget `ares.state.updates.{op}` core NATS notifies subscribers).
+- Task status is visible to all agents through Redis.
+
+See `ares-core/src/nats.rs` for the full subject/stream taxonomy and
+[`docs/infrastructure.md`](infrastructure.md#state--transport-layer) for
+retention tiers.
 
 ## Agent Quick Reference
 
 Quick reference table for all red team agents with their key configuration and
 tool assignments. For detailed responsibilities, see sections below.
 
-| Agent | Purpose | Pod Selector | Max Steps | Tool Classes |
-|-------|---------|--------------|-----------|--------------|
-| **ORCHESTRATOR** | Central coordinator (dispatches, never executes) | `app.kubernetes.io/name=ares-orchestrator` | 200 | `OrchestratorTools`, `RedTeamReportingTools` |
-| **RECON** | Network scanning, enumeration, BloodHound | `ares.dreadnode.io/role=recon` | 100 | `NetworkEnumerationTools`, `BloodHoundTools`, `RedTeamReportingTools` |
-| **CREDENTIAL_ACCESS** | Password attacks, hash extraction | `ares.dreadnode.io/role=credential_access` | 100 | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `GMSATools` |
-| **CRACKER** | Offline hash cracking | `ares.dreadnode.io/role=cracker` | 150 | `CrackingTools`, `CrackerCallbackTools` |
-| **ACL** | AD ACL abuse attacks | `ares.dreadnode.io/role=acl` | 150 | `ACLExploitTools` |
-| **PRIVESC** | Privilege escalation exploitation | `ares.dreadnode.io/role=privesc` | 100 | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools`, `GoldenTicketTools`, `TrustAttackTools`, `LateralMovementTools`, `CredentialHarvestingTools` |
-| **LATERAL** | Host compromise, credential harvesting | `ares.dreadnode.io/role=lateral` | 300 | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools`, `LateralCallbackTools` |
-| **COERCION** | NTLM coercion and relay attacks | `ares.dreadnode.io/role=coercion` | 30 | `CoercionTools`, `CoercionNetworkTools` |
+| Agent | Purpose | Max Steps | Tool Classes |
+|-------|---------|-----------|--------------|
+| **ORCHESTRATOR** | Periodic gap-filling planner (dispatches, never executes) | 200 | `OrchestratorTools` |
+| **RECON** | Network scanning, enumeration, BloodHound | 100 | `NetworkEnumerationTools`, `BloodHoundTools`, `RedTeamReportingTools` |
+| **CREDENTIAL_ACCESS** | Password attacks, hash extraction | 100 | `CredentialDiscoveryTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `GMSATools` |
+| **CRACKER** | Offline hash cracking | 150 | `CrackingTools`, `CrackerCallbackTools` |
+| **ACL** | AD ACL abuse attacks | 150 | `ACLExploitTools` |
+| **PRIVESC** | Privilege escalation exploitation | 100 | `CertipyTools`, `DelegationTools`, `MSSQLTools`, `CVEExploitTools`, `GoldenTicketTools`, `TrustAttackTools`, `LateralMovementTools`, `CredentialHarvestingTools` |
+| **LATERAL** | Host compromise, credential harvesting | 300 | `LateralMovementTools`, `CredentialHarvestingTools`, `SharePilferingTools`, `PostureValidationTools`, `LateralCallbackTools` |
+| **COERCION** | NTLM coercion and relay attacks | 30 | `CoercionTools`, `CoercionNetworkTools` |
 
 ### Configuration Sources
 
-- **Pod selectors**: `config/ares.yaml`
-- **Tool assignments**: `config/ares.yaml` → per-agent `capabilities`
-- **Max steps defaults**: `config/ares.yaml` → per-agent `max_steps`
+- **Tool assignments**: `ares-llm/src/tool_registry/` → `tools_for_role`, keyed by
+  `AgentRole`. These are not configurable from YAML.
+- **Max steps**: `config/ares.yaml` → per-agent `max_steps`, overridden by
+  `ARES_AGENT_MAX_STEPS`; falls back to 75 when neither is set.
 - **Agent instructions**: `ares-cli/src/orchestrator/` prompt templates
 
 ### Model Selection
@@ -111,33 +120,162 @@ Models can be configured via environment variables (in order of precedence):
 
 ### Orchestrator Service
 
-**Purpose**: Central LLM-powered coordinator with the "big picture" view.
+**Purpose**: Central coordinator. The scheduling is deterministic Rust; a
+periodic LLM planning turn runs *alongside* it to catch what the rules miss.
 
-**Pod**: `ares-orchestrator-*` (separate from worker agents)
+**Process**: `ares orchestrator` (separate from worker processes)
 
-**Tools Available**:
+**What the deterministic part does**:
 
-- `OrchestratorTools` - Dispatch functions for all worker types
-- `RedTeamReportingTools` - Status reporting, operation control
+- Runs the automations in `ares-cli/src/orchestrator/automation/`, which read
+  operation state and submit follow-on tasks via `Dispatcher::throttled_submit`
+- Hosts every red agent loop in-process (`llm_runner.rs`), one `tokio` task per
+  dispatched task, and owns the per-role LLM providers
+- Decides completion in `orchestrator/completion.rs`
 
-**Does NOT Have**:
+**What the planning turn does**: `auto_orchestrator_planning` submits an
+`orchestrator_plan` task on an interval. It runs as `AgentRole::Orchestrator`
+with `orchestrator.md.tera`, and may call `dispatch_*` to queue work or
+`complete_operation` to end the operation. Its purpose is *gap-filling*, not
+scheduling: the rules already dispatch the standard matrix, so the planner
+looks for work that needs two facts correlated across tools — a domain
+enumerated by one technique but not another, a discovered vuln nothing claimed,
+an uncracked hash with no crack task. **Dispatching nothing is its normal
+outcome**, and the prompt says so.
 
-- Network enumeration tools (nmap, enum4linux) - dispatches to RECON
-- Credential harvesting tools (secretsdump, kerberoast) - dispatches to CREDENTIAL_ACCESS
-- Exploitation tools (certipy, mssqlclient) - dispatches to PRIVESC
-- Lateral movement tools (psexec, evil-winrm) - dispatches to LATERAL
-- Cracking tools (hashcat, john) - dispatches to CRACKER
+Guards: single-flight (one planning task at a time, via
+`tracker.count_for_role`), skipped while red is draining, and a warm-up delay
+so the first turn sees post-recon state. On by default, declared as
+`orchestrator.planner_enabled` in `config/ares.yaml`;
+`ARES_ORCHESTRATOR_PLANNER=0` disables it. Disabling it does not merely stop
+periodic planning — `orchestrator_plan` is the only task type that maps to
+`AgentRole::Orchestrator` and this loop is its only producer, so with the
+planner off no orchestrator turn is ever created. Nothing then calls the
+orchestrator-only tools, including `complete_operation`, the sole writer of
+`state.completed`; the op can only end on the completion caps.
 
-**Dispatch Functions**:
+The planner wakes on two signals: its timer, and `planning_notify` — fired
+wherever workers publish discoveries into the coordination layer
+(`result_processing`), so a new credential or vuln gets a planning turn without
+waiting out the interval. A floor
+(`ARES_ORCHESTRATOR_PLANNER_MIN_GAP_SECS`, default 60s) bounds how often a wake
+can produce a turn. The floor is not optional: an earlier build woke on every
+proposal arrival with no floor and ran **208 planning turns in a 2h op** against
+a 180s timer that permits 40, because single-flight caps concurrency rather than
+frequency.
 
-- `dispatch_recon` - RECON, network scanning, user/share enumeration, BloodHound
-- `dispatch_credential_access` - CREDENTIAL_ACCESS, password attacks, hash extraction
-- `dispatch_crack_hash` - CRACKER, hash cracking
-- `dispatch_acl_analysis` - ACL, ACL abuse paths
-- `dispatch_lateral_movement` - LATERAL, host compromise
-- `dispatch_privesc_exploit` - PRIVESC, direct exploitation
-- `queue_vulnerability_for_exploitation` - PRIVESC, queue vuln for exploitation
-- `start_coercion` - COERCION, NTLM coercion/relay
+The planning turn is also what rules on parked proposals, so when mediation is
+on the planner tick is capped at a third of the auto-release window
+(`effective_interval_secs`) — at the defaults, 180s becomes 60s. Without that
+cap the two intervals are both 180s, and since a parked proposal no longer
+wakes the planner, work parked shortly after a tick expires before the next one
+reviews it. An explicitly configured interval already below the cap is left
+alone; a planner running without mediation keeps its configured interval, since
+it has no proposals to review.
+
+### Mediation: automations as the orchestrator's instruments
+
+Off by default, declared as `orchestrator.mediation_enabled` in
+`config/ares.yaml`; `ARES_ORCHESTRATOR_MEDIATION=1` turns it on and makes the
+orchestrator the decision-maker rather than a supervisor over an
+already-scheduled system. It is opt-in because an orchestrator that does not
+rule within the window turns every proposal into a delayed auto-release, which
+costs latency and buys no veto.
+
+With mediation on, dispatch of *vetoable* work does not run immediately. It is
+parked in a **proposal pool** (`orchestrator/proposals.rs`) and the orchestrator
+rules on it with `get_proposed_work` / `approve_work` / `reject_work`. The
+automations keep their detection logic and payload construction unchanged — the
+orchestrator selects from validated, executable work rather than composing tool
+calls, so it cannot name a `vuln_id`, host or principal that does not exist.
+
+**Only a veto changes what runs.** Approved work dispatches; unreviewed work
+auto-releases and dispatches too. The two paths are indistinguishable in
+outcome, so approving is not what makes mediation worth its latency — rejecting
+is. Measured on `op-20260731-174811` with every task type mediated: 71 approved,
+353 auto-released, and **8 rejected**. Only those 8 dispatches differed from
+the un-mediated run, at the cost of a review window on all 432.
+
+`VETOABLE_TASK_TYPES` (`proposals.rs`) therefore scopes mediation to work where
+a veto has value — `exploit`, `lateral`, `coercion`, `acl_chain_step`. Routine
+enumeration, credential access and cracking dispatch straight through. This cuts
+review volume by roughly an order of magnitude so the orchestrator can actually
+keep up with the queue it is shown, instead of rubber-stamping a fraction of it
+while the rest expires. `ARES_ORCHESTRATOR_MEDIATION_SCOPE=all` restores full
+mediation.
+
+The narrower scope buys a longer window: 180s rather than 60s. The tradeoff is
+per-item latency — an exploit the orchestrator never looks at now waits three
+minutes before auto-release instead of one. Fewer dispatches pay that cost, but
+each pays more of it, so an orchestrator whose turn cadence exceeds the window
+adds roughly three minutes to every exploit in the operation. Shorten
+`ARES_ORCHESTRATOR_MEDIATION_WINDOW_SECS` if time-to-DA matters more than review
+coverage.
+
+The gate is a single line in `throttled_submit_outcome_inner`, which every
+automation dispatch already passes through. Dedup reuses
+`DeferredTask::signature()`, so an automation re-proposing the same work each
+tick collapses to one pool entry.
+
+Three properties make it safe to leave on:
+
+- **Fail-open.** `spawn_proposal_sweeper` releases anything the orchestrator has
+  not ruled on within the window (default 60s). A stalled, rate-limited or dead
+  orchestrator degrades to the un-mediated behavior plus that delay, never to a
+  frozen operation.
+- **Cap fall-through.** If the pool is at capacity, dispatch proceeds directly
+  rather than dropping work, so the cap cannot stall red.
+- **No deadlock.** `should_mediate` exempts `target_role == "orchestrator"` (the
+  planning task itself), orchestrator-directed dispatches (its own `dispatch_*`,
+  via a task-local), and approved releases. Each exemption has a named test in
+  `submission.rs::mediation_gate_tests`.
+
+Rejections are remembered by signature for a cooldown
+(`ARES_ORCHESTRATOR_MEDIATION_REJECTION_TTL_SECS`, default 600) so a rejected
+proposal is not re-proposed on the next tick. Approval frees the signature, so
+the same work can be proposed again later.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `ARES_ORCHESTRATOR_MEDIATION` | off | Route automation dispatch through the orchestrator |
+| `ARES_ORCHESTRATOR_MEDIATION_SCOPE` | vetoable | `all` mediates every task type instead |
+| `ARES_ORCHESTRATOR_MEDIATION_WINDOW_SECS` | 180 | How long work waits before auto-release |
+| `ARES_ORCHESTRATOR_MEDIATION_CAPACITY` | 200 | Pool cap before fall-through |
+| `ARES_ORCHESTRATOR_MEDIATION_REJECTION_TTL_SECS` | 600 | Rejection cooldown |
+| `ARES_ORCHESTRATOR_MEDIATION_DISPATCH_TTL_SECS` | 600 | Cooldown before dispatched work may be re-proposed |
+
+**Where the two on/off flags live.** `planner_enabled` and `mediation_enabled`
+resolve in three layers — environment variable, then the `orchestrator:` section
+of `config/ares.yaml`, then the compiled-in fallback. The environment always
+wins, so existing deployments that set the variables are unaffected. Both were
+env-only until the config section existed, which meant an operator could read
+`agents.orchestrator.model` in the config, conclude the orchestrator was
+running, and be wrong: nothing in the repo set either variable, so on a default
+run zero orchestrator turns fired. The resolved values and the layer each came
+from are logged once at startup next to `Orchestrator model`:
+
+```
+INFO Orchestrator flags planner_enabled=true planner_source=config
+     mediation_enabled=false mediation_source=config
+```
+
+`planner_source=default` means no config section was found and the fallback
+applied; `env` means a variable overrode the file. On EC2 the authoritative
+environment is `/etc/ares/env`, which is outside the repo — that log line is the
+only place a run states plainly which layer decided.
+
+**Privilege boundary**: `dispatch_*` and `complete_operation` are offered to the
+orchestrator alone, but the agent loop routes callbacks by *tool name* for every
+role. `OrchestratorCallbackHandler` therefore re-checks the caller's role and
+refuses these tools for workers — without that check, a worker hallucinating
+`complete_operation` would end the operation, and one hallucinating
+`dispatch_recon` would queue a real task.
+
+**Secret handling**: the orchestrator names principals (`username`, `domain`)
+and never sees secret material. `strip_secret_fields` removes secret-bearing
+properties from its schemas, and the dispatch handlers resolve the secret out of
+operation state. `get_hash_value` stays in `REMOVED_CALLBACK_TOOLS` — offered to
+no role — because raw hash material has no reason to enter LLM context.
 
 ### RECON
 
@@ -265,6 +403,15 @@ Models can be configured via environment variables (in order of precedence):
 4. Report captured hashes or relayed access
 
 ## Operation Lifecycle
+
+> **Notation**: `dispatch_recon(...)` / `complete_operation()` below are real tool
+> names, but most dispatches in a run are submitted by the deterministic
+> automations in `ares-cli/src/orchestrator/automation/` rather than called by a
+> model. The orchestrator agent calls them when it is planning (and, under
+> `ARES_ORCHESTRATOR_MEDIATION`, when approving proposed work); completion is
+> decided by `orchestrator/completion.rs` unless the orchestrator sets the
+> `completed` flag via `complete_operation`.
+
 
 ### Phase 1: Initial Reconnaissance
 
@@ -413,14 +560,21 @@ recommended default.
 **Important**: dominating a child domain does **not** count as dominating the
 forest root. For example, obtaining `krbtgt` from `child.contoso.local` (child
 DC) does **not** satisfy the `contoso.local` forest requirement. The forest
-root DC must be separately compromised, typically via trust escalation
-(ExtraSid attack using the trust key from the child domain's `secretsdump`
-output).
+root DC must be separately compromised, typically via child-to-parent trust
+escalation (ExtraSid attack using the trust key from the child domain's
+`secretsdump` output). This works because SID filtering is not applied within
+a forest.
 
 The required forest roots are derived from:
 
 - The target domain
-- Cross-forest trust relationships (trust type `forest` or `external`)
+- Cross-forest trust relationships (trust type `forest` or `external`).
+  A second forest is **not** reached by forging with its trust key — SID
+  filtering on the foreign DCs strips the injected claim regardless of RID and
+  DCSync returns `rpc_s_access_denied`. It falls to a credential native to
+  that forest driving a native escalation: ADCS (ESC13 above all, then
+  ESC1/ESC4/ESC8), an MSSQL linked-server pivot, AS-REP roasting, or a foreign
+  security principal that already holds rights there.
 - Domain controllers discovered during recon
 
 ### Mode 2: Stop on Domain Admin
@@ -477,7 +631,7 @@ Vulnerabilities are processed in priority order:
 | 3 | ADCS_ESC8 | Direct DA path |
 | 4 | krbtgt_hash | Golden ticket |
 | 5 | domain_admin_hash | Immediate DA |
-| 6 | acl_abuse | Path to DA |
+| 6 | acl_abuse | Ranked candidate path (enumeration + per-edge abuse; escalation to DA unproven) |
 | 7 | unconstrained_delegation | Token capture |
 | 8 | constrained_delegation | Impersonation |
 | 9 | rbcd | Impersonation |
@@ -487,9 +641,8 @@ Vulnerabilities are processed in priority order:
 
 ## Task Throttling and Phase-Aware Dispatch
 
-The dispatcher uses intelligent throttling to prevent LLM API rate limit storms
+The dispatcher uses throttling to prevent LLM API rate limit storms
 while ensuring all worker agents stay productive.
-See [Phase Priority Guide](phase-priority.md) for detailed analysis.
 
 ### Throttling Behavior
 
@@ -540,27 +693,42 @@ INFO | Operation phase transition: enumeration → privilege_escalation
 
 Ares uses two backends with distinct roles:
 
-- **NATS JetStream** - broker/transport for queues and RPC. Carries task
-  dispatch (`ares.red.tasks.{role}`, `ares.blue.tasks.{role}`), tool result
-  streams (`ares.{red,blue}.tasks.results.{task_id}`), and investigation
-  requests. Work-queue retention auto-deletes acked messages.
-- **Redis** - durable, queryable state. Holds operation state, credentials,
-  hosts, hashes, vulnerabilities, heartbeats, locks, task status, and the
-  per-orchestrator deferred priority queue.
+- **NATS JetStream** - broker/transport *and* the durable event log.
+  Carries task dispatch (`ares.tasks.{role}`, `ares.blue.tasks.{role}`),
+  tool RPC (`ares.tools.exec.{role}`, request/reply inbox per call), task
+  result streams (`ares.tasks.results.{task_id}`), deferred re-dispatch
+  (`ares.deferred.{op}.{type}`), state-change notifications
+  (`ares.state.updates.{op}`, core fire-and-forget), and the op-state event
+  log (`ares.ops.{op_id}.{entity}.{action}` on `ARES_OPSTATE`). Work-queue
+  streams auto-delete acked messages; `ARES_OPSTATE` retains ~30 days.
+- **Redis** - fast, indexed *materialized view* of op state derived from
+  the NATS event log. Holds credentials, hashes, hosts, vulnerabilities,
+  heartbeats, locks, task status, and the per-orchestrator deferred
+  priority queue under `ares:op:{op_id}:*` (see
+  `ares-core/src/state/mod.rs` for the full key layout).
 
 Workers connect to both. The orchestrator owns one shared `NatsBroker` and
 threads it through dispatcher, completion checks, and the embedded blue
 auto-submit task.
 
-### Pattern: Write-Through Cache
+For the full subject/stream taxonomy, see the module header comment in
+`ares-core/src/nats.rs`. For retention tiers across Loki, Redis, and NATS
+streams, see [`docs/infrastructure.md`](infrastructure.md#state--transport-layer).
 
-Redis is the **durable store**. In-memory dicts are **write-through caches**.
+### Pattern: Write-Through Cache Backed by an Event Log
+
+`ARES_OPSTATE` is the **source of truth**. Redis is a **derived cache**
+kept in sync by the same writes that emit op-state events. In-memory dicts
+are **write-through caches** on top of Redis.
 
 #### Pattern
 
-- **Write**: Persist to Redis (immediately or via background task), update memory
-- **Read**: Read from memory (assumes write-through keeps it in sync)
-- **Recovery**: Hydrate all state from Redis before any decisions
+- **Write**: Emit op-state event to NATS, persist to Redis (immediately or
+  via background task), update memory.
+- **Read**: Read from memory (assumes write-through keeps it in sync).
+- **Recovery**: `recover_operation()` rehydrates Redis by replaying
+  `ARES_OPSTATE` for the op via `orchestrator/state/replay.rs` before any
+  decisions.
 
 #### Assumptions
 
@@ -571,7 +739,8 @@ Redis is the **durable store**. In-memory dicts are **write-through caches**.
 #### Known Gaps
 
 - `SharedRedTeamState.add_*()` methods are memory-first with async persist
-- If Redis write fails, state diverges (logged, checkpoint is safety net)
+- If Redis write fails, state diverges from the event log (logged; NATS
+  replay is the safety net)
 
 ### Shared State Objects
 
@@ -598,6 +767,11 @@ When any agent discovers a credential:
 3. All agents can use the credential immediately
 
 ## Task Flow Example
+
+The notation caveat from [Operation Lifecycle](#operation-lifecycle) applies
+here too: these are real tool names, but most dispatches in a run come from the
+deterministic automations rather than a model.
+
 
 ```text
 ┌─────────────┐    dispatch_credential_access     ┌─────────────────┐
@@ -638,41 +812,6 @@ When any agent discovers a credential:
 └─────────────┘
 ```
 
-## Anti-Patterns to Avoid
-
-### Orchestrator Should NOT
-
-1. **Execute reconnaissance tools directly**
-   - Wrong: Orchestrator calls `nmap_scan`, `enumerate_users`
-   - Right: Orchestrator dispatches to RECON
-
-2. **Execute credential attacks directly**
-   - Wrong: Orchestrator calls `secretsdump`, `kerberoast`
-   - Right: Orchestrator dispatches to CREDENTIAL_ACCESS
-
-3. **Run exploitation tools**
-   - Wrong: Orchestrator calls `certipy_req_esc1`, `mssql_exec_linked`
-   - Right: Orchestrator queues vulnerability for PRIVESC
-
-4. **Perform lateral movement**
-   - Wrong: Orchestrator calls `psexec`, `evil_winrm`
-   - Right: Orchestrator dispatches to LATERAL
-
-5. **Crack hashes**
-   - Wrong: Orchestrator calls `hashcat`, `john`
-   - Right: Orchestrator dispatches to CRACKER
-
-### Workers Should NOT
-
-1. **Make strategic decisions**
-   - Workers execute assigned tasks, not decide what to attack next
-
-2. **Dispatch to other workers**
-   - Only the orchestrator coordinates between agents
-
-3. **Hold onto results**
-   - Results should be reported immediately for broadcast
-
 ## Debugging and Manual Testing
 
 ### Manually Running Tools on Agent Pods
@@ -702,17 +841,8 @@ kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
     nmap -sV --top-ports 1000 192.168.58.0/24
 ```
 
-#### Available Tools by Agent Pod
-
-| Agent Pod | Installed Tools |
-| --------- | --------------- |
-| `ares-recon-agent-*` | nmap, netexec, enum4linux, bloodhound-python, certipy, ldapsearch, adidnsdump |
-| `ares-credential-access-agent-*` | secretsdump, sprayhound, lsassy, gMSADumper, targetedKerberoast, smbclient |
-| `ares-cracker-agent-*` | hashcat, john, wordlists (rockyou, seclists) |
-| `ares-acl-agent-*` | bloodyAD, pywhisker, dacledit, targetedKerberoast |
-| `ares-privesc-agent-*` | certipy, krbrelayx, nopac, impacket-findDelegation, impacket-mssqlclient |
-| `ares-lateral-movement-agent-*` | evil-winrm, xfreerdp, pth-winexe, impacket-psexec, impacket-wmiexec, impacket-smbexec |
-| `ares-coercion-agent-*` | responder, ntlmrelayx, coercer, petitpotam, mitm6 |
+Which tools live on which pod is listed under
+[Installed Tools by Agent Role](#installed-tools-by-agent-role).
 
 ## File Reference
 
@@ -742,99 +872,86 @@ kubectl -n attack-simulation exec -it ares-recon-agent-0 -- \
 Each agent pod has role-specific pentesting tools installed via Ansible. Tool
 availability can vary by distro and role flags.
 
-### Base Tools (All Agents)
+Every agent inherits a base layer from `ansible/playbooks/ares/base.yml` →
+`dreadnode.nimbus_range.base`: the `ares` Rust binary, python3, the usual
+shell utilities, network diagnostics (dig, tcpdump, iproute2), debugging
+(strace, lsof), and build toolchain. The orchestrator pod gets **only** that
+base — it holds no pentesting tools, by design.
 
-All agents inherit these foundational tools:
+Each worker adds one role from the `l50.arsenal` collection, via the matching
+playbook in `ansible/playbooks/ares/`:
 
-- **Runtime**: Rust binary (`ares worker`), python3, pip3
-- **Utilities**: git, curl, wget, netcat-traditional, vim, jq, tmux, htop
-- **Network diagnostics**: dnsutils (dig, nslookup), net-tools, iproute2, tcpdump, telnet
-- **Debugging**: procps (ps, top), strace, lsof
-- **Build**: build-essential, libffi-dev, libssl-dev
+| Role | Playbook → arsenal role | Tools |
+| ---- | ----------------------- | ----- |
+| RECON | `recon.yml` → `recon_tools` | nmap; ldapsearch; enum4linux, enum4linux-ng, rpcclient; dig, nslookup, whois, adidnsdump; netexec, bloodhound-python, certipy; impacket-GetNPUsers, impacket-GetUserSPNs |
+| CREDENTIAL_ACCESS | `credential_access.yml` → `credential_access_tools` | smbclient, rpcclient; sprayhound; targetedKerberoast; lsassy, gMSADumper; impacket-GetNPUsers, impacket-GetUserSPNs, impacket-secretsdump |
+| CRACKER | `cracker.yml` → `cracking_tools` | hashcat, john; rockyou + seclists under `/usr/share/wordlists/`; GPU builds add ocl-icd-libopencl1, opencl-headers, clinfo |
+| ACL | `acl_abuse.yml` → `acl_tools` | bloodyAD, pywhisker; targetedKerberoast; rpcclient; impacket-dacledit |
+| PRIVESC | `privesc.yml` → `privesc_tools` | certipy; lsassy; nopac, printnightmare, zerologon; krbrelayx, printerbug, addspn, dnstool; impacket-findDelegation, -getST, -getTGT, -rbcd, -addcomputer, -lookupsid, -mssqlclient, -raiseChild, -ticketer, -secretsdump, -psexec; SharpGPOAbuse (local, under `mono`, speaks LDAP to the DC), pygpoabuse |
+| LATERAL | `lateral_movement.yml` → `lateral_movement_tools` | evil-winrm; xfreerdp (pass-the-hash capable); sshpass; smbclient; proxychains4; pth-winexe, pth-smbclient, pth-rpcclient, pth-net, pth-wmic; impacket-psexec, -wmiexec, -smbexec, -secretsdump |
+| COERCION | `coercion.yml` → `coercion_tools` | responder, mitm6; coercer, petitpotam, dfscoerce; krbrelayx, printerbug, addspn, dnstool; impacket-ntlmrelayx |
 
-### Orchestrator Service Pod
+> **Note**: netexec is installed on RECON only. Reaching for it on the
+> credential-access pod is a common and confusing failure.
 
-- **Runtime**: Rust binary (`ares orchestrator`)
-- **Redis client**: For dispatcher and state management
-- **No pentesting tools**: Orchestrator only coordinates, never executes tools directly
+### On-target payload staging
 
-### RECON Agent
+Ares stages a Windows binary on an `impacket-smbserver` share hosted by the PRIVESC
+worker and executes it over its UNC path through MSSQL `xp_cmdshell`
+(`windows_stage_and_run`). `xp_cmdshell` runs as the SQL Server **service account** —
+not a local administrator, but a principal holding `SeImpersonatePrivilege`. That is
+the unprivileged on-target context the potato family requires, and it is the only
+execution channel here that is not already administrative: `psexec`, `wmiexec`,
+`smbexec` and `evil_winrm` all need local admin first, so a potato launched through
+any of them would escalate from SYSTEM to SYSTEM.
 
-Provisioned by: `ansible/playbooks/ares/recon.yml` → `dreadnode.nimbus_range.recon_tools`
+Nothing is written to the target's disk. The payload executes from the UNC path and
+its escalated child writes output back to the same share, so there is no artifact to
+clean up and no dependency on stdout inheritance through `CreateProcessAsUser`.
 
-- **Network scanning**: nmap
-- **LDAP**: ldapsearch (from ldap-utils)
-- **SMB enumeration**: enum4linux, enum4linux-ng, rpcclient
-- **DNS**: dig, nslookup, whois, adidnsdump
-- **AD tools**: netexec, bloodhound-python, certipy
-- **Impacket**: impacket-GetNPUsers, impacket-GetUserSPNs
+Two independent conditions must hold before an escalation is credited: the
+pre-execution identity must NOT already be SYSTEM, and the child command must report
+SYSTEM. The first condition is what prevents an already-administrative channel from
+being credited with an escalation it did not perform.
 
-### CREDENTIAL_ACCESS Agent
+Registered payloads live in `WINDOWS_PAYLOADS` (`ares-tools/src/privesc/windows_payload.rs`).
+A payload is added only once its file is confirmed present on the image and its
+UNC-launch behaviour observed:
 
-Provisioned by: `ansible/playbooks/ares/credential_access.yml` → `dreadnode.nimbus_range.credential_access_tools`
+- **PrintSpoofer** — `PrintSpoofer/PrintSpoofer64.exe`, native PE, UNC-safe, T1134.001
 
-- **SMB**: smbclient, rpcclient
-- **Password spraying**: sprayhound
-- **Kerberoasting**: targetedKerberoast
-- **Credential extraction**: lsassy, gMSADumper
-- **Impacket**: impacket-GetNPUsers, impacket-GetUserSPNs, impacket-secretsdump
+### Provisioned but NOT reachable
 
-> **Note**: netexec is NOT installed on this agent (only on RECON).
+Still installed on the PRIVESC pod with no registry entry:
 
-### CRACKER Agent
-
-Provisioned by: `ansible/playbooks/ares/cracker.yml` → `dreadnode.nimbus_range.cracking_tools`
-
-- **Cracking**: hashcat, john
-- **Wordlists**: rockyou (`/usr/share/wordlists/rockyou.txt`), seclists (`/usr/share/wordlists/seclists/`)
-- **GPU support** (when enabled): ocl-icd-libopencl1, opencl-headers, clinfo
-
-### ACL Agent
-
-Provisioned by: `ansible/playbooks/ares/acl_abuse.yml` → `dreadnode.nimbus_range.acl_tools`
-
-- **ACL abuse**: bloodyAD, pywhisker
-- **Kerberoasting**: targetedKerberoast
-- **SMB**: rpcclient
-- **Impacket**: impacket-dacledit
-
-### PRIVESC Agent
-
-Provisioned by: `ansible/playbooks/ares/privesc.yml` → `dreadnode.nimbus_range.privesc_tools`
-
-- **ADCS**: certipy
-- **Credential extraction**: lsassy
-- **CVE exploits**: nopac, printnightmare, zerologon
-- **Kerberos relay**: krbrelayx, printerbug, addspn, dnstool
-- **Impacket**: impacket-findDelegation, impacket-getST, impacket-getTGT, impacket-rbcd,
-  impacket-addcomputer, impacket-lookupsid, impacket-mssqlclient, impacket-raiseChild,
-  impacket-ticketer, impacket-secretsdump, impacket-psexec
-- **Windows potato exploits**: PrintSpoofer, GodPotato, SweetPotato
-- **Kerberos privesc**: KrbRelayUp
-- **GPO abuse**: SharpGPOAbuse, pygpoabuse
-- **Windows enumeration**: Seatbelt, SharpUp
+- **Windows potato exploits**: GodPotato (`.NET`, needs a `loadFromRemoteSources`
+  verdict from a lab run before it can be staged over UNC); SweetPotato ships as
+  **unbuilt C# source**, so there is no binary to stage at all
+- **Windows enumeration**: Seatbelt, SharpUp, winPEAS
+- **Linux enumeration**: linPEAS
 - **User impersonation**: RunasCs
 - **PowerShell scripts**: PowerUp, PowerUpSQL
-- **PEAS enumeration**: winPEAS, linPEAS
 - **UAC bypass**: SCMUACBypass
+- **Kerberos privesc**: KrbRelayUp — removed from the technique set entirely in #371
+  (automation, tool definition, dispatcher wiring, MITRE mappings, cleanup handling and
+  tests all went with it) because it needs on-host execution as an unprivileged Windows
+  user. The binary may still be installed; nothing can call it.
 
-### LATERAL Agent
+To be precise about which primitive is missing: ares *can* run commands on a Windows host
+— `psexec_kerberos`, `evil_winrm`, and `mssql_impersonate` with `xp_cmdshell` all do. Every
+one of them requires administrative (or MSSQL sysadmin) rights first. What ares has no path
+to is executing code *as an unprivileged user*, which is the state every tool above starts
+from. That is why the boundary bites local privilege escalation specifically and leaves
+remote exploitation untouched.
 
-Provisioned by: `ansible/playbooks/ares/lateral_movement.yml` → `dreadnode.nimbus_range.lateral_movement_tools`
+`SeImpersonatePrivilege` now has a staging path: `windows_stage_and_run` drops a
+UNC-safe payload over SMB and executes it through MSSQL `xp_cmdshell`, which runs as the
+SQL service account that holds the privilege. The remaining potato binaries need no new
+architecture — each is a `WINDOWS_PAYLOADS` entry plus an output parser. The .NET ones
+additionally need the UNC-launch question settled, since .NET assemblies can refuse to
+load from a remote share where native PEs do not.
 
-- **WinRM**: evil-winrm
-- **RDP**: xfreerdp (pass-the-hash capable)
-- **SSH**: sshpass
-- **SMB**: smbclient
-- **Pivoting**: proxychains4
-- **Pass-the-Hash**: pth-winexe, pth-smbclient, pth-rpcclient, pth-net, pth-wmic (from passing-the-hash package)
-- **Impacket**: impacket-psexec, impacket-wmiexec, impacket-smbexec, impacket-secretsdump
-
-### COERCION Agent
-
-Provisioned by: `ansible/playbooks/ares/coercion.yml` → `dreadnode.nimbus_range.coercion_tools`
-
-- **Poisoning**: responder, mitm6
-- **Coercion**: coercer, petitpotam, dfscoerce
-- **Kerberos relay**: krbrelayx, printerbug, addspn, dnstool
-- **NTLM relay**: impacket-ntlmrelayx
+The exploitation queue has not caught up. `seimpersonate` is still declined by name in
+`exploitation.rs::NO_EXECUTION_PRIMITIVE_VULN_TYPES`, so the tool is reachable only as an
+LLM-directed call — an automated dispatch on a `seimpersonate` finding is still dropped
+before it reaches the privesc agent.

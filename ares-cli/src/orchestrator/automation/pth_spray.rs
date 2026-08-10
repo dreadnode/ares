@@ -126,7 +126,6 @@ fn collect_pth_work(state: &StateInner) -> Option<Vec<PthWork>> {
             continue;
         }
 
-        // Check if host has SMB (port 445)
         let has_smb = host.services.iter().any(|s| {
             let sl = s.to_lowercase();
             sl.contains("445") || sl.contains("smb") || sl.contains("cifs")
@@ -411,8 +410,6 @@ mod tests {
     fn take_5_limiting() {
         assert_eq!((0..20).take(5).count(), 5);
     }
-
-    // --- collect_pth_work tests ---
 
     #[test]
     fn collect_empty_state_returns_none() {
@@ -867,8 +864,6 @@ mod tests {
         let work = collect_pth_work(&state).unwrap();
         assert_eq!(work.len(), 1);
     }
-
-    // ── build_pth_payload ─────────────────────────────────────────────
 
     #[test]
     fn build_pth_payload_emits_expected_fields() {

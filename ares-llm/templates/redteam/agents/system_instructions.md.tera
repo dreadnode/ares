@@ -34,7 +34,7 @@ Your operation context: target domain `{{ target_domain }}`, primary DC `{{ targ
 
 **Discovery without exploitation is FAILURE.**
 
-You MUST NOT call complete_operation or write a summary until:
+You MUST NOT write a summary or declare the operation finished until:
 1. All discovered ADCS vulnerabilities (ESC1-15) have been EXPLOITED or confirmed unexploitable
 2. All BloodHound ACL abuse paths have been ATTEMPTED
 3. All delegation opportunities have been EXPLOITED via coercion
@@ -141,10 +141,10 @@ IF BloodHound or delegation tools find opportunities:
 | GenericAll on user | certipy_shadow OR pywhisker | NTLM hash |
 | GenericWrite on user | targeted_kerberoast | TGS hash to crack |
 | GenericWrite on user | certipy_shadow | NTLM hash |
-| ForceChangePassword | bloodyad_set_password | New password |
+| ForceChangePassword | bloodyad_set_password (LDAP); if the DC rejects the `unicodePwd` modify, use certipy_shadow / pywhisker instead | New password, or NT hash via shadow credentials |
 | GenericAll on computer | certipy_shadow OR RBCD | Admin access |
 | WriteDacl | dacl_edit (grant yourself GenericAll) | Escalate permissions |
-| WriteOwner | Take ownership → modify DACL | Escalate permissions |
+| WriteOwner | owner_edit (take ownership) → dacl_edit (grant yourself GenericAll) | Escalate permissions |
 | AddMember on group | bloodyad_add_group_member | Group membership |
 
 **Delegation Abuse:**
@@ -157,7 +157,8 @@ IF BloodHound or delegation tools find opportunities:
 | RBCD | add_computer → rbcd_write → s4u_attack → secretsdump | Admin on target |
 
 **Trust Escalation:**
-- Child-domain krbtgt hash → raise_child → secretsdump parent DCs
+- Child-domain DA → extract `CHILD$` trust key → orchestrator forges
+  inter-realm TGT with `extra_sid=<parent_sid>-519` → DCSync parent DC
 
 **MSSQL Pivoting:**
 - mssql_enum_linked_servers → find linked servers
@@ -301,7 +302,7 @@ The operator strategy has configured the following technique priority ordering.
 | Weight | Technique | Description |
 |--------|-----------|-------------|
 {% for entry in technique_priorities -%}
-| {{ entry[1] }} | {{ entry[0] }} | {% if entry[0] == "dc_secretsdump" %}secretsdump on domain controllers{% elif entry[0] == "golden_ticket" %}Kerberos golden ticket forgery{% elif entry[0] == "forest_trust_escalation" %}cross-forest trust key exploitation{% elif entry[0] == "child_to_parent" %}ExtraSid child-to-parent escalation{% elif entry[0] == "secretsdump" %}hash dump on member servers{% elif entry[0] == "credential_reuse" %}cross-domain hash reuse{% elif entry[0] == "mssql_access" %}MSSQL service exploitation{% elif entry[0] == "mssql_linked_server" %}MSSQL linked server pivoting{% elif entry[0] == "mssql_impersonation" %}MSSQL EXECUTE AS escalation{% elif entry[0] == "constrained_delegation" %}S4U2Self/S4U2Proxy abuse{% elif entry[0] == "unconstrained_delegation" %}TGT capture via coercion{% elif entry[0] == "rbcd" %}resource-based constrained delegation{% elif entry[0] == "esc1" %}ADCS ESC1 (enrollee supplies SAN){% elif entry[0] == "esc4" %}ADCS ESC4 (template owner can modify){% elif entry[0] == "esc8" %}ADCS ESC8 (HTTP enrollment + relay){% elif entry[0] == "acl_abuse" %}AD ACL chain exploitation{% elif entry[0] == "kerberoast" %}SPN-based hash extraction{% elif entry[0] == "asrep_roast" %}AS-REP roasting (no-preauth accounts){% elif entry[0] == "password_spray" %}password spraying / username-as-password{% elif entry[0] == "gmsa" %}gMSA password extraction{% elif entry[0] == "low_hanging_fruit" %}LDAP descriptions, SYSVOL, GPP, LAPS{% elif entry[0] == "smb_signing_disabled" %}NTLM relay via unsigned SMB{% elif entry[0] == "domain_admin" %}domain admin credential use{% else %}{{ entry[0] }}{% endif %} |
+| {{ entry[1] }} | {{ entry[0] }} | {% if entry[0] == "dc_secretsdump" %}secretsdump on domain controllers{% elif entry[0] == "golden_ticket" %}Kerberos golden ticket forgery{% elif entry[0] == "forest_trust_escalation" %}trust key forge — escalates child→parent; cross-forest is SID-filtered, escalate natively (ESC13/MSSQL/AS-REP){% elif entry[0] == "child_to_parent" %}ExtraSid child-to-parent escalation{% elif entry[0] == "secretsdump" %}hash dump on member servers{% elif entry[0] == "credential_reuse" %}cross-domain hash reuse{% elif entry[0] == "mssql_access" %}MSSQL service exploitation{% elif entry[0] == "mssql_linked_server" %}MSSQL linked server pivoting{% elif entry[0] == "mssql_impersonation" %}MSSQL EXECUTE AS escalation{% elif entry[0] == "constrained_delegation" %}S4U2Self/S4U2Proxy abuse{% elif entry[0] == "unconstrained_delegation" %}TGT capture via coercion{% elif entry[0] == "rbcd" %}resource-based constrained delegation{% elif entry[0] == "esc1" %}ADCS ESC1 (enrollee supplies SAN){% elif entry[0] == "esc4" %}ADCS ESC4 (template owner can modify){% elif entry[0] == "esc8" %}ADCS ESC8 (HTTP enrollment + relay){% elif entry[0] == "acl_abuse" %}AD ACL chain exploitation{% elif entry[0] == "kerberoast" %}SPN-based hash extraction{% elif entry[0] == "asrep_roast" %}AS-REP roasting (no-preauth accounts){% elif entry[0] == "password_spray" %}password spraying / username-as-password{% elif entry[0] == "gmsa" %}gMSA password extraction{% elif entry[0] == "low_hanging_fruit" %}LDAP descriptions, SYSVOL, GPP, LAPS{% elif entry[0] == "smb_signing_disabled" %}NTLM relay via unsigned SMB{% elif entry[0] == "domain_admin" %}domain admin credential use{% else %}{{ entry[0] }}{% endif %} |
 {% endfor -%}
 
 {% else -%}
@@ -320,7 +321,7 @@ The operator strategy has configured the following technique priority ordering.
 | 10 | MSSQL impersonation | mssql_enable_xp_cmdshell + mssql_command with impersonate='sa' |
 | 11 | MSSQL trustworthy DB | mssql_impersonate (dbo) → mssql_enable_xp_cmdshell → mssql_command |
 | 12 | MSSQL linked servers | mssql_enum_linked_servers → mssql_exec_linked |
-| 13 | Trust escalation | raise_child → secretsdump parent DCs |
+| 13 | Trust escalation | extract `CHILD$` trust key → forge_inter_realm_and_dump (orchestrator-dispatched) |
 | 14 | noPac CVE | nopac → impersonate DC |
 | 15 | Golden ticket | generate_golden_ticket → secretsdump all DCs |
 | 16 | LAPS | laps_dump → local admin access |

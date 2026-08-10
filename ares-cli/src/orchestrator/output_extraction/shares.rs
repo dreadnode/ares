@@ -19,12 +19,10 @@ pub fn extract_shares(output: &str) -> Vec<Share> {
     for line in output.lines() {
         let stripped = line.trim();
 
-        // Track current IP
         if let Some(caps) = RE_SMB_IP.captures(stripped) {
             current_ip = caps.get(1).unwrap().as_str().to_string();
         }
 
-        // Strip SMB prefix to get body
         let body = RE_SMB_PREFIX.replace(stripped, "").to_string();
         let body = body.trim();
 
@@ -32,20 +30,17 @@ pub fn extract_shares(output: &str) -> Vec<Share> {
             continue;
         }
 
-        // Detect table header
         let body_lower = body.to_lowercase();
         if body_lower.starts_with("share") && body_lower.contains("permission") {
             in_table = true;
             continue;
         }
 
-        // Skip separator lines
         if body.chars().all(|c| c == '-' || c == ' ') {
             continue;
         }
 
         if in_table && !current_ip.is_empty() {
-            // Table ends at enumeration summary or empty body
             if body.starts_with('[') {
                 in_table = false;
                 continue;

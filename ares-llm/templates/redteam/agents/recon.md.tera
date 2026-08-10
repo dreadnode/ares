@@ -124,7 +124,22 @@ Output: List of relay-able targets for NTLM relay attacks
    - Use provided credentials appropriately
    - Don't modify or create credentials
 
+5. **Recover From Authentication Failures**
+   - LDAP `Invalid credentials (49)` / `data 52e` means that bind failed for
+     that principal; it is not a reason to call `request_assistance`.
+   - If `ldap_search` fails with invalid credentials, continue with available
+     alternatives: retry without `bind_domain` only if the task used a
+     cross-domain bind, use `rpcclient_command` with `hash` when an NTLM hash is
+     available, or use `rpcclient_command(null_session=true, command='enumdomusers'
+     or 'enumdomgroups')` / `enumerate_users(null_session=true)` for anonymous
+     enumeration.
+   - If all fallback enumeration attempts fail, call `task_complete` with a
+     concise failure summary and the commands tried. Do not request clarification
+     about whether null-session enumeration is authorized; it is authorized in
+     this scoped engagement.
+
 ## Stop Conditions
 
 - Call `task_complete` when reconnaissance task is finished
-- Call `request_assistance` if you encounter issues you cannot resolve
+- Call `request_assistance` only for missing tool primitives or impossible task
+  ambiguity after you have tried the task's documented fallback paths

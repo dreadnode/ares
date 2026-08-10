@@ -40,7 +40,6 @@ fn collect_lsassy_work(state: &StateInner) -> Vec<LsassyWork> {
             continue;
         }
 
-        // Infer domain from hostname
         let domain = host
             .hostname
             .find('.')
@@ -59,7 +58,6 @@ fn collect_lsassy_work(state: &StateInner) -> Vec<LsassyWork> {
             continue;
         }
 
-        // Find a credential for this host's domain
         let cred = state
             .credentials
             .iter()
@@ -241,8 +239,6 @@ mod tests {
             owned: false,
         }
     }
-
-    // --- collect_lsassy_work tests ---
 
     #[test]
     fn collect_empty_state_returns_no_work() {

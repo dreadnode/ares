@@ -34,6 +34,38 @@ pub struct AgentSpanBuilder {
     target_service: Option<String>,
     is_error: bool,
     error_message: Option<String>,
+    defer_status: bool,
+}
+
+/// Record the terminal status of a span built by [`AgentSpanBuilder`].
+///
+/// `Some(message)` marks the span as failed, `None` as successful.
+///
+/// Canonical OTel span status. `tracing-opentelemetry` recognises the
+/// `otel.status_code` field and maps its string value onto the OTLP
+/// `Span.Status.Code` enum. The OTel Collector's spanmetrics processor
+/// then emits it as the `status_code = "STATUS_CODE_OK"` /
+/// `"STATUS_CODE_ERROR"` label on `traces_spanmetrics_calls_total`,
+/// which the demo dashboard's Red Success Rate panel filters on. The
+/// existing free-text `tool.status` field is kept for older queries.
+///
+/// Callers that used [`AgentSpanBuilder::defer_status`] MUST call this once
+/// the instrumented work finishes, otherwise the span carries no status.
+pub fn record_span_status(span: &tracing::Span, error_message: Option<&str>) {
+    match error_message {
+        Some(message) => {
+            span.record("otel.status_code", "ERROR");
+            span.record("otel.status_message", message);
+            span.record("tool.status", "error");
+            span.record("error.message", message);
+        }
+        None => {
+            span.record("otel.status_code", "OK");
+            span.record("otel.status_message", "");
+            span.record("tool.status", "success");
+            span.record("error.message", "");
+        }
+    }
 }
 
 impl AgentSpanBuilder {
@@ -52,6 +84,7 @@ impl AgentSpanBuilder {
             target_service: None,
             is_error: false,
             error_message: None,
+            defer_status: false,
         }
     }
 
@@ -140,6 +173,14 @@ impl AgentSpanBuilder {
         self
     }
 
+    /// Leave the status fields unset because the outcome is not known at
+    /// construction time — the span wraps deferred work. The caller MUST
+    /// pass the span to [`record_span_status`] once the work finishes.
+    pub fn defer_status(mut self) -> Self {
+        self.defer_status = true;
+        self
+    }
+
     /// Build the `tracing::Span` with all configured attributes.
     ///
     /// Span name:
@@ -151,7 +192,6 @@ impl AgentSpanBuilder {
             None => self.name.clone(),
         };
 
-        // Resolve MITRE mappings.
         let (technique_id, tool_tactic) = self
             .tool_name
             .as_deref()
@@ -165,7 +205,6 @@ impl AgentSpanBuilder {
             .as_deref()
             .and_then(mitre::get_tool_yaml_category);
 
-        // Phase and tactic from role.
         let (phase_map, tactic_map) = match self.team {
             Team::Red => (&*mitre::ROLE_TO_PHASE, &*mitre::ROLE_TO_TACTIC),
             Team::Blue => (&*mitre::BLUE_ROLE_TO_PHASE, &*mitre::BLUE_ROLE_TO_TACTIC),
@@ -176,8 +215,6 @@ impl AgentSpanBuilder {
         let mitre_tactic = tool_tactic
             .or_else(|| tactic_map.get(self.role.as_str()).copied())
             .unwrap_or("");
-
-        let tool_status = if self.is_error { "error" } else { "success" };
 
         // Derive hostname from FQDN if not explicitly set.
         let hostname = self.target.hostname.clone().or_else(|| {
@@ -200,11 +237,12 @@ impl AgentSpanBuilder {
             })
         });
 
-        // Build the span with all attributes.
-        tracing::info_span!(
+        let span = tracing::info_span!(
             "ares.agent",
             otel.name = %span_name,
             otel.kind = self.span_kind.as_str(),
+            otel.status_code = tracing::field::Empty,
+            otel.status_message = tracing::field::Empty,
             // Core identity
             attack_team = self.team.as_str(),
             "agent.role" = %self.role,
@@ -218,7 +256,7 @@ impl AgentSpanBuilder {
             attack_tool_category = tool_category.unwrap_or(""),
             "tool.binary" = tool_binary.unwrap_or(""),
             "tool.provisioned_category" = tool_yaml_category.unwrap_or(""),
-            "tool.status" = tool_status,
+            "tool.status" = tracing::field::Empty,
             // Target (OTel semantic conventions)
             // Fall back to IP when no FQDN is available so IP-targeted tools
             // produce a non-empty destination.address for the attack graph.
@@ -241,7 +279,16 @@ impl AgentSpanBuilder {
             "op.id" = self.operation_id.as_deref().unwrap_or(""),
             "task.id" = self.task_id.as_deref().unwrap_or(""),
             // Error
-            error.message = self.error_message.as_deref().unwrap_or(""),
-        )
+            error.message = tracing::field::Empty,
+        );
+
+        if !self.defer_status {
+            let status_error = self
+                .is_error
+                .then(|| self.error_message.as_deref().unwrap_or(""));
+            record_span_status(&span, status_error);
+        }
+
+        span
     }
 }

@@ -1,9 +1,3 @@
-//! Orchestrator role tool definitions.
-//!
-//! These tools are available exclusively to the orchestrator agent, providing
-//! oversight capabilities: querying collected credentials and hashes, monitoring
-//! agent and task status, and marking the operation as complete.
-
 use serde_json::json;
 
 use crate::ToolDefinition;
@@ -37,8 +31,8 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "get_all_hashes".into(),
             description: "List all collected password hashes with pagination support. \
-                Returns hash values, associated usernames, domains, hash types, \
-                and cracked status for each entry."
+                Returns associated usernames, domains, hash types and cracked status. \
+                Raw hash material is never returned — dispatch by principal instead."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -59,9 +53,9 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "get_all_credentials".into(),
-            description: "List all collected credentials (username/password pairs and hashes) \
-                with pagination support. Returns username, domain, credential type, \
-                and admin status for each entry."
+            description: "List all collected credentials with pagination support. Returns \
+                username, domain, whether usable secret material is held, and admin status \
+                for each entry. Secret values are never returned."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -81,35 +75,11 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "get_hash_value".into(),
-            description: "Retrieve the hash value for a specific user account. \
-                Useful when you need the raw hash for pass-the-hash, golden ticket, \
-                or other credential-based attacks."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "username": {
-                        "type": "string",
-                        "description": "The account username to look up (e.g. 'Administrator', 'krbtgt')"
-                    },
-                    "domain": {
-                        "type": "string",
-                        "description": "The domain the account belongs to (e.g. 'contoso.local')"
-                    },
-                    "hash_type": {
-                        "type": "string",
-                        "description": "Specific hash type to retrieve (e.g. 'ntlm', 'aes256', 'kerberos'). If omitted, returns all available hash types for the user."
-                    }
-                },
-                "required": ["username", "domain"]
-            }),
-        },
-        ToolDefinition {
             name: "get_pending_tasks".into(),
             description: "List all pending and in-progress tasks across all agent queues. \
                 Returns task IDs, descriptions, assigned roles, current status \
-                (pending/running/blocked), and how long each has been in its current state."
+                (pending/running/blocked), and how long each has been in its current state. \
+                Use this before dispatching to avoid queueing duplicate work."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -129,7 +99,6 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": []
             }),
         },
-        // ----- Dispatch tools (orchestrator submits sub-tasks) -----
         ToolDefinition {
             name: "dispatch_recon".into(),
             description: "Dispatch a reconnaissance task to scan a target. The task will be \
@@ -159,7 +128,9 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
             name: "dispatch_credential_access".into(),
             description:
                 "Dispatch a credential access task (secretsdump, kerberoast, ASREP roast, \
-                password spray, etc.) to attack a specific target with given credentials."
+                password spray, etc.) against a target, authenticating as the named principal. \
+                Name the principal only — the secret is resolved from operation state at \
+                dispatch time. The principal must already appear in get_all_credentials."
                     .into(),
             input_schema: json!({
                 "type": "object",
@@ -174,29 +145,27 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "domain": {
                         "type": "string",
-                        "description": "Target domain"
+                        "description": "Domain of the authenticating principal"
                     },
                     "username": {
                         "type": "string",
-                        "description": "Username for authentication"
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Username of the authenticating principal"
                     },
                     "priority": {
                         "type": "integer",
                         "description": "Task priority (1=highest, 10=lowest). Default: 5"
                     }
                 },
-                "required": ["technique", "target_ip", "domain", "username", "password"]
+                "required": ["technique", "target_ip", "domain", "username"]
             }),
         },
         ToolDefinition {
             name: "dispatch_lateral_movement".into(),
             description:
-                "Dispatch a lateral movement task to move to a new host using compromised \
-                credentials. Techniques include psexec, wmiexec, smbexec, etc."
+                "Dispatch a lateral movement task to move to a new host as the named principal. \
+                Techniques include psexec, wmiexec, smbexec, atexec. Name the principal only — \
+                the secret is resolved from operation state at dispatch time. Cross-realm \
+                combinations are rejected with an explanation."
                     .into(),
             input_schema: json!({
                 "type": "object",
@@ -211,18 +180,14 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "username": {
                         "type": "string",
-                        "description": "Username for authentication"
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "Password for authentication"
+                        "description": "Username of the authenticating principal"
                     },
                     "domain": {
                         "type": "string",
-                        "description": "Domain for the credential"
+                        "description": "Domain of the authenticating principal"
                     }
                 },
-                "required": ["target_ip", "technique", "username", "password", "domain"]
+                "required": ["target_ip", "technique", "username", "domain"]
             }),
         },
         ToolDefinition {
@@ -272,20 +237,14 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "dispatch_crack".into(),
-            description: "Dispatch a hash cracking task. The cracker agent will attempt to crack \
-                the hash using hashcat (default) or john."
+            description: "Dispatch a hash cracking task for a principal whose hash is already \
+                held in operation state. Name the principal — the hash material is resolved at \
+                dispatch time. Check get_all_hashes first; cracking an already-cracked or \
+                absent principal is rejected."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "hash_value": {
-                        "type": "string",
-                        "description": "The hash value to crack"
-                    },
-                    "hash_type": {
-                        "type": "string",
-                        "description": "Hash type (e.g. 'ntlm', 'kerberos_tgs', 'kerberos_as', 'mscache2')"
-                    },
                     "username": {
                         "type": "string",
                         "description": "Username associated with the hash"
@@ -294,25 +253,82 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Domain associated with the hash"
                     },
-                    "use_john": {
-                        "type": "boolean",
-                        "description": "Use john instead of hashcat. Default: false"
-                    },
-                    "priority": {
-                        "type": "integer",
-                        "description": "Task priority (1=highest, 10=lowest). Default: 5"
+                    "hash_type": {
+                        "type": "string",
+                        "description": "Which held hash type to crack (e.g. 'ntlm', 'kerberos_tgs', 'kerberos_as', 'mscache2'). If omitted, the first uncracked hash for the principal is used."
                     }
                 },
-                "required": ["hash_value", "hash_type"]
+                "required": ["username", "domain"]
             }),
         },
-        // ----- Operation lifecycle -----
+        ToolDefinition {
+            name: "get_proposed_work".into(),
+            description: "List work the deterministic automations have proposed and are waiting \
+                on you to rule on. Each entry is already validated and executable — the rule that \
+                proposed it built the payload. Review these FIRST every turn: approving good work \
+                is faster and safer than composing a dispatch yourself. Anything you do not rule \
+                on is released automatically when its window expires."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum proposals to return, lowest priority number first. Defaults to 30.",
+                        "default": 30
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDefinition {
+            name: "approve_work".into(),
+            description: "Approve proposed work by id, releasing it for dispatch immediately. \
+                Pass every id you want to run — approving in bulk is normal and cheap. Ids come \
+                from get_proposed_work; an unknown id is reported back rather than ignored."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "proposal_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Proposal ids to approve (e.g. ['p0001', 'p0002'])"
+                    }
+                },
+                "required": ["proposal_ids"]
+            }),
+        },
+        ToolDefinition {
+            name: "reject_work".into(),
+            description: "Reject proposed work by id so it is not dispatched and is not \
+                re-proposed for a cooldown period. Use this to suppress work that is redundant, \
+                aimed at a dead end, or lower value than what you are prioritising. Rejecting is \
+                a real decision — the rule that proposed it will stay suppressed, so give a \
+                reason you would stand behind."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "proposal_id": {
+                        "type": "string",
+                        "description": "The proposal id to reject"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why this work should not run"
+                    }
+                },
+                "required": ["proposal_id", "reason"]
+            }),
+        },
         ToolDefinition {
             name: "complete_operation".into(),
             description: "Mark the entire red team operation as complete. This finalizes all \
                 outstanding tasks, generates the operation report, and signals all agents \
                 to wind down. Should only be called when the operation objectives have been \
-                achieved or no further progress is possible."
+                achieved or no further progress is possible. Only the orchestrator may call \
+                this; worker roles cannot end the operation."
                 .into(),
             input_schema: json!({
                 "type": "object",

@@ -188,6 +188,43 @@ fn correlate_outside_time_window() {
 }
 
 #[test]
+fn synthetic_timestamp_activity_matches_outside_time_window() {
+    let correlator = RedBlueCorrelator::new("/tmp", Some(5));
+
+    let mut activity = make_red_activity("T1078.002", "192.168.58.10", utc(12, 0));
+    activity.metadata.insert(
+        super::engine::SYNTHETIC_TIMESTAMP_KEY.to_string(),
+        "true".to_string(),
+    );
+    let blue = vec![make_blue_detection(
+        "Domain Admin Logon",
+        "T1078.002",
+        "192.168.58.10",
+        utc(13, 0),
+    )];
+
+    let report = correlator.correlate(&[activity], &blue, "op-synthetic");
+    assert_eq!(report.matched_activities, 1);
+    assert_eq!(report.undetected_activities, 0);
+}
+
+#[test]
+fn observed_timestamp_activity_still_rejected_outside_time_window() {
+    let correlator = RedBlueCorrelator::new("/tmp", Some(5));
+
+    let red = vec![make_red_activity("T1078.002", "192.168.58.10", utc(12, 0))];
+    let blue = vec![make_blue_detection(
+        "Domain Admin Logon",
+        "T1078.002",
+        "192.168.58.10",
+        utc(13, 0),
+    )];
+
+    let report = correlator.correlate(&red, &blue, "op-observed");
+    assert_eq!(report.matched_activities, 0);
+}
+
+#[test]
 fn correlate_empty_inputs() {
     let correlator = RedBlueCorrelator::new("/tmp", None);
     let report = correlator.correlate(&[], &[], "op-test");
@@ -367,16 +404,40 @@ fn determine_gap_reason_hierarchical_technique_match() {
 
 #[test]
 fn techniques_match_subtechnique_siblings() {
-    // T1003.001 and T1003.006 share parent T1003 so they should match
-    assert!(RedBlueCorrelator::techniques_match(
+    // T1003.001 and T1003.006 share parent T1003, but a shared parent is not a
+    // match: crediting an LSASS-dump detection for DCSync (or a Golden Ticket
+    // detection for Kerberoasting) overstates detection coverage.
+    assert!(!RedBlueCorrelator::techniques_match(
         Some("T1003.001"),
         Some("T1003.006")
+    ));
+    assert!(!RedBlueCorrelator::techniques_match(
+        Some("T1558.003"),
+        Some("T1558.001")
+    ));
+    // Parent/child in either direction still matches.
+    assert!(RedBlueCorrelator::techniques_match(
+        Some("T1003"),
+        Some("T1003.006")
+    ));
+    assert!(RedBlueCorrelator::techniques_match(
+        Some("T1003.006"),
+        Some("T1003")
     ));
 }
 
 #[test]
 fn techniques_match_mixed_case() {
     assert!(RedBlueCorrelator::techniques_match(
+        Some("t1558.001"),
+        Some("T1558.001")
+    ));
+    assert!(RedBlueCorrelator::techniques_match(
+        Some("t1558"),
+        Some("T1558.001")
+    ));
+    // Case folding must not resurrect sibling matching.
+    assert!(!RedBlueCorrelator::techniques_match(
         Some("t1558.001"),
         Some("T1558.003")
     ));
@@ -674,14 +735,12 @@ fn report_to_value_full_structure() {
     let report = correlator.correlate(&red, &blue, "op-val");
     let val = report.to_value();
 
-    // Check structure
     assert_eq!(val["red_operation_id"], "op-val");
     assert!(val["time_window"]["start"].is_string());
     assert!(val["time_window"]["end"].is_string());
     assert_eq!(val["summary"]["total_red_activities"], 2);
     assert_eq!(val["summary"]["total_blue_detections"], 1);
 
-    // Check matches array
     let matches = val["matches"].as_array().unwrap();
     assert!(!matches.is_empty());
     assert!(matches[0]["red_technique"].is_string());
@@ -690,7 +749,6 @@ fn report_to_value_full_structure() {
     assert!(matches[0]["match_quality"].is_string());
     assert!(matches[0]["confidence"].is_f64());
 
-    // Check gaps array
     let gaps = val["gaps"].as_array().unwrap();
     assert!(!gaps.is_empty());
     assert!(gaps[0]["technique"].is_string());
@@ -769,9 +827,7 @@ fn new_custom_time_window() {
     assert_eq!(correlator.time_window.num_minutes(), 60);
 }
 
-// -----------------------------------------------------------------------
 // recommend_detection — exhaustive per-technique checks
-// -----------------------------------------------------------------------
 
 #[test]
 fn recommend_detection_t1046_mentions_scanning() {
@@ -821,9 +877,7 @@ fn recommend_detection_unknown_technique_returns_none() {
     assert!(RedBlueCorrelator::recommend_detection(&activity).is_none());
 }
 
-// -----------------------------------------------------------------------
 // determine_gap_reason — additional edge cases
-// -----------------------------------------------------------------------
 
 #[test]
 fn determine_gap_reason_empty_detections_list() {
@@ -846,9 +900,7 @@ fn determine_gap_reason_technique_matches_via_parent() {
     assert!(reason.contains("Alert exists but did not trigger"));
 }
 
-// -----------------------------------------------------------------------
 // correlate — additional edge cases
-// -----------------------------------------------------------------------
 
 #[test]
 fn correlate_false_positive_rate_zero_when_no_detections_in_window() {

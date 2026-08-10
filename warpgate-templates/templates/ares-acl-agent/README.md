@@ -39,7 +39,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-This builds **Ares ACL Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares ACL Agent** Docker images for `amd64` and `arm64` architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -66,13 +66,13 @@ After building the Docker image, you can push it to GHCR:
 
 ```bash
 # Tag the image
-docker tag ares-acl-agent:latest ghcr.io/dreadnode/ares-acl-agent:latest
+docker tag ares-acl-agent:latest ghcr.io/l50/ares-acl-agent:latest
 
 # Authenticate with GHCR
 echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
 
 # Push the image
-docker push ghcr.io/dreadnode/ares-acl-agent:latest
+docker push ghcr.io/l50/ares-acl-agent:latest
 ```
 
 ---
@@ -101,14 +101,16 @@ warpgate validate ares-acl-agent
   - `ares_base` - Python 3.13.7, uv, core dependencies
   - `ares_acl_tools` - bloodyAD, pywhisker
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-- Installed to `/usr/local/bin/ares`- **Installed Tools:**
+  - Compiled from the `main` branch with PyO3 Python bindings
+  - Installed to `/usr/local/bin/ares`
+- **Installed Tools:**
   - **bloodyAD** - Active Directory ACL exploitation framework
   - **pywhisker** - Shadow credentials manipulation tool
 - **Directory Structure:**
   - `/ares/` - Main Ares workspace directory
   - `/ares/.venv/` - Python virtual environment
-- `/usr/local/bin/ares` - Compiled Ares binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+  - `/usr/local/bin/ares` - Compiled Ares binary
+- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 

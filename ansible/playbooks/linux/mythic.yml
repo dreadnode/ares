@@ -7,12 +7,12 @@
     alloy_env: dev
     alloy_deployment_name: default
     alloy_loki_endpoint: "{{ alloy_loki_endpoint }}"
-    alloy_version: "1.10.1"
+    alloy_version: "1.17.1"
     mythic_setup_systemd: true
 
   roles:
-    # Nimbus Range roles for Ansible system configuration and monitoring
-    - role: dreadnode.nimbus_range.aws_cloudwatch_agent
+    # Bulwark roles for Ansible system configuration and monitoring
+    - role: l50.bulwark.aws_cloudwatch_agent
 
     # Install and configure Grafana Alloy for log shipping
     - name: Install and configure Grafana Alloy
@@ -56,5 +56,5 @@
             }
           }
 
-    # Nimbus Range role for mythic c2 configuration
-    - role: dreadnode.nimbus_range.mythic
+    # Arsenal role for mythic c2 configuration
+    - role: l50.arsenal.mythic

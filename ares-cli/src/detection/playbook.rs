@@ -15,7 +15,6 @@ pub(crate) fn generate_detection_playbook(
     let attack_end = state.completed_at.unwrap_or(now);
     let duration_minutes = (attack_end - attack_start).num_minutes();
 
-    // Build detection targets from hosts
     let mut detection_targets = Vec::new();
     for host in &state.all_hosts {
         detection_targets.push(DetectionTarget {
@@ -59,7 +58,6 @@ pub(crate) fn generate_detection_playbook(
         }
     }
 
-    // Build detection targets from credentials
     for cred in &state.all_credentials {
         let account_name = if cred.domain.is_empty() {
             cred.username.clone()
@@ -94,7 +92,6 @@ pub(crate) fn generate_detection_playbook(
         });
     }
 
-    // Build detection targets from hashes
     for hash_obj in &state.all_hashes {
         let hash_preview = if hash_obj.hash_value.len() > 16 {
             format!("{}...", &hash_obj.hash_value[..16])
@@ -123,14 +120,11 @@ pub(crate) fn generate_detection_playbook(
         });
     }
 
-    // Build technique detections
     let technique_detections =
         build_technique_detections(state, techniques, &attack_start, &attack_end);
 
-    // Build priority queries
     let priority_queries = build_priority_queries(state, techniques, &attack_start, &attack_end);
 
-    // Executive summary
     let mut summary_parts = Vec::new();
     summary_parts.push(format!(
         "Red team operation {} ran from {} to {} UTC.",

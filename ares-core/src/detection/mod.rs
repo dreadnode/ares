@@ -9,8 +9,6 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-// ─── Config types ──────────────────────────────────────────────────────────
-
 #[derive(Debug, Deserialize)]
 pub struct DetectionConfig {
     /// Event ID descriptions — agent context, not used by query builder.
@@ -60,7 +58,23 @@ fn default_log_source() -> String {
     "windows-security".to_string()
 }
 
-// ─── Singleton loader ──────────────────────────────────────────────────────
+pub const RULE_CREATION_ENV: &str = "ARES_BLUE_ALLOW_RULE_CREATION";
+
+/// Whether blue agents may author and provision Grafana alert rules. Defaults
+/// off; set `ARES_BLUE_ALLOW_RULE_CREATION=1` to enable.
+///
+/// Consulted in two places that must agree: the tool registry (`ares-llm`),
+/// which omits `create_detection_rule` from a role's schema when disabled, and
+/// the tool implementation (`ares-tools`), which refuses the call.
+pub fn rule_creation_enabled() -> bool {
+    match std::env::var(RULE_CREATION_ENV) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
 
 static CONFIG: OnceLock<DetectionConfig> = OnceLock::new();
 
@@ -71,16 +85,12 @@ pub fn detection_config() -> &'static DetectionConfig {
     })
 }
 
-// ─── Template lookup ───────────────────────────────────────────────────────
-
 /// Find a template by name or alias.
 pub fn find_template(name: &str) -> Option<(&'static str, &'static TemplateEntry)> {
     let config = detection_config();
-    // Direct match
     if let Some((key, entry)) = config.templates.get_key_value(name) {
         return Some((key.as_str(), entry));
     }
-    // Alias match
     for (key, entry) in &config.templates {
         if entry.aliases.iter().any(|a| a == name) {
             return Some((key.as_str(), entry));
@@ -88,8 +98,6 @@ pub fn find_template(name: &str) -> Option<(&'static str, &'static TemplateEntry
     }
     None
 }
-
-// ─── Lateral movement helpers ──────────────────────────────────────────────
 
 /// Mapping from connection type to MITRE technique ID.
 ///
@@ -106,16 +114,12 @@ pub fn mitre_for_connection_type(conn_type: &str) -> Option<&'static str> {
         let config = detection_config();
         let mut m: BTreeMap<&'static str, &'static str> = BTreeMap::new();
 
-        // Primary source: derive from connection_types declared in YAML templates.
-        // Templates are iterated in alphabetical key order; first writer wins per
-        // connection type, so the canonical template for each type takes precedence.
         for entry in config.templates.values() {
             for ct in &entry.connection_types {
                 m.entry(ct.as_str()).or_insert(entry.mitre_id.as_str());
             }
         }
 
-        // Fallbacks for connection types not yet covered by any YAML template.
         m.entry("smb").or_insert("T1021.002");
         m.entry("rdp").or_insert("T1021.001");
         m.entry("wmi").or_insert("T1047");
@@ -124,7 +128,7 @@ pub fn mitre_for_connection_type(conn_type: &str) -> Option<&'static str> {
         m.entry("ssh").or_insert("T1021.004");
         m.entry("dcom").or_insert("T1021.003");
         m.entry("scheduled_task").or_insert("T1053.005");
-        m.entry("mssql").or_insert("T1210");
+        m.entry("mssql").or_insert("T1134");
         m.entry("constrained_delegation").or_insert("T1550.003");
         m.entry("ntlm_relay").or_insert("T1557");
 

@@ -18,7 +18,7 @@
 //! bounded redelivery, replacing the silent-loss `BRPOP` pattern.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -38,8 +38,96 @@ pub const HEARTBEAT_PREFIX: &str = "ares:heartbeat";
 pub const TASK_STATUS_PREFIX: &str = "ares:task_status";
 pub const LOCK_PREFIX: &str = "ares:lock";
 
+/// Env toggle: when `1`, `try_acquire_lock` forcibly takes over a lock held
+/// by a different orchestrator (CAS-DEL then SET NX). Operator escape hatch
+/// for a wedged/crashed prior run — not intended for normal operation.
+pub const LOCK_TAKEOVER_ENV: &str = "ARES_LOCK_TAKEOVER";
+
+/// Cached stable holder identity for this process.
+static LOCK_HOLDER: OnceLock<String> = OnceLock::new();
+
+/// Stable holder identity for the operation lock, cached on first call.
+///
+/// Prefers `POD_NAME` (k8s), then `HOSTNAME`, then a UUID persisted at
+/// `$XDG_STATE_HOME/ares/host_id` (or `$HOME/.local/state/ares/host_id`).
+/// A restarted process on the same box therefore recognises its own stale
+/// lock and reclaims it after a crash rather than dying with
+/// `Operation X is locked by another orchestrator`.
+pub fn lock_holder_id() -> &'static str {
+    LOCK_HOLDER.get_or_init(compute_lock_holder)
+}
+
+fn compute_lock_holder() -> String {
+    if let Ok(pod) = std::env::var("POD_NAME") {
+        if !pod.is_empty() {
+            return format!("orchestrator-{pod}");
+        }
+    }
+    if let Ok(host) = std::env::var("HOSTNAME") {
+        if !host.is_empty() {
+            return format!("orchestrator-{host}");
+        }
+    }
+    let state_dir = std::env::var("XDG_STATE_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".local/state"))
+        });
+    if let Some(dir) = state_dir {
+        let ares_dir = dir.join("ares");
+        let path = ares_dir.join("host_id");
+        if let Ok(existing) = std::fs::read_to_string(&path) {
+            let trimmed = existing.trim();
+            if !trimmed.is_empty() {
+                return format!("orchestrator-{trimmed}");
+            }
+        }
+        let fresh = Uuid::new_v4().to_string();
+        if std::fs::create_dir_all(&ares_dir).is_ok() && std::fs::write(&path, &fresh).is_ok() {
+            return format!("orchestrator-{fresh}");
+        }
+    }
+    format!("orchestrator-{}", Uuid::new_v4())
+}
+
+/// Outcome of `try_acquire_lock`. Distinguishes fresh acquisition from
+/// crash-recovery reclaim and operator-driven takeover so the caller can
+/// log each case usefully.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LockAcquire {
+    /// Lock was free; we now own it.
+    Acquired,
+    /// Lock was already held by us (same holder ID) — treated as crash
+    /// recovery; TTL refreshed.
+    Reclaimed,
+    /// Lock was forcibly taken from a different holder via
+    /// `ARES_LOCK_TAKEOVER=1`.
+    TakenOver { previous_holder: String },
+    /// Lock is held by a different orchestrator and takeover was not
+    /// requested; caller should bail.
+    Contested { current_holder: String },
+}
+
 /// Task status keys expire after 24 hours.
 const TASK_STATUS_TTL_SECS: u64 = 60 * 60 * 24;
+
+/// Durable name for the orchestrator's single result-demux consumer on the
+/// `ARES_TASKS` stream. Stable so a restarted orchestrator re-attaches to the
+/// existing consumer via `get_or_create_consumer` instead of racing to create
+/// a fresh one — a WorkQueue stream rejects a second consumer whose filter
+/// subject overlaps (JetStream error 10100), which previously surfaced as
+/// "filtered consumer not unique on workqueue stream" on every restart.
+const RESULT_DEMUX_CONSUMER: &str = "orchestrator-result-demux";
+
+/// Idle window after which JetStream reaps the durable result-demux consumer.
+/// Long enough to bridge an orchestrator restart, short enough that an
+/// abandoned consumer (op finished, pod gone) does not linger and pin
+/// undelivered result messages on the WorkQueue stream.
+const RESULT_DEMUX_INACTIVE_THRESHOLD: Duration = Duration::from_secs(600);
 
 /// Task submitted to a role queue. Mirrors `ares.core.task_queue.TaskMessage`.
 ///
@@ -128,12 +216,19 @@ impl ResultDemux {
 
         let filter = format!("{}.>", nats::TASK_RESULT_SUBJECT_PREFIX);
         let cfg = PullConfig {
+            durable_name: Some(RESULT_DEMUX_CONSUMER.to_string()),
             filter_subject: filter.clone(),
             ack_policy: AckPolicy::Explicit,
+            inactive_threshold: RESULT_DEMUX_INACTIVE_THRESHOLD,
             ..Default::default()
         };
+        // Idempotent: get_or_create re-attaches to the existing durable
+        // consumer on restart rather than tripping the WorkQueue
+        // single-consumer-per-filter rule (error 10100). Exactly one demux
+        // runs per process (see `connect` vs `connect_state_only`), so there
+        // is no second reader to split the result cache.
         let consumer: Consumer<PullConfig> = stream
-            .create_consumer(cfg)
+            .get_or_create_consumer(RESULT_DEMUX_CONSUMER, cfg)
             .await
             .context("create result-demux consumer")?;
 
@@ -192,14 +287,44 @@ impl ResultDemux {
 }
 
 impl TaskQueue {
-    /// Connect to Redis + NATS and return a TaskQueue.
+    /// Connect to Redis + NATS and return a TaskQueue that polls task results.
     ///
-    /// Ensures the standard JetStream streams exist before returning.
+    /// Ensures the standard JetStream streams exist and starts the single
+    /// [`ResultDemux`] that drains `ares.tasks.results.*`. Use this for the
+    /// orchestrator's main dispatch loop — the only subsystem that reads
+    /// results via [`check_result`](Self::check_result).
     pub async fn connect(redis_url: &str, nats_url: &str) -> Result<Self> {
+        Self::connect_inner(redis_url, nats_url, true).await
+    }
+
+    /// Connect to Redis + NATS without starting a result demux.
+    ///
+    /// For subsystems that only need Redis state (locks, task-status) and NATS
+    /// publish — the lock keeper and the recovery manager. Starting a demux
+    /// here is not just wasteful: a second demux on the WorkQueue results
+    /// stream trips JetStream's single-consumer-per-filter rule (error 10100),
+    /// which failed the whole `connect` and silently disabled recovery / the
+    /// lock keeper's dedicated connection. It would also split the result
+    /// cache away from the dispatch loop, hiding completed results.
+    pub async fn connect_state_only(redis_url: &str, nats_url: &str) -> Result<Self> {
+        Self::connect_inner(redis_url, nats_url, false).await
+    }
+
+    async fn connect_inner(
+        redis_url: &str,
+        nats_url: &str,
+        start_result_demux: bool,
+    ) -> Result<Self> {
         let client = redis::Client::open(redis_url)
             .with_context(|| format!("Invalid Redis URL: {redis_url}"))?;
+        // Bounded response_timeout: without this the orchestrator's shared
+        // ConnectionManager blocks forever on a dropped/stalled TCP frame,
+        // wedging every future queued behind it. Local dispatch has no worker
+        // pool to fall back on, so one stalled call kills the whole op.
+        let cm_config = redis::aio::ConnectionManagerConfig::new()
+            .set_response_timeout(Some(std::time::Duration::from_secs(30)));
         let conn = client
-            .get_connection_manager()
+            .get_connection_manager_with_config(cm_config)
             .await
             .with_context(|| format!("Failed to connect to Redis at {redis_url}"))?;
         info!(url = %redis_url, "Connected to Redis (state)");
@@ -207,12 +332,16 @@ impl TaskQueue {
         let nats = NatsBroker::connect(nats_url).await?;
         nats.ensure_streams().await?;
 
-        let result_demux = ResultDemux::start(&nats).await?;
+        let result_demux = if start_result_demux {
+            Some(ResultDemux::start(&nats).await?)
+        } else {
+            None
+        };
 
         Ok(Self {
             conn,
             nats: Some(nats),
-            result_demux: Some(result_demux),
+            result_demux,
         })
     }
 }
@@ -286,8 +415,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
             .context("TaskQueue has no NATS broker configured")
     }
 
-    // === Key helpers ========================================================
-
     #[inline]
     fn heartbeat_key(agent: &str) -> String {
         format!("{HEARTBEAT_PREFIX}:{agent}")
@@ -297,8 +424,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
     fn task_status_key(task_id: &str) -> String {
         format!("{TASK_STATUS_PREFIX}:{task_id}")
     }
-
-    // === Queue methods (NATS JetStream) =====================================
 
     /// Submit a task to a role's queue.
     ///
@@ -409,7 +534,7 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         Ok(())
     }
 
-    // === Redis-backed state methods (unchanged) ============================
+    // Redis-backed state methods (unchanged)
 
     /// Read heartbeat data for an agent.
     pub async fn get_heartbeat(&self, agent: &str) -> Result<Option<HeartbeatData>> {
@@ -448,41 +573,164 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
         Ok(())
     }
 
-    // === Operation lock =====================================================
-
-    pub async fn try_acquire_lock(&self, operation_id: &str, ttl: Duration) -> Result<bool> {
+    /// Acquire the operation lock, reclaiming our own stale key across
+    /// restarts and optionally taking over another holder's lock under
+    /// `ARES_LOCK_TAKEOVER=1`.
+    ///
+    /// Non-atomic (SET NX → GET → conditional EXPIRE/DEL): the read-modify
+    /// pattern is defensible under the one-orchestrator-per-op deployment
+    /// model, where the only contender is our own prior crash or a manual
+    /// operator takeover. A move to concurrent orchestrators per op would
+    /// require replacing the pattern with a Lua CAS script.
+    pub async fn try_acquire_lock(&self, operation_id: &str, ttl: Duration) -> Result<LockAcquire> {
         let key = format!("{LOCK_PREFIX}:{operation_id}");
-        let holder = format!(
-            "orchestrator-{}",
-            std::env::var("POD_NAME").unwrap_or_else(|_| Uuid::new_v4().to_string())
-        );
+        let holder = lock_holder_id();
+        let ttl_secs = ttl.as_secs();
         let mut conn = self.conn.clone();
+
         let acquired: bool = redis::cmd("SET")
             .arg(&key)
-            .arg(&holder)
+            .arg(holder)
             .arg("NX")
             .arg("EX")
-            .arg(ttl.as_secs())
+            .arg(ttl_secs)
             .query_async(&mut conn)
             .await
             .with_context(|| format!("SET NX lock for operation {operation_id}"))?;
         if acquired {
-            info!(operation_id, "Operation lock acquired");
+            info!(operation_id, holder, "Operation lock acquired");
+            return Ok(LockAcquire::Acquired);
         }
-        Ok(acquired)
+
+        // Held by someone — read the current holder to decide branch.
+        let current: Option<String> = conn
+            .get(&key)
+            .await
+            .with_context(|| format!("GET lock for operation {operation_id}"))?;
+        let current = match current {
+            Some(v) => v,
+            None => {
+                // TTL raced with our GET. Retry SET NX once.
+                let re: bool = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(holder)
+                    .arg("NX")
+                    .arg("EX")
+                    .arg(ttl_secs)
+                    .query_async(&mut conn)
+                    .await?;
+                if re {
+                    info!(
+                        operation_id,
+                        holder, "Operation lock acquired after TTL expiry"
+                    );
+                    return Ok(LockAcquire::Acquired);
+                }
+                // A third holder grabbed it mid-race; report as contested.
+                String::from("unknown")
+            }
+        };
+
+        if current == holder {
+            let _: bool = conn.expire(&key, ttl_secs as i64).await?;
+            info!(
+                operation_id,
+                holder, "Operation lock reclaimed (same holder — crash recovery)"
+            );
+            return Ok(LockAcquire::Reclaimed);
+        }
+
+        if std::env::var(LOCK_TAKEOVER_ENV).ok().as_deref() == Some("1") {
+            warn!(
+                operation_id,
+                previous_holder = %current,
+                new_holder = holder,
+                "ARES_LOCK_TAKEOVER=1 — forcibly taking operation lock from previous holder"
+            );
+            let _: i64 = conn.del(&key).await?;
+            let took: bool = redis::cmd("SET")
+                .arg(&key)
+                .arg(holder)
+                .arg("NX")
+                .arg("EX")
+                .arg(ttl_secs)
+                .query_async(&mut conn)
+                .await?;
+            if took {
+                return Ok(LockAcquire::TakenOver {
+                    previous_holder: current,
+                });
+            }
+            let racer: Option<String> = conn.get(&key).await?;
+            return Ok(LockAcquire::Contested {
+                current_holder: racer.unwrap_or_else(|| "unknown".into()),
+            });
+        }
+
+        Ok(LockAcquire::Contested {
+            current_holder: current,
+        })
     }
 
+    /// Refresh the operation lock TTL, but only if we still own it. A blind
+    /// `EXPIRE` on a lock that already expired and was re-acquired by a
+    /// different orchestrator would silently pin their TTL while we assumed
+    /// we still owned it.
     pub async fn extend_lock(&self, operation_id: &str, ttl: Duration) -> Result<bool> {
         let key = format!("{LOCK_PREFIX}:{operation_id}");
+        let holder = lock_holder_id();
         let mut conn = self.conn.clone();
-        let ok: bool = conn.expire(&key, ttl.as_secs() as i64).await?;
-        if !ok {
-            warn!(operation_id, "Lock key missing — could not extend TTL");
+        let current: Option<String> = conn.get(&key).await?;
+        match current {
+            Some(v) if v == holder => {
+                let ok: bool = conn.expire(&key, ttl.as_secs() as i64).await?;
+                if !ok {
+                    warn!(operation_id, "Lock key vanished during EXPIRE (TTL raced)");
+                }
+                Ok(ok)
+            }
+            Some(other) => {
+                warn!(
+                    operation_id,
+                    current_holder = %other,
+                    our_holder = holder,
+                    "Lock is held by a different holder — cannot extend"
+                );
+                Ok(false)
+            }
+            None => {
+                warn!(operation_id, "Lock key missing — could not extend TTL");
+                Ok(false)
+            }
         }
-        Ok(ok)
     }
 
-    // === Task status tracking ==============================================
+    /// Release the operation lock, but only if we still own it. Prevents a
+    /// clean-shutdown DEL from clobbering a lock that already expired and
+    /// was re-acquired by a different orchestrator.
+    pub async fn release_lock(&self, operation_id: &str) -> Result<bool> {
+        let key = format!("{LOCK_PREFIX}:{operation_id}");
+        let holder = lock_holder_id();
+        let mut conn = self.conn.clone();
+        let current: Option<String> = conn.get(&key).await?;
+        match current {
+            Some(v) if v == holder => {
+                let _: i64 = conn.del(&key).await?;
+                info!(operation_id, holder, "Operation lock released");
+                Ok(true)
+            }
+            Some(other) => {
+                warn!(
+                    operation_id,
+                    current_holder = %other,
+                    our_holder = holder,
+                    "Lock held by a different holder — skipping release"
+                );
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
 
     /// Update only status + timestamps; preserves any existing fields.
     pub async fn set_task_status(&self, task_id: &str, status: &str) -> Result<()> {
@@ -574,6 +822,13 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> TaskQueueCore<C> {
 mod tests {
     use super::*;
     use ares_core::state::mock_redis::MockRedisConnection;
+    use tokio::sync::Mutex;
+
+    // Serializes tests that read/write the `ARES_LOCK_TAKEOVER` process env var
+    // against tests whose expected outcome depends on it being unset. Without
+    // this the takeover test's transient `set_var` can be observed by the
+    // contested / reclaim tests running in parallel and flip their outcome.
+    static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
     fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
         TaskQueueCore::from_connection(MockRedisConnection::new())
@@ -612,25 +867,80 @@ mod tests {
 
     #[tokio::test]
     async fn try_acquire_lock_succeeds() {
+        let _guard = ENV_LOCK.lock().await;
         let q = mock_queue();
-        let acquired = q
+        let outcome = q
             .try_acquire_lock("op-1", Duration::from_secs(30))
             .await
             .unwrap();
-        assert!(acquired);
+        assert_eq!(outcome, LockAcquire::Acquired);
     }
 
     #[tokio::test]
-    async fn try_acquire_lock_fails_if_held() {
+    async fn try_acquire_lock_reclaims_own_stale_key() {
+        let _guard = ENV_LOCK.lock().await;
         let q = mock_queue();
-        q.try_acquire_lock("op-1", Duration::from_secs(30))
+        // First acquire writes our holder ID into the key.
+        q.try_acquire_lock("op-reclaim", Duration::from_secs(30))
             .await
             .unwrap();
-        let acquired = q
-            .try_acquire_lock("op-1", Duration::from_secs(30))
+        // A restarted process re-runs try_acquire and should reclaim, not
+        // bail. Same test process → same holder ID via OnceLock.
+        let outcome = q
+            .try_acquire_lock("op-reclaim", Duration::from_secs(30))
             .await
             .unwrap();
-        assert!(!acquired);
+        assert_eq!(outcome, LockAcquire::Reclaimed);
+    }
+
+    #[tokio::test]
+    async fn try_acquire_lock_is_contested_by_different_holder() {
+        let _guard = ENV_LOCK.lock().await;
+        let q = mock_queue();
+        // Plant a lock owned by a different holder.
+        let mut conn = q.conn.clone();
+        let key = format!("{LOCK_PREFIX}:op-other");
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg("orchestrator-other-host")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let outcome = q
+            .try_acquire_lock("op-other", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, LockAcquire::Contested { .. }));
+    }
+
+    #[tokio::test]
+    async fn try_acquire_lock_honours_takeover_env() {
+        // NOTE: this test manipulates a process-global env var. Grabs
+        // `ENV_LOCK` so parallel tests that expect the takeover env unset
+        // (contested / reclaim) don't observe the transient set_var and
+        // flip outcome.
+        let _guard = ENV_LOCK.lock().await;
+        let q = mock_queue();
+        let mut conn = q.conn.clone();
+        let key = format!("{LOCK_PREFIX}:op-takeover");
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg("orchestrator-crashed-host")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        std::env::set_var(LOCK_TAKEOVER_ENV, "1");
+        let outcome = q
+            .try_acquire_lock("op-takeover", Duration::from_secs(30))
+            .await
+            .unwrap();
+        std::env::remove_var(LOCK_TAKEOVER_ENV);
+        match outcome {
+            LockAcquire::TakenOver { previous_holder } => {
+                assert_eq!(previous_holder, "orchestrator-crashed-host");
+            }
+            other => panic!("expected TakenOver, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -644,6 +954,56 @@ mod tests {
             .await
             .unwrap();
         assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn extend_lock_refuses_when_holder_differs() {
+        let q = mock_queue();
+        let mut conn = q.conn.clone();
+        let key = format!("{LOCK_PREFIX}:op-x");
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg("orchestrator-someone-else")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let ok = q
+            .extend_lock("op-x", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn release_lock_only_removes_our_key() {
+        let q = mock_queue();
+        // Our own lock: release succeeds and key is gone.
+        q.try_acquire_lock("op-mine", Duration::from_secs(30))
+            .await
+            .unwrap();
+        let released = q.release_lock("op-mine").await.unwrap();
+        assert!(released);
+        // Someone else's lock: release refuses and key survives.
+        let mut conn = q.conn.clone();
+        let key = format!("{LOCK_PREFIX}:op-theirs");
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg("orchestrator-someone-else")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let released = q.release_lock("op-theirs").await.unwrap();
+        assert!(!released);
+        let still: Option<String> = conn.get(&key).await.unwrap();
+        assert_eq!(still.as_deref(), Some("orchestrator-someone-else"));
+    }
+
+    #[test]
+    fn lock_holder_id_is_stable_across_calls() {
+        let a = lock_holder_id();
+        let b = lock_holder_id();
+        assert_eq!(a, b);
+        assert!(a.starts_with("orchestrator-"));
     }
 
     #[tokio::test]
@@ -911,10 +1271,15 @@ mod tests {
     #[tokio::test]
     async fn extend_lock_against_mock_redis_succeeds() {
         // Mock EXPIRE always reports success; this test pins the call shape
-        // (i64 TTL conversion, Result<bool> return type).
+        // (i64 TTL conversion, Result<bool> return type). extend_lock now
+        // CAS-checks the holder, so acquire first to populate the key with
+        // our holder ID.
         let q = mock_queue();
+        q.try_acquire_lock("op-ext", Duration::from_secs(30))
+            .await
+            .unwrap();
         let ok = q
-            .extend_lock("op-1", Duration::from_secs(60))
+            .extend_lock("op-ext", Duration::from_secs(60))
             .await
             .unwrap();
         assert!(ok);
@@ -922,16 +1287,21 @@ mod tests {
 
     #[tokio::test]
     async fn try_acquire_lock_uses_separate_keys_per_operation() {
+        let _guard = ENV_LOCK.lock().await;
         let q = mock_queue();
-        assert!(q
-            .try_acquire_lock("op-a", Duration::from_secs(30))
-            .await
-            .unwrap());
+        assert_eq!(
+            q.try_acquire_lock("op-a", Duration::from_secs(30))
+                .await
+                .unwrap(),
+            LockAcquire::Acquired
+        );
         // Different op id is independent of op-a
-        assert!(q
-            .try_acquire_lock("op-b", Duration::from_secs(30))
-            .await
-            .unwrap());
+        assert_eq!(
+            q.try_acquire_lock("op-b", Duration::from_secs(30))
+                .await
+                .unwrap(),
+            LockAcquire::Acquired
+        );
     }
 
     #[test]

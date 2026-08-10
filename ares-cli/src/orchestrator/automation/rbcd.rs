@@ -504,7 +504,7 @@ mod tests {
         }
     }
 
-    // ── tests for select_rbcd_work / build_rbcd_payload ────────────────
+    // tests for select_rbcd_work / build_rbcd_payload
 
     fn make_cred(user: &str, password: &str, domain: &str) -> ares_core::models::Credential {
         ares_core::models::Credential {
@@ -618,8 +618,6 @@ mod tests {
             .push(make_cred("alice", "Pw", "contoso.local"));
         assert!(select_rbcd_work(&s).is_empty());
     }
-
-    // ── build_rbcd_payload ──────────────────────────────────────────────
 
     fn baseline_rbcd_work() -> RbcdWork {
         RbcdWork {

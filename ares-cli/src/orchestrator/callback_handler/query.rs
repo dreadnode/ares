@@ -84,40 +84,6 @@ impl OrchestratorCallbackHandler {
         )?))
     }
 
-    pub(super) async fn get_all_credentials(&self, call: &ToolCall) -> Result<CallbackResult> {
-        let limit = call.arguments["limit"].as_u64().unwrap_or(30) as usize;
-        let offset = call.arguments["offset"].as_u64().unwrap_or(0) as usize;
-
-        let state = self.state.read().await;
-        let total = state.credentials.len();
-        let page: Vec<serde_json::Value> = state
-            .credentials
-            .iter()
-            .skip(offset)
-            .take(limit)
-            .map(|c| {
-                json!({
-                    "username": c.username,
-                    "domain": c.domain,
-                    "has_password": !c.password.is_empty(),
-                    "is_admin": c.is_admin,
-                    "source": c.source,
-                })
-            })
-            .collect();
-
-        let result = json!({
-            "credentials": page,
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-        });
-
-        Ok(CallbackResult::Continue(serde_json::to_string_pretty(
-            &result,
-        )?))
-    }
-
     pub(super) async fn get_all_hashes(&self, call: &ToolCall) -> Result<CallbackResult> {
         let limit = call.arguments["limit"].as_u64().unwrap_or(30) as usize;
         let offset = call.arguments["offset"].as_u64().unwrap_or(0) as usize;
@@ -136,7 +102,6 @@ impl OrchestratorCallbackHandler {
                     "hash_type": h.hash_type,
                     "cracked": h.cracked_password.is_some(),
                     "source": h.source,
-                    // Don't expose raw hash value to LLM — it doesn't need it
                     "has_aes_key": h.aes_key.is_some(),
                 })
             })
@@ -152,48 +117,6 @@ impl OrchestratorCallbackHandler {
         Ok(CallbackResult::Continue(serde_json::to_string_pretty(
             &result,
         )?))
-    }
-
-    pub(super) async fn get_hash_value(&self, call: &ToolCall) -> Result<CallbackResult> {
-        let username = call.arguments["username"].as_str().unwrap_or("");
-        let domain = call.arguments["domain"].as_str().unwrap_or("");
-        let hash_type_filter = call.arguments["hash_type"].as_str();
-
-        let state = self.state.read().await;
-        let matches: Vec<serde_json::Value> = state
-            .hashes
-            .iter()
-            .filter(|h| {
-                h.username.eq_ignore_ascii_case(username)
-                    && (domain.is_empty() || h.domain.eq_ignore_ascii_case(domain))
-                    && hash_type_filter
-                        .map(|t| h.hash_type.eq_ignore_ascii_case(t))
-                        .unwrap_or(true)
-            })
-            .map(|h| {
-                let mut entry = json!({
-                    "username": h.username,
-                    "domain": h.domain,
-                    "hash_type": h.hash_type,
-                    "hash_value": h.hash_value,
-                    "cracked": h.cracked_password.is_some(),
-                });
-                if let Some(ref aes) = h.aes_key {
-                    entry["aes_key"] = json!(aes);
-                }
-                entry
-            })
-            .collect();
-
-        if matches.is_empty() {
-            Ok(CallbackResult::Continue(format!(
-                "No hashes found for {username}@{domain}"
-            )))
-        } else {
-            Ok(CallbackResult::Continue(serde_json::to_string_pretty(
-                &matches,
-            )?))
-        }
     }
 
     pub(super) async fn get_pending_tasks(&self) -> Result<CallbackResult> {
@@ -227,7 +150,6 @@ impl OrchestratorCallbackHandler {
             .task_queue
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("TaskQueue not configured"))?;
-        // Read heartbeats from Redis to get agent status (SCAN to avoid blocking)
         let mut conn = task_queue.connection();
         let pattern = "ares:heartbeat:*";
         let keys = {
@@ -272,6 +194,40 @@ impl OrchestratorCallbackHandler {
         let result = json!({
             "agents": agents,
             "total": agents.len(),
+        });
+
+        Ok(CallbackResult::Continue(serde_json::to_string_pretty(
+            &result,
+        )?))
+    }
+
+    pub(super) async fn get_all_credentials(&self, call: &ToolCall) -> Result<CallbackResult> {
+        let limit = call.arguments["limit"].as_u64().unwrap_or(30) as usize;
+        let offset = call.arguments["offset"].as_u64().unwrap_or(0) as usize;
+
+        let state = self.state.read().await;
+        let total = state.credentials.len();
+        let page: Vec<serde_json::Value> = state
+            .credentials
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|c| {
+                json!({
+                    "username": c.username,
+                    "domain": c.domain,
+                    "has_password": !c.password.is_empty(),
+                    "is_admin": c.is_admin,
+                    "source": c.source,
+                })
+            })
+            .collect();
+
+        let result = json!({
+            "credentials": page,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
         });
 
         Ok(CallbackResult::Continue(serde_json::to_string_pretty(

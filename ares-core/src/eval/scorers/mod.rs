@@ -13,8 +13,7 @@ pub use evaluate::{
     evaluate, get_found_iocs, get_found_techniques, get_missed_iocs, get_missed_techniques,
 };
 pub use scoring::{
-    score_evidence_quality, score_investigation_overall, score_ioc_detection,
-    score_pyramid_elevation, score_stage_progress, score_technique_coverage,
-    score_timeline_accuracy,
+    score_evidence_quality, score_investigation_overall, score_ioc_detection, score_phase_coverage,
+    score_pyramid_elevation, score_technique_coverage, score_timeline_accuracy,
 };
 pub use types::{EvidenceItem, InvestigationSnapshot, TimelineEvent};

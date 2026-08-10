@@ -29,6 +29,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+base64 = "0.23"
 uuid = { workspace = true }
 sqlx = { workspace = true }
 regex = { workspace = true }
@@ -38,6 +39,9 @@ rand = "0.10"
 thiserror = { workspace = true }
 hickory-resolver = { workspace = true }
 local-ip-address = "0.6"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+rustix = { version = "1", features = ["fs"] }
+flate2 = "1"
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -41,32 +41,51 @@ pub fn definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "raise_child".into(),
-            description: "Elevate privileges from a child domain to the parent domain using \
-                the ExtraSid or trust key technique. Automatically performs golden ticket \
-                creation with Enterprise Admin SID."
+            name: "generate_silver_ticket".into(),
+            description: "Forge a Kerberos silver ticket: a service ticket (TGS) for ONE SPN, \
+                signed with that service account's own key instead of krbtgt. Use when you \
+                hold a service or machine account's key but NOT krbtgt — e.g. after \
+                secretsdump on a member server (its $MACHINE.ACC LSA secret), a gMSA \
+                password read, or an NTDS dump. Grants access to that one service as any \
+                principal you name, with no traffic to the DC. `username` is the account \
+                that OWNS the SPN and signs the ticket; `impersonate` is the principal \
+                embedded in it. Prefer generate_golden_ticket when a krbtgt hash is \
+                available — that is domain-wide."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "child_domain": {
-                        "type": "string",
-                        "description": "Child domain FQDN (e.g. child.contoso.local)"
-                    },
                     "username": {
                         "type": "string",
-                        "description": "Username with admin rights in the child domain"
+                        "description": "Account that owns the SPN and whose key signs the ticket (e.g. 'SQL01$' for a machine account, or a service user like 'svc_sql'). NOT the principal you want to become — that is `impersonate`. Its key is resolved from operation state, so this account must already have a captured NTLM hash or AES key."
                     },
-                    "password": {
+                    "domain": {
                         "type": "string",
-                        "description": "Password for authentication (use this OR hash)"
+                        "description": "Domain FQDN of the service account (e.g. contoso.local)"
+                    },
+                    "spn": {
+                        "type": "string",
+                        "description": "Service principal name the ticket is scoped to, as service class + host (e.g. 'cifs/sql01.contoso.local' for SMB, 'MSSQLSvc/sql01.contoso.local:1433' for SQL, 'host/ws01.contoso.local' for scheduled tasks). Must include the '/' — the ticket is only accepted by this one service."
+                    },
+                    "domain_sid": {
+                        "type": "string",
+                        "description": "Domain SID (e.g. 'S-1-5-21-...'). Obtain via get_sid if unknown."
                     },
                     "hash": {
                         "type": "string",
-                        "description": "NTLM hash for pass-the-hash authentication (e.g. aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0). Use this OR password."
+                        "description": "NTLM hash of the service account (LM:NT or NT-only)"
+                    },
+                    "aes_key": {
+                        "type": "string",
+                        "description": "AES256 key of the service account (hex, 64 chars). Preferred over the NTLM hash — a host configured for AES-only Kerberos rejects an RC4 service ticket."
+                    },
+                    "impersonate": {
+                        "type": "string",
+                        "description": "Principal to embed in the ticket. Defaults to 'Administrator'. The service performs no PAC validation against the DC, so any name works.",
+                        "default": "Administrator"
                     }
                 },
-                "required": ["child_domain", "username"]
+                "required": ["username", "domain", "spn", "domain_sid"]
             }),
         },
         ToolDefinition {

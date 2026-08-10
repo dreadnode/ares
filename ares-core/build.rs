@@ -31,6 +31,38 @@ struct ToolCategory {
     fn_names: Vec<String>,
 }
 
+/// Pick the binary a tool `fn_name` actually invokes from its group's
+/// `binaries` list.
+///
+/// A `tools.yaml` group can bundle several binaries — e.g. the impacket lateral
+/// group ships `impacket-{psexec,wmiexec,smbexec,secretsdump}`. Mapping every fn
+/// to `binaries[0]` mislabels all but the first (this is why `secretsdump` spans
+/// reported `impacket-GetNPUsers` and `secretsdump_kerberos` reported
+/// `impacket-psexec`). Match the fn against each binary's base name (strip an
+/// `impacket-` prefix and a `.py` suffix, lowercased) and take the longest
+/// substring hit; fall back to the first binary when nothing matches, which
+/// preserves the existing label for single-binary groups and unmatched fns.
+fn select_binary<'a>(fn_name: &str, binaries: &'a [String]) -> &'a str {
+    let fn_lower = fn_name.to_ascii_lowercase();
+    let mut best: Option<(&'a str, usize)> = None;
+    for b in binaries {
+        let base = b
+            .strip_prefix("impacket-")
+            .unwrap_or(b)
+            .trim_end_matches(".py")
+            .to_ascii_lowercase();
+        if !base.is_empty()
+            && fn_lower.contains(&base)
+            && best.is_none_or(|(_, len)| base.len() > len)
+        {
+            best = Some((b.as_str(), base.len()));
+        }
+    }
+    best.map(|(b, _)| b)
+        .or_else(|| binaries.first().map(String::as_str))
+        .unwrap_or("")
+}
+
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let yaml_path = Path::new(&manifest_dir)
@@ -57,11 +89,10 @@ fn main() {
 
     for (role, def) in &tools_file.roles {
         for cat in &def.tools {
-            let primary_binary = cat.binaries.first().map(|s| s.as_str()).unwrap_or("");
             for fn_name in &cat.fn_names {
                 entries.push((
                     fn_name.clone(),
-                    primary_binary.to_string(),
+                    select_binary(fn_name, &cat.binaries).to_string(),
                     cat.category.clone(),
                     role.clone(),
                 ));

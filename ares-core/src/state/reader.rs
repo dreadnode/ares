@@ -14,6 +14,9 @@ use super::dedup_keys::{build_credential_dedup_key, build_hash_dedup_key, parse_
 use super::keys::*;
 use super::try_deserialize;
 
+/// TTL applied to operation state keys in Redis (24 hours).
+const OP_TTL_SECS: i64 = 86_400;
+
 /// Read-only Redis state backend for CLI operations.
 pub struct RedisStateReader {
     operation_id: String,
@@ -145,6 +148,15 @@ impl RedisStateReader {
         Ok(items)
     }
 
+    /// Load superseded vulnerability IDs from `ares:op:{id}:superseded` SET.
+    pub async fn get_superseded_vulnerabilities(
+        &self,
+        conn: &mut impl AsyncCommands,
+    ) -> Result<HashSet<String>, redis::RedisError> {
+        let items: HashSet<String> = conn.smembers(self.key(KEY_SUPERSEDED)).await?;
+        Ok(items)
+    }
+
     /// Load domain controller map from `ares:op:{id}:dc_map` HASH.
     pub async fn get_dc_map(
         &self,
@@ -175,8 +187,6 @@ impl RedisStateReader {
     }
 
     /// Load the full SharedRedTeamState from Redis.
-    ///
-    /// This is the Rust equivalent of `_load_state_from_redis()` in cli_ops.py.
     pub async fn load_state(
         &self,
         conn: &mut impl AsyncCommands,
@@ -194,6 +204,7 @@ impl RedisStateReader {
         let domains = self.get_domains(conn).await?;
         let vulnerabilities = self.get_vulnerabilities(conn).await?;
         let exploited = self.get_exploited_vulnerabilities(conn).await?;
+        let superseded = self.get_superseded_vulnerabilities(conn).await?;
         let dc_map = self.get_dc_map(conn).await?;
         let netbios_map = self.get_netbios_map(conn).await?;
 
@@ -231,6 +242,7 @@ impl RedisStateReader {
             all_shares: shares,
             discovered_vulnerabilities: vulnerabilities,
             exploited_vulnerabilities: exploited,
+            superseded_vulnerabilities: superseded,
             has_domain_admin: meta.has_domain_admin,
             has_golden_ticket: meta.has_golden_ticket,
             domain_admin_path: meta.domain_admin_path,
@@ -258,7 +270,7 @@ impl RedisStateReader {
 
         let added: bool = conn.hset_nx(&key, &dedup_field, &data).await?;
         if added {
-            let _: () = conn.expire(&key, 86400).await?; // 24h TTL
+            let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         }
         Ok(added)
     }
@@ -273,9 +285,7 @@ impl RedisStateReader {
         let data = serde_json::to_string(vuln).unwrap_or_default();
 
         let added: bool = conn.hset_nx(&key, &vuln.vuln_id, &data).await?;
-        if added {
-            let _: () = conn.expire(&key, 86400).await?;
-        }
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(added)
     }
 
@@ -286,9 +296,27 @@ impl RedisStateReader {
         host: &Host,
     ) -> Result<(), redis::RedisError> {
         let key = self.key(KEY_HOSTS);
+        // Dedup by IP (fall back to hostname), like `add_user`. This used to be
+        // a blind RPUSH, so a re-discovery of an already-listed host appended a
+        // duplicate row — including phantom empty-IP rows when the hostname was
+        // known but the IP wasn't. Duplicate rows let a stale `owned:false`
+        // shadow a later `owned:true` (`mark_host_owned` could only rewrite so
+        // many of them), which starved the ownership-gated SAM-dump chain.
+        let existing: Vec<String> = conn.lrange(&key, 0, -1).await?;
+        for item in &existing {
+            if let Ok(h) = serde_json::from_str::<Host>(item) {
+                let ip_dup = !host.ip.is_empty() && h.ip == host.ip;
+                let host_dup =
+                    !host.hostname.is_empty() && h.hostname.eq_ignore_ascii_case(&host.hostname);
+                if ip_dup || host_dup {
+                    let _: () = conn.expire(&key, OP_TTL_SECS).await?;
+                    return Ok(());
+                }
+            }
+        }
         let data = serde_json::to_string(host).unwrap_or_default();
         let _: () = conn.rpush(&key, &data).await?;
-        let _: () = conn.expire(&key, 86400).await?;
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(())
     }
 
@@ -316,8 +344,53 @@ impl RedisStateReader {
         }
         let data = serde_json::to_string(user).unwrap_or_default();
         let _: () = conn.rpush(&key, &data).await?;
-        let _: () = conn.expire(&key, 86400).await?;
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(true)
+    }
+
+    /// Fold `user`'s group memberships into the stored row for the same
+    /// `username@domain`, rewriting it in place.
+    ///
+    /// [`add_user`](Self::add_user) is first-writer-wins, so a later sighting
+    /// that finally carries `memberOf` is otherwise discarded. The restore path
+    /// (`load_state`) reads these rows straight back into `state.users`, so
+    /// without the rewrite a resumed operation regresses to empty membership.
+    pub async fn merge_user_member_of(
+        &self,
+        conn: &mut impl AsyncCommands,
+        user: &User,
+    ) -> Result<bool, redis::RedisError> {
+        if user.member_of.is_empty() {
+            return Ok(false);
+        }
+        let key = self.key(KEY_USERS);
+        let existing: Vec<String> = conn.lrange(&key, 0, -1).await?;
+        let dedup_key = format!(
+            "{}@{}",
+            user.username.to_lowercase(),
+            user.domain.to_lowercase()
+        );
+        for (idx, item) in existing.iter().enumerate() {
+            let Ok(mut stored) = serde_json::from_str::<User>(item) else {
+                continue;
+            };
+            let stored_key = format!(
+                "{}@{}",
+                stored.username.to_lowercase(),
+                stored.domain.to_lowercase()
+            );
+            if stored_key != dedup_key {
+                continue;
+            }
+            if !stored.merge_member_of(&user.member_of) {
+                return Ok(false);
+            }
+            let data = serde_json::to_string(&stored).unwrap_or_default();
+            let _: () = conn.lset(&key, idx as isize, &data).await?;
+            let _: () = conn.expire(&key, OP_TTL_SECS).await?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// Add a domain to Redis SET.
@@ -328,7 +401,7 @@ impl RedisStateReader {
     ) -> Result<bool, redis::RedisError> {
         let key = self.key(KEY_DOMAINS);
         let added: i64 = conn.sadd(&key, domain.to_lowercase()).await?;
-        let _: () = conn.expire(&key, 86400).await?;
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(added > 0)
     }
 
@@ -381,7 +454,7 @@ impl RedisStateReader {
 
         let added: bool = conn.hset_nx(&key, &dedup_field, &data).await?;
         if added {
-            let _: () = conn.expire(&key, 86400).await?;
+            let _: () = conn.expire(&key, OP_TTL_SECS).await?;
             return Ok(true);
         }
 
@@ -398,7 +471,7 @@ impl RedisStateReader {
                 .is_some();
             if !existing_has_aes {
                 let _: () = conn.hset(&key, &dedup_field, &data).await?;
-                let _: () = conn.expire(&key, 86400).await?;
+                let _: () = conn.expire(&key, OP_TTL_SECS).await?;
             }
         }
         Ok(false)
@@ -416,7 +489,7 @@ impl RedisStateReader {
         let key = self.key(KEY_META);
         let serialized = serde_json::to_string(value).unwrap_or_default();
         let _: () = conn.hset(&key, field, &serialized).await?;
-        let _: () = conn.expire(&key, 86400).await?;
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(())
     }
 
@@ -429,7 +502,7 @@ impl RedisStateReader {
     ) -> Result<(), redis::RedisError> {
         let key = self.key(KEY_DOMAIN_SIDS);
         let _: () = conn.hset(&key, domain, sid).await?;
-        let _: () = conn.expire(&key, 86400).await?;
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(())
     }
 
@@ -463,7 +536,7 @@ impl RedisStateReader {
     ) -> Result<(), redis::RedisError> {
         let key = self.key(KEY_ADMIN_NAMES);
         let _: () = conn.hset(&key, domain, name).await?;
-        let _: () = conn.expire(&key, 86400).await?;
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(())
     }
 
@@ -491,7 +564,7 @@ impl RedisStateReader {
         let field = ticket.dedup_key();
         let data = serde_json::to_string(ticket).unwrap_or_default();
         let _: () = conn.hset(&key, &field, &data).await?;
-        let _: () = conn.expire(&key, 86400).await?;
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(())
     }
 
@@ -525,7 +598,7 @@ impl RedisStateReader {
 
         let added: bool = conn.hset_nx(&key, &dedup_field, &data).await?;
         if added {
-            let _: () = conn.expire(&key, 86400).await?;
+            let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         }
         Ok(added)
     }
@@ -539,7 +612,7 @@ impl RedisStateReader {
         let key = self.key(KEY_TIMELINE);
         let data = serde_json::to_string(event).unwrap_or_default();
         let _: () = conn.rpush(&key, &data).await?;
-        let _: () = conn.expire(&key, 86400).await?;
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(())
     }
 
@@ -551,7 +624,7 @@ impl RedisStateReader {
     ) -> Result<bool, redis::RedisError> {
         let key = self.key(KEY_TECHNIQUES);
         let added: i64 = conn.sadd(&key, technique_id).await?;
-        let _: () = conn.expire(&key, 86400).await?;
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(added > 0)
     }
 
@@ -603,7 +676,7 @@ impl RedisStateReader {
     ) -> Result<i64, redis::RedisError> {
         let key = self.key(KEY_VULN_TYPE_FAILURES);
         let count: i64 = conn.hincr(&key, vuln_type, 1i64).await?;
-        let _: () = conn.expire(&key, 86400).await?;
+        let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         Ok(count)
     }
 
@@ -658,7 +731,7 @@ impl RedisStateReader {
         let data = serde_json::to_string(trust).unwrap_or_default();
         let added: bool = conn.hset_nx(&key, &domain_key, &data).await?;
         if added {
-            let _: () = conn.expire(&key, 86400).await?;
+            let _: () = conn.expire(&key, OP_TTL_SECS).await?;
         }
         Ok(added)
     }
@@ -734,6 +807,7 @@ mod tests {
             description: String::new(),
             is_admin: false,
             source: "ldap".to_string(),
+            member_of: Vec::new(),
         }
     }
 
@@ -771,8 +845,6 @@ mod tests {
         }
     }
 
-    // -- exists ---------------------------------------------------------------
-
     #[tokio::test]
     async fn exists_empty_returns_false() {
         let mut conn = MockRedisConnection::new();
@@ -790,8 +862,6 @@ mod tests {
             .unwrap();
         assert!(reader.exists(&mut conn).await.unwrap());
     }
-
-    // -- get_meta / set_meta_field -------------------------------------------
 
     #[tokio::test]
     async fn get_meta_empty_returns_defaults() {
@@ -827,8 +897,6 @@ mod tests {
         assert!(meta.has_domain_admin);
     }
 
-    // -- get_credentials / add_credential ------------------------------------
-
     #[tokio::test]
     async fn get_credentials_empty() {
         let mut conn = MockRedisConnection::new();
@@ -862,8 +930,6 @@ mod tests {
         let creds = reader.get_credentials(&mut conn).await.unwrap();
         assert_eq!(creds.len(), 1);
     }
-
-    // -- get_hashes / add_hash -----------------------------------------------
 
     #[tokio::test]
     async fn get_hashes_empty() {
@@ -973,8 +1039,6 @@ mod tests {
         assert_eq!(hashes.len(), 2);
     }
 
-    // -- get_hosts / add_host ------------------------------------------------
-
     #[tokio::test]
     async fn get_hosts_empty() {
         let mut conn = MockRedisConnection::new();
@@ -996,7 +1060,37 @@ mod tests {
         assert_eq!(hosts[0].hostname, "dc01.contoso.local");
     }
 
-    // -- get_users / add_user ------------------------------------------------
+    #[tokio::test]
+    async fn add_host_dedups_by_ip_and_hostname() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+
+        // First insert lands.
+        reader
+            .add_host(&mut conn, &make_host("192.168.58.5", "dc01.contoso.local"))
+            .await
+            .unwrap();
+        // Same IP (hostname differs) — deduped.
+        reader
+            .add_host(&mut conn, &make_host("192.168.58.5", "other.contoso.local"))
+            .await
+            .unwrap();
+        // Same hostname, empty IP (the phantom-row shape) — deduped.
+        reader
+            .add_host(&mut conn, &make_host("", "dc01.contoso.local"))
+            .await
+            .unwrap();
+        // A genuinely different host still lands.
+        reader
+            .add_host(&mut conn, &make_host("192.168.58.6", "sql01.contoso.local"))
+            .await
+            .unwrap();
+
+        let hosts = reader.get_hosts(&mut conn).await.unwrap();
+        assert_eq!(hosts.len(), 2, "duplicates should collapse: {hosts:?}");
+        assert!(hosts.iter().any(|h| h.ip == "192.168.58.5"));
+        assert!(hosts.iter().any(|h| h.ip == "192.168.58.6"));
+    }
 
     #[tokio::test]
     async fn get_users_empty() {
@@ -1033,7 +1127,50 @@ mod tests {
         assert_eq!(users.len(), 1);
     }
 
-    // -- get_shares / add_share ----------------------------------------------
+    #[tokio::test]
+    async fn merge_user_member_of_rewrites_the_stored_row() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        assert!(reader
+            .add_user(&mut conn, &make_user("jdoe", "contoso.local"))
+            .await
+            .unwrap());
+
+        let mut with_groups = make_user("JDoe", "CONTOSO.LOCAL");
+        with_groups.member_of = vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".into()];
+        assert!(reader
+            .merge_user_member_of(&mut conn, &with_groups)
+            .await
+            .unwrap());
+
+        let users = reader.get_users(&mut conn).await.unwrap();
+        assert_eq!(users.len(), 1, "merging must not append a second row");
+        assert_eq!(
+            users[0].member_of,
+            vec!["CN=Cert Publishers,CN=Users,DC=contoso,DC=local".to_string()]
+        );
+
+        assert!(
+            !reader
+                .merge_user_member_of(&mut conn, &with_groups)
+                .await
+                .unwrap(),
+            "a repeat merge adds nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_user_member_of_is_a_noop_for_an_unknown_principal() {
+        let mut conn = MockRedisConnection::new();
+        let reader = make_reader();
+        let mut stranger = make_user("nobody", "contoso.local");
+        stranger.member_of = vec!["CN=Domain Admins,CN=Users,DC=contoso,DC=local".into()];
+        assert!(!reader
+            .merge_user_member_of(&mut conn, &stranger)
+            .await
+            .unwrap());
+        assert!(reader.get_users(&mut conn).await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn get_shares_empty() {
@@ -1068,8 +1205,6 @@ mod tests {
         assert_eq!(shares.len(), 1);
     }
 
-    // -- get_domains / add_domain --------------------------------------------
-
     #[tokio::test]
     async fn get_domains_empty() {
         let mut conn = MockRedisConnection::new();
@@ -1101,8 +1236,6 @@ mod tests {
         assert_eq!(domains.len(), 1);
     }
 
-    // -- get_vulnerabilities / add_vulnerability -----------------------------
-
     #[tokio::test]
     async fn get_vulnerabilities_empty() {
         let mut conn = MockRedisConnection::new();
@@ -1125,7 +1258,7 @@ mod tests {
         assert_eq!(vulns["esc1_192.168.58.5"].vuln_type, "ADCS_ESC1");
     }
 
-    // -- get_exploited_vulnerabilities (via mock directly) -------------------
+    // get_exploited_vulnerabilities (via mock directly)
 
     #[tokio::test]
     async fn get_exploited_vulnerabilities_empty() {
@@ -1155,7 +1288,7 @@ mod tests {
         assert!(exploited.contains("deleg_svc_sql"));
     }
 
-    // -- get_dc_map / get_netbios_map (via mock directly) --------------------
+    // get_dc_map / get_netbios_map (via mock directly)
 
     #[tokio::test]
     async fn get_dc_map_empty() {
@@ -1192,8 +1325,6 @@ mod tests {
         assert_eq!(nb_map["CONTOSO"], "contoso.local");
     }
 
-    // -- is_running ----------------------------------------------------------
-
     #[tokio::test]
     async fn is_running_false_when_no_lock() {
         let mut conn = MockRedisConnection::new();
@@ -1209,8 +1340,6 @@ mod tests {
         let _: () = conn.set(lock_key, "1").await.unwrap();
         assert!(reader.is_running(&mut conn).await.unwrap());
     }
-
-    // -- add_timeline_event / get_timeline -----------------------------------
 
     #[tokio::test]
     async fn get_timeline_empty() {
@@ -1236,8 +1365,6 @@ mod tests {
         assert_eq!(timeline[0]["description"], "Initial access via kerberoast");
     }
 
-    // -- add_technique / get_techniques --------------------------------------
-
     #[tokio::test]
     async fn get_techniques_empty() {
         let mut conn = MockRedisConnection::new();
@@ -1258,8 +1385,6 @@ mod tests {
         let techniques = reader.get_techniques(&mut conn).await.unwrap();
         assert_eq!(techniques.len(), 2);
     }
-
-    // -- get_report ----------------------------------------------------------
 
     #[tokio::test]
     async fn get_report_none_when_missing() {
@@ -1283,7 +1408,7 @@ mod tests {
         assert_eq!(report.as_deref(), Some("# Report\nDomain admin achieved."));
     }
 
-    // -- increment_vuln_type_failure / get_vuln_type_failure_count / get_all --
+    // increment_vuln_type_failure / get_vuln_type_failure_count / get_all
 
     #[tokio::test]
     async fn vuln_type_failure_count_starts_at_zero() {
@@ -1341,8 +1466,6 @@ mod tests {
         assert_eq!(all["delegation"], 1);
     }
 
-    // -- get_trusted_domains / add_trusted_domain ----------------------------
-
     #[tokio::test]
     async fn get_trusted_domains_empty() {
         let mut conn = MockRedisConnection::new();
@@ -1374,8 +1497,6 @@ mod tests {
         assert!(!reader.add_trusted_domain(&mut conn, &trust).await.unwrap());
     }
 
-    // -- set_domain_sid / set_admin_name -------------------------------------
-
     #[tokio::test]
     async fn set_domain_sid_stores_value() {
         let mut conn = MockRedisConnection::new();
@@ -1403,8 +1524,6 @@ mod tests {
         let name: Option<String> = conn.hget(key, "contoso.local").await.unwrap();
         assert_eq!(name.as_deref(), Some("Administrator"));
     }
-
-    // -- load_state ----------------------------------------------------------
 
     #[tokio::test]
     async fn load_state_returns_none_when_empty() {

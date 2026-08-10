@@ -149,6 +149,10 @@ pub(super) fn tool_definitions() -> Vec<ToolDefinition> {
                     "username": {"type": "string"},
                     "password": {"type": "string"},
                     "domain": {"type": "string"},
+                    "null_session": {
+                        "type": "boolean",
+                        "description": "Use null session (empty anonymous credentials) for unauthenticated SAMR/LSA enumeration"
+                    },
                     "hash": {"type": "string", "description": "NTLM hash for pass-the-hash authentication (use instead of password)"}
                 },
                 "required": ["target", "command"]

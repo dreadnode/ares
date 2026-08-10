@@ -2,12 +2,14 @@
 collections:
   - name: amazon.aws
     version: 11.4.0
+  - name: community.aws
+    version: 11.1.0
   - name: ansible.windows
     version: 3.7.0
   - name: community.windows
     version: 3.3.0
   - name: community.docker
-    version: 5.2.1
+    version: 5.2.2
   - name: ansible.posix
     version: 2.2.2
   - name: community.general
@@ -18,5 +20,8 @@ collections:
     type: git
     version: main
   - name: https://github.com/l50/ansible-collection-arsenal.git
+    type: git
+    version: main
+  - name: https://github.com/l50/ansible-collection-bulwark.git
     type: git
     version: main

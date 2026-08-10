@@ -245,7 +245,6 @@ impl Throttler {
             return true;
         }
 
-        // Check exploit + vuln_type
         if CRITICAL_PATH_TASK_TYPES.contains(&task_type) {
             if let Some(p) = payload {
                 let vt = p
@@ -259,7 +258,6 @@ impl Throttler {
             }
         }
 
-        // Check delegation enumeration
         if task_type == "privesc_enumeration" {
             if let Some(techniques) = payload
                 .and_then(|p| p.get("techniques"))
@@ -275,7 +273,6 @@ impl Throttler {
             }
         }
 
-        // Check ESC8 coercion
         if task_type == "coercion" {
             if let Some(techniques) = payload
                 .and_then(|p| p.get("techniques"))
@@ -316,6 +313,8 @@ mod tests {
             max_tasks_per_role: 3,
             dispatch_delay: std::time::Duration::from_millis(0),
             stale_task_timeout: std::time::Duration::from_secs(300),
+            non_llm_task_timeout: std::time::Duration::from_secs(6000),
+            task_hard_timeout: std::time::Duration::from_secs(7200),
             deferred_task_max_age: std::time::Duration::from_secs(300),
             max_deferred_per_type: 5,
             max_deferred_total: 20,
@@ -362,6 +361,7 @@ mod tests {
                     role: "recon".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -382,6 +382,7 @@ mod tests {
                     role: "recon".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -403,6 +404,7 @@ mod tests {
                     role: "recon".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -425,6 +427,7 @@ mod tests {
                     role: "recon".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -448,6 +451,7 @@ mod tests {
                     role: "recon".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -474,6 +478,7 @@ mod tests {
                     role: "privesc".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }
@@ -497,6 +502,7 @@ mod tests {
                     role: "privesc".into(),
                     submitted_at: Instant::now(),
                     credential_key: None,
+                    abort: None,
                 })
                 .await;
         }

@@ -12,10 +12,6 @@ use std::sync::{Arc, Mutex};
 use redis::aio::ConnectionLike;
 use redis::{Cmd, ErrorKind, Pipeline, RedisError, RedisResult, Value};
 
-// ---------------------------------------------------------------------------
-// Storage types
-// ---------------------------------------------------------------------------
-
 enum Stored {
     Str(Vec<u8>),
     Hash(HashMap<Vec<u8>, Vec<u8>>),
@@ -24,10 +20,6 @@ enum Stored {
 }
 
 type Data = HashMap<String, Stored>;
-
-// ---------------------------------------------------------------------------
-// MockRedisConnection
-// ---------------------------------------------------------------------------
 
 /// Minimal in-memory Redis mock that supports the command subset used by
 /// `ares-core::state` and `ares-cli::orchestrator::task_queue`.
@@ -58,8 +50,6 @@ impl MockRedisConnection {
             })
             .collect()
     }
-
-    // -- dispatch -----------------------------------------------------------
 
     fn exec_inner(data: &mut Data, cmd: &Cmd) -> RedisResult<Value> {
         let args = Self::collect_args(cmd);
@@ -105,10 +95,6 @@ impl MockRedisConnection {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ConnectionLike impl
-// ---------------------------------------------------------------------------
-
 impl ConnectionLike for MockRedisConnection {
     fn req_packed_command<'a>(&'a mut self, cmd: &'a Cmd) -> redis::RedisFuture<'a, Value> {
         let mut data = self.data.lock().unwrap();
@@ -139,9 +125,7 @@ impl ConnectionLike for MockRedisConnection {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Command implementations (free functions operating on Data)
-// ---------------------------------------------------------------------------
 
 fn key(args: &[Vec<u8>], idx: usize) -> String {
     String::from_utf8_lossy(args.get(idx).map(|v| v.as_slice()).unwrap_or_default()).into_owned()
@@ -150,8 +134,6 @@ fn key(args: &[Vec<u8>], idx: usize) -> String {
 fn bulk(v: &[u8]) -> Value {
     Value::BulkString(v.to_vec())
 }
-
-// -- string commands --------------------------------------------------------
 
 fn cmd_get(data: &Data, args: &[Vec<u8>]) -> RedisResult<Value> {
     let k = key(args, 1);
@@ -217,8 +199,6 @@ fn cmd_exists(data: &Data, args: &[Vec<u8>]) -> RedisResult<Value> {
     let k = key(args, 1);
     Ok(Value::Int(if data.contains_key(&k) { 1 } else { 0 }))
 }
-
-// -- hash commands ----------------------------------------------------------
 
 fn ensure_hash<'a>(data: &'a mut Data, k: &str) -> &'a mut HashMap<Vec<u8>, Vec<u8>> {
     data.entry(k.to_string())
@@ -322,8 +302,6 @@ fn cmd_hincrby(data: &mut Data, args: &[Vec<u8>]) -> RedisResult<Value> {
     Ok(Value::Int(new_val))
 }
 
-// -- set commands -----------------------------------------------------------
-
 fn ensure_set<'a>(data: &'a mut Data, k: &str) -> &'a mut HashSet<Vec<u8>> {
     data.entry(k.to_string())
         .or_insert_with(|| Stored::Set(HashSet::new()));
@@ -368,8 +346,6 @@ fn cmd_srem(data: &mut Data, args: &[Vec<u8>]) -> RedisResult<Value> {
     }
     Ok(Value::Int(count))
 }
-
-// -- list commands ----------------------------------------------------------
 
 fn ensure_list<'a>(data: &'a mut Data, k: &str) -> &'a mut VecDeque<Vec<u8>> {
     data.entry(k.to_string())
@@ -475,8 +451,6 @@ fn cmd_brpop(data: &mut Data, args: &[Vec<u8>]) -> RedisResult<Value> {
     Ok(Value::Nil)
 }
 
-// -- scan -------------------------------------------------------------------
-
 fn cmd_lset(data: &mut Data, args: &[Vec<u8>]) -> RedisResult<Value> {
     let k = key(args, 1);
     let index: i64 = String::from_utf8_lossy(args.get(2).map(|v| v.as_slice()).unwrap_or(b"0"))
@@ -548,9 +522,7 @@ fn cmd_scan(data: &Data, args: &[Vec<u8>]) -> RedisResult<Value> {
     ]))
 }
 
-// ---------------------------------------------------------------------------
 // Minimal glob matching (supports only `*` wildcard segments)
-// ---------------------------------------------------------------------------
 
 fn glob_match(pattern: &str, input: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
@@ -645,8 +617,6 @@ mod tests {
             assert_eq!(results[2], None);
         });
     }
-
-    // -- string commands -------------------------------------------------------
 
     #[test]
     fn setex_stores_value() {
@@ -755,8 +725,6 @@ mod tests {
             assert!(e2);
         });
     }
-
-    // -- hash commands ---------------------------------------------------------
 
     #[test]
     fn hset_and_hget() {
@@ -876,8 +844,6 @@ mod tests {
         });
     }
 
-    // -- set commands ----------------------------------------------------------
-
     #[test]
     fn sadd_and_smembers() {
         use redis::AsyncCommands;
@@ -922,8 +888,6 @@ mod tests {
             assert_eq!(zero, 0);
         });
     }
-
-    // -- list commands ---------------------------------------------------------
 
     #[test]
     fn rpush_and_lrange() {
@@ -1120,8 +1084,6 @@ mod tests {
         });
     }
 
-    // -- sorted set commands ---------------------------------------------------
-
     #[test]
     fn zadd_adds_members() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1142,8 +1104,6 @@ mod tests {
             assert_eq!(count, 2);
         });
     }
-
-    // -- scan ------------------------------------------------------------------
 
     #[test]
     fn scan_returns_matching_keys() {
@@ -1203,8 +1163,6 @@ mod tests {
         });
     }
 
-    // -- unsupported command ---------------------------------------------------
-
     #[test]
     fn unsupported_command_errors() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1218,15 +1176,11 @@ mod tests {
         });
     }
 
-    // -- get_db ----------------------------------------------------------------
-
     #[test]
     fn get_db_returns_zero() {
         let conn = MockRedisConnection::new();
         assert_eq!(conn.get_db(), 0);
     }
-
-    // -- default ---------------------------------------------------------------
 
     #[test]
     fn default_creates_empty() {

@@ -4,11 +4,22 @@
 //! "credential_access") with a `technique`/`techniques` field in the payload.
 //! This module expands those into individual tool calls that `ares_tools::dispatch`
 //! understands, then parses the raw output into structured discoveries.
+//!
+//! Each individual dispatch is routed through
+//! [`crate::worker::credential_resolver::resolve_credentials`] so the worker's
+//! task-loop path picks up the same credential / Kerberos-ticket / tool-rename
+//! injection that `LocalToolDispatcher` and the NATS tool-exec loop already
+//! apply. Pre-fix this path called `ares_tools::dispatch` directly with the
+//! orchestrator-supplied params — every resolver-side fix (Bug B's
+//! `KRB5CCNAME` wiring, Bug I's same-realm cred precedence, etc.) silently
+//! no-op'd on composite task types submitted via the NATS task queue.
 
 use std::time::Duration;
 
 use serde_json::Value;
 use tracing::{info, warn};
+
+use crate::worker::credential_resolver::resolve_credentials;
 
 use super::types::AgentResult;
 
@@ -24,41 +35,57 @@ pub async fn run_agent_task(
     task_type: &str,
     params: &serde_json::Value,
     _timeout: Duration,
+    conn: Option<redis::aio::ConnectionManager>,
+    operation_id: Option<&str>,
 ) -> anyhow::Result<AgentResult> {
-    // Try expanding composite task types first
     let tools = expand_task(task_type, params);
 
     if tools.is_empty() {
-        // Direct tool dispatch (task_type IS the tool name)
+        // Direct tool dispatch (task_type IS the tool name).
+        // Route through credential_resolver so KRB5CCNAME / NTLM
+        // injection / Kerberos-variant tool rename apply here too.
         info!(tool = task_type, "Executing tool natively");
-        let output = ares_tools::dispatch(task_type, params).await?;
+        let (effective_name, resolved_params) =
+            resolve_for_dispatch(conn.clone(), operation_id, task_type, params).await;
+        let output = ares_tools::dispatch(&effective_name, &resolved_params).await?;
         let raw = output.combined_raw();
-        let discoveries = ares_tools::parsers::parse_tool_output(task_type, &raw, params);
+        let discoveries = crate::orchestrator::output_extraction::gate_parsed_discoveries(
+            &effective_name,
+            ares_tools::parsers::parse_tool_output(&effective_name, &raw, &resolved_params),
+        );
         return Ok(make_result_with_discoveries(output, discoveries));
     }
 
-    // Run each expanded tool, collecting outputs and discoveries
     let mut outputs = Vec::new();
     let mut all_discoveries = Vec::new();
     let mut any_error = false;
 
     for (tool_name, tool_params) in &tools {
         info!(tool = %tool_name, parent_task = task_type, "Executing expanded tool");
-        match ares_tools::dispatch(tool_name, tool_params).await {
+        // Resolve credentials per-tool so each expanded call gets its
+        // own injection — e.g. a `coercion` composite with two
+        // techniques (`petitpotam`, `printerbug`) may need a Kerberos
+        // ccache for one and NTLM for the other.
+        let (effective_name, resolved_params) =
+            resolve_for_dispatch(conn.clone(), operation_id, tool_name, tool_params).await;
+        match ares_tools::dispatch(&effective_name, &resolved_params).await {
             Ok(output) => {
                 if !output.success {
                     any_error = true;
                 }
                 let raw = output.combined_raw();
                 let combined = output.combined();
-                let disc = ares_tools::parsers::parse_tool_output(tool_name, &raw, tool_params);
+                let disc = crate::orchestrator::output_extraction::gate_parsed_discoveries(
+                    &effective_name,
+                    ares_tools::parsers::parse_tool_output(&effective_name, &raw, &resolved_params),
+                );
                 all_discoveries.push(disc);
-                outputs.push(format!("=== {} ===\n{}", tool_name, combined));
+                outputs.push(format!("=== {} ===\n{}", effective_name, combined));
             }
             Err(e) => {
-                warn!(tool = %tool_name, err = %e, "Expanded tool failed");
+                warn!(tool = %effective_name, err = %e, "Expanded tool failed");
                 any_error = true;
-                outputs.push(format!("=== {} ===\nERROR: {}", tool_name, e));
+                outputs.push(format!("=== {} ===\nERROR: {}", effective_name, e));
             }
         }
     }
@@ -77,6 +104,45 @@ pub async fn run_agent_task(
         usage: None,
         discoveries: Some(discoveries),
     })
+}
+
+/// Run `resolve_credentials` against a single tool call, returning the
+/// effective tool name (post-`*_kerberos` rename) and the resolved params.
+///
+/// Falls back to `(tool_name, params.clone())` when either there's no Redis
+/// connection, no operation_id, or the resolver itself errors. The fallback
+/// matches the resolver's documented contract: "If `operation_id` is `None`,
+/// this is a no-op — the tool runs with whatever arguments were provided.
+/// This handles direct CLI invokes and tests."
+async fn resolve_for_dispatch(
+    conn: Option<redis::aio::ConnectionManager>,
+    operation_id: Option<&str>,
+    tool_name: &str,
+    params: &serde_json::Value,
+) -> (String, serde_json::Value) {
+    let mut resolved = params.clone();
+    let Some(mut conn) = conn else {
+        return (tool_name.to_string(), resolved);
+    };
+    match resolve_credentials(&mut conn, operation_id, tool_name, &mut resolved).await {
+        Ok(Some(renamed)) => {
+            info!(
+                from = %tool_name,
+                to = %renamed,
+                "task_loop executor: applying Kerberos variant redirect from credential_resolver"
+            );
+            (renamed, resolved)
+        }
+        Ok(None) => (tool_name.to_string(), resolved),
+        Err(e) => {
+            warn!(
+                tool = %tool_name,
+                err = %e,
+                "task_loop credential_resolver failed; continuing with original arguments"
+            );
+            (tool_name.to_string(), params.clone())
+        }
+    }
 }
 
 fn make_result_with_discoveries(output: ares_tools::ToolOutput, discoveries: Value) -> AgentResult {
@@ -118,14 +184,12 @@ fn expand_technique_task(params: &serde_json::Value) -> Vec<(String, serde_json:
     let mut tools = Vec::new();
     let normalized = normalize_params(params);
 
-    // Handle singular "technique" field
     if let Some(technique) = params.get("technique").and_then(|v| v.as_str()) {
         let tool_name = map_technique_to_tool(technique);
         tools.push((tool_name, normalized));
         return tools;
     }
 
-    // Handle "techniques" array
     if let Some(techniques) = params.get("techniques").and_then(|v| v.as_array()) {
         for tech in techniques {
             if let Some(name) = tech.as_str() {
@@ -145,7 +209,6 @@ fn expand_technique_task(params: &serde_json::Value) -> Vec<(String, serde_json:
 fn normalize_params(params: &serde_json::Value) -> serde_json::Value {
     let mut p = params.clone();
     if let Some(obj) = p.as_object_mut() {
-        // target_ip → target (tools expect "target")
         if !obj.contains_key("target") {
             if let Some(ip) = obj.get("target_ip").cloned() {
                 obj.insert("target".to_string(), ip);
@@ -157,7 +220,6 @@ fn normalize_params(params: &serde_json::Value) -> serde_json::Value {
                 obj.insert("targets".to_string(), ip);
             }
         }
-        // Flatten credential object into top-level fields
         if let Some(cred) = obj.get("credential").cloned() {
             if let Some(cred_obj) = cred.as_object() {
                 for (k, v) in cred_obj {
@@ -223,7 +285,6 @@ fn expand_exploit_task(params: &serde_json::Value) -> Vec<(String, serde_json::V
         "nopac" | "samaccountname" => "nopac",
         "printnightmare" => "printnightmare",
         "zerologon" => "zerologon_check",
-        "krbrelayup" => "krbrelayup",
         "mssql_access" => "mssql_enum_impersonation",
         _ => {
             warn!(vuln_type, "No tool mapping for exploit vuln_type");
@@ -401,5 +462,40 @@ mod tests {
         let params = json!({"vuln_type": "unknown_vuln"});
         let tools = expand_exploit_task(&params);
         assert!(tools.is_empty());
+    }
+
+    // Task-loop resolver wire-up: fallback when no Redis conn
+
+    #[tokio::test]
+    async fn resolve_for_dispatch_returns_input_when_no_conn() {
+        // Direct-CLI / test path: no Redis connection available, so the
+        // resolver call is short-circuited and the original (tool_name,
+        // params) tuple comes back unchanged. This pins the fallback
+        // contract that result_handler relies on — passing `Some(conn)`
+        // only when the worker has a real connection.
+        let params = json!({
+            "target": "192.168.58.10",
+            "domain": "contoso.local",
+            "username": "alice",
+        });
+        let (name, resolved) =
+            super::resolve_for_dispatch(None, Some("op-test"), "ldap_search", &params).await;
+        assert_eq!(name, "ldap_search");
+        assert_eq!(resolved, params);
+    }
+
+    #[tokio::test]
+    async fn resolve_for_dispatch_returns_input_when_no_operation_id() {
+        // resolver itself short-circuits when operation_id is None.
+        // run_agent_task should pass None through cleanly so direct CLI
+        // invokes (where there's no orchestrator-side state) don't error.
+        let params = json!({
+            "target": "192.168.58.10",
+            "domain": "contoso.local",
+        });
+        // Synthesize the same scenario: no conn ≡ no resolver call ≡ pass-through.
+        let (name, resolved) = super::resolve_for_dispatch(None, None, "nmap_scan", &params).await;
+        assert_eq!(name, "nmap_scan");
+        assert_eq!(resolved, params);
     }
 }

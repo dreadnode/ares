@@ -1,0 +1,38 @@
+# Single-process Loki (v3.6.7, matches argonaut) serving captured chunks from
+# the local filesystem store. setup.sh stages the snapshot's chunks (base64-key
+# renamed) into /loki/chunks.
+auth_enabled: false
+server:
+  http_listen_port: 3100
+  log_level: warn
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+limits_config:
+  reject_old_samples: false
+  reject_old_samples_max_age: 8760h
+  max_entries_limit_per_query: 50000
+  max_query_length: 0
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-active
+    cache_location: /loki/tsdb-cache
+    resync_interval: 5s
+schema_config:
+  configs:
+    - from: "2020-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: loki_index_
+        period: 24h
+analytics:
+  reporting_enabled: false

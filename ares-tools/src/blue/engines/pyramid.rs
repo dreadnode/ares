@@ -158,8 +158,6 @@ mod tests {
         }
     }
 
-    // ── assess_pyramid ──────────────────────────────────────────────
-
     #[test]
     fn assess_pyramid_empty_evidence() {
         let result = assess_pyramid(&[]);

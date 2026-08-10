@@ -12,8 +12,8 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::orchestrator::config::OrchestratorConfig;
-use crate::orchestrator::dispatcher::CredentialInflight;
-use crate::orchestrator::routing::ActiveTaskTracker;
+use crate::orchestrator::dispatcher::{CrackInflight, CredentialInflight, Dispatcher};
+use crate::orchestrator::routing::{is_non_llm_task, ActiveTaskTracker};
 use crate::orchestrator::state::SharedState;
 use crate::orchestrator::task_queue::TaskQueue;
 
@@ -117,7 +117,12 @@ pub fn spawn_lock_keeper(
         // Create a dedicated Redis connection for the lock keeper so that
         // EXPIRE commands are not queued behind heavy BRPOP/LPUSH traffic
         // on the shared connection manager.
-        let dedicated_queue = match TaskQueue::connect(&config.redis_url, &config.nats_url).await {
+        let dedicated_queue = match TaskQueue::connect_state_only(
+            &config.redis_url,
+            &config.nats_url,
+        )
+        .await
+        {
             Ok(q) => {
                 info!("Lock keeper using dedicated Redis connection");
                 q
@@ -151,22 +156,36 @@ pub fn spawn_lock_keeper(
             match result {
                 Ok(Ok(true)) => {} // Lock TTL refreshed
                 Ok(Ok(false)) => {
-                    // Lock key disappeared — re-acquire it
+                    // Lock key disappeared or drifted to another holder —
+                    // re-acquire. Same holder ID means we own it in Redis
+                    // after Reclaimed; different holder means our TTL
+                    // lapsed and someone else took over — we should stop.
                     warn!(
                         operation_id = %config.operation_id,
-                        "Lock key missing, attempting re-acquisition"
+                        "Lock extend returned false, attempting re-acquisition"
                     );
                     match dedicated_queue
                         .try_acquire_lock(&config.operation_id, config.lock_ttl)
                         .await
                     {
-                        Ok(true) => info!(
+                        Ok(crate::orchestrator::task_queue::LockAcquire::Acquired)
+                        | Ok(crate::orchestrator::task_queue::LockAcquire::Reclaimed) => info!(
                             operation_id = %config.operation_id,
                             "Operation lock re-acquired"
                         ),
-                        Ok(false) => warn!(
+                        Ok(crate::orchestrator::task_queue::LockAcquire::TakenOver {
+                            previous_holder,
+                        }) => warn!(
                             operation_id = %config.operation_id,
-                            "Lock re-acquisition failed — another holder exists"
+                            previous_holder = %previous_holder,
+                            "Operation lock forcibly re-acquired via ARES_LOCK_TAKEOVER"
+                        ),
+                        Ok(crate::orchestrator::task_queue::LockAcquire::Contested {
+                            current_holder,
+                        }) => warn!(
+                            operation_id = %config.operation_id,
+                            current_holder = %current_holder,
+                            "Lock re-acquisition failed — another orchestrator holds it"
                         ),
                         Err(e) => warn!(err = %e, "Lock re-acquisition error"),
                     }
@@ -177,6 +196,27 @@ pub fn spawn_lock_keeper(
                 Err(_) => {
                     warn!("Lock extend timed out (Redis unresponsive?)");
                 }
+            }
+
+            // Same tick, same dedicated connection: refresh the operation
+            // status record's `updated_at` so `ares ops status` can distinguish
+            // a live run from a wedged one. Without this the record is written
+            // once at bootstrap and again at finalize, so a hung orchestrator
+            // and a working one are indistinguishable from the outside.
+            let mut conn = dedicated_queue.connection();
+            let beat = tokio::time::timeout(
+                extend_timeout,
+                ares_core::state::heartbeat_operation_status(
+                    &mut conn,
+                    &config.operation_id,
+                    config.heartbeat_interval.as_secs(),
+                ),
+            )
+            .await;
+            match beat {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => warn!(err = %e, "Failed to heartbeat operation status"),
+                Err(_) => warn!("Operation status heartbeat timed out (Redis unresponsive?)"),
             }
         }
     })
@@ -194,12 +234,14 @@ pub fn spawn_heartbeat_monitor(
     queue: TaskQueue,
     registry: AgentRegistry,
     tracker: ActiveTaskTracker,
-    credential_inflight: CredentialInflight,
+    dispatcher: Arc<Dispatcher>,
     state: SharedState,
     config: Arc<OrchestratorConfig>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let credential_inflight = dispatcher.credential_inflight.clone();
+        let crack_inflight = dispatcher.crack_inflight.clone();
         let mut interval = tokio::time::interval(config.heartbeat_interval);
         let mut consecutive_failures: u32 = 0;
 
@@ -212,28 +254,38 @@ pub fn spawn_heartbeat_monitor(
                 }
             }
 
-            if let Err(e) = run_heartbeat_sweep(&queue, &registry, &config).await {
-                consecutive_failures += 1;
-                warn!(
-                    attempt = consecutive_failures,
-                    err = %e,
-                    "Heartbeat sweep failed"
-                );
-                // Exponential backoff on repeated failures
+            match run_heartbeat_sweep(&queue, &registry, &config).await {
+                Err(e) => {
+                    consecutive_failures += 1;
+                    warn!(
+                        attempt = consecutive_failures,
+                        err = %e,
+                        "Heartbeat sweep failed"
+                    );
+                }
+                Ok(()) => consecutive_failures = 0,
+            }
+
+            // Clean up stale tasks (salvage any pending results first)
+            if let Err(e) = cleanup_stale_tasks(
+                &tracker,
+                &queue,
+                &credential_inflight,
+                &crack_inflight,
+                &state,
+                &config,
+            )
+            .await
+            {
+                warn!(err = %e, "Stale task cleanup failed");
+            }
+
+            if consecutive_failures > 0 {
                 let delay = std::time::Duration::from_secs(std::cmp::min(
                     15,
                     (consecutive_failures as u64) * 5,
                 ));
                 tokio::time::sleep(delay).await;
-                continue;
-            }
-            consecutive_failures = 0;
-
-            // Clean up stale tasks (salvage any pending results first)
-            if let Err(e) =
-                cleanup_stale_tasks(&tracker, &queue, &credential_inflight, &state, &config).await
-            {
-                warn!(err = %e, "Stale task cleanup failed");
             }
         }
     })
@@ -265,7 +317,6 @@ async fn run_heartbeat_sweep(
         }
     }
 
-    // Mark stale agents offline
     let stale = registry.stale_agents(config.heartbeat_timeout).await;
     for agent in &stale {
         warn!(
@@ -279,26 +330,75 @@ async fn run_heartbeat_sweep(
     Ok(())
 }
 
+/// Pick the stale-reap threshold for a task by class. Non-LLM tasks (`crack`,
+/// `command`) run far longer than an LLM turn — a hashcat crack is budgeted at
+/// 20 min, serialized behind the single GPU permit, with a 25-min dispatch
+/// ceiling — so they get the longer, un-halved `non_llm_timeout`; everything
+/// else gets the (possibly hard-cap-halved) LLM timeout.
+fn stale_threshold_for(
+    task_type: &str,
+    llm_timeout: std::time::Duration,
+    non_llm_timeout: std::time::Duration,
+) -> std::time::Duration {
+    if is_non_llm_task(task_type) {
+        non_llm_timeout
+    } else {
+        llm_timeout
+    }
+}
+
+async fn release_reaped_task(
+    reaped: &crate::orchestrator::routing::ActiveTask,
+    credential_inflight: &CredentialInflight,
+    crack_inflight: &CrackInflight,
+) {
+    if let Some(ref key) = reaped.credential_key {
+        credential_inflight.release(key).await;
+    }
+    crack_inflight.release(&reaped.task_id).await;
+    if let Some(ref abort) = reaped.abort {
+        abort.abort();
+    }
+}
+
 /// Remove tasks that have been active longer than the configured stale timeout.
 async fn cleanup_stale_tasks(
     tracker: &ActiveTaskTracker,
     queue: &TaskQueue,
     credential_inflight: &CredentialInflight,
+    crack_inflight: &CrackInflight,
     state: &SharedState,
     config: &OrchestratorConfig,
 ) -> Result<()> {
     let llm_count = tracker.llm_task_count().await;
     let hard_cap = config.hard_cap();
 
-    // Use shorter timeout when at hard cap to break deadlock faster
-    let effective_timeout = if llm_count >= hard_cap {
+    // LLM tasks: shorten under hard cap to break the throttle deadlock faster.
+    let llm_timeout = if llm_count >= hard_cap {
         config.stale_task_timeout / 2
     } else {
         config.stale_task_timeout
     };
+    // Non-LLM tasks (`crack`, `command`) are not part of any LLM deadlock, so
+    // the hard-cap halving must not apply to them. A hashcat crack is budgeted
+    // at 20 min, serialized behind the single GPU permit, and the dispatcher
+    // waits up to 25 min for its result — reaping at the 5-min LLM timeout
+    // throws away an in-flight crack the tool would have finished (observed: a
+    // cross-forest AS-REP crack reaped at age_secs=329, costing the second
+    // forest its only foothold credential).
+    let non_llm_timeout = config.non_llm_task_timeout;
 
-    let stale = tracker.stale_tasks(effective_timeout).await;
-    for task in &stale {
+    // Scan at the smaller horizon, then reap each task against its own
+    // threshold so a slow crack isn't collected on the LLM timeout.
+    let scan_horizon = llm_timeout.min(non_llm_timeout);
+    let candidates = tracker.stale_tasks(scan_horizon).await;
+    let mut reaped = 0usize;
+    for task in &candidates {
+        let task_timeout = stale_threshold_for(&task.task_type, llm_timeout, non_llm_timeout);
+        if task.submitted_at.elapsed() < task_timeout {
+            continue;
+        }
+        reaped += 1;
         warn!(
             task_id = %task.task_id,
             role = %task.role,
@@ -311,9 +411,7 @@ async fn cleanup_stale_tasks(
         // every subsequent task with the same credential gets deferred
         // until the future eventually returns.
         if let Some(removed) = tracker.remove(&task.task_id).await {
-            if let Some(ref key) = removed.credential_key {
-                credential_inflight.release(key).await;
-            }
+            release_reaped_task(&removed, credential_inflight, crack_inflight).await;
         }
 
         let age_secs = task.submitted_at.elapsed().as_secs();
@@ -344,9 +442,9 @@ async fn cleanup_stale_tasks(
         }
     }
 
-    if !stale.is_empty() {
+    if reaped > 0 {
         info!(
-            removed = stale.len(),
+            removed = reaped,
             llm_count, hard_cap, "Stale task cleanup complete"
         );
     }
@@ -519,6 +617,89 @@ mod tests {
         r.update_heartbeat("nonexistent", "busy", Some("task-1"), Utc::now())
             .await;
         assert!(r.agent_names().await.is_empty());
+    }
+
+    #[test]
+    fn crack_tasks_get_the_long_un_halved_threshold() {
+        use std::time::Duration;
+        // Simulate the hard-cap case: LLM tasks halved to 150s, non-LLM 6000s.
+        let llm = Duration::from_secs(150);
+        let non_llm = Duration::from_secs(6000);
+
+        // A crack task must use the long threshold — this is the fix: a crack
+        // was being reaped mid-run before hashcat returned the password.
+        assert_eq!(stale_threshold_for("crack", llm, non_llm), non_llm);
+        assert_eq!(stale_threshold_for("command", llm, non_llm), non_llm);
+
+        // LLM tasks keep the short (halved) threshold so a real deadlock still
+        // clears fast.
+        assert_eq!(stale_threshold_for("recon", llm, non_llm), llm);
+        assert_eq!(stale_threshold_for("credential_access", llm, non_llm), llm);
+        assert_eq!(stale_threshold_for("lateral_movement", llm, non_llm), llm);
+    }
+
+    #[test]
+    fn a_329s_crack_survives_but_a_329s_llm_task_is_reaped() {
+        use std::time::Duration;
+        // Reproduces the observed regression: a cross-forest AS-REP crack was
+        // reaped at age_secs=329. With the fix, a crack at 329s is below its
+        // 6000s threshold (survives), while an LLM task at 329s exceeds its
+        // 300s threshold (reaped) — the two classes no longer share a fuse.
+        let llm = Duration::from_secs(300);
+        let non_llm = Duration::from_secs(6000);
+        let age = Duration::from_secs(329);
+
+        assert!(age < stale_threshold_for("crack", llm, non_llm));
+        assert!(age >= stale_threshold_for("recon", llm, non_llm));
+    }
+
+    #[tokio::test]
+    async fn reaping_an_active_task_aborts_its_spawned_future() {
+        let tracker = ActiveTaskTracker::new();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let spawned = tokio::spawn(async move {
+            let _ = rx.await;
+        });
+
+        tracker
+            .add(crate::orchestrator::routing::ActiveTask {
+                task_id: "hung".into(),
+                task_type: "recon".into(),
+                role: "recon".into(),
+                submitted_at: std::time::Instant::now(),
+                credential_key: None,
+                abort: None,
+            })
+            .await;
+        tracker.set_abort("hung", spawned.abort_handle()).await;
+
+        let removed = tracker.remove("hung").await.expect("task was tracked");
+        release_reaped_task(
+            &removed,
+            &CredentialInflight::new(1),
+            &CrackInflight::new(1),
+        )
+        .await;
+
+        let joined = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
+            .await
+            .expect("reaped task's future must stop promptly, not outlive the reap");
+        assert!(
+            joined.is_err_and(|e| e.is_cancelled()),
+            "reaped task's future must actually stop, not merely detach"
+        );
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn set_abort_on_an_already_removed_task_is_a_noop() {
+        let tracker = ActiveTaskTracker::new();
+        let spawned = tokio::spawn(async {});
+        tracker
+            .set_abort("never-tracked", spawned.abort_handle())
+            .await;
+        assert_eq!(tracker.total().await, 0);
+        let _ = spawned.await;
     }
 
     #[tokio::test]

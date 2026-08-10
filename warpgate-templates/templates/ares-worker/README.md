@@ -63,13 +63,13 @@ After building the Docker image, you can push it to GHCR:
 
 ```bash
 # Tag the image
-docker tag ares-worker:latest ghcr.io/dreadnode/ares-worker:latest
+docker tag ares-worker:latest ghcr.io/l50/ares-worker:latest
 
 # Authenticate with GHCR
 echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
 
 # Push the image
-docker push ghcr.io/dreadnode/ares-worker:latest
+docker push ghcr.io/l50/ares-worker:latest
 ```
 
 ---
@@ -93,7 +93,8 @@ docker run -it --rm \
 
 ```bash
 # Check the Rust binary is available
-docker run --rm ares-worker:latest ares worker --version```
+docker run --rm ares-worker:latest ares worker --version
+```
 
 **Test with local Redis and NATS:**
 
@@ -143,13 +144,14 @@ warpgate validate ares-worker
   - Provided by `ares-base` (Python 3.13.x, uv, Ares framework, dependencies, procps)
   - Rust-compiled `ares` binary with PyO3 Python bindings
 - **Build Process:**
-  - Clones ares repository from `feature/rust-cli` branch
+  - Clones ares repository from the `main` branch
   - Compiles Rust binary with `--features python` for Python interop
   - Installs binary to `/usr/local/bin/ares`
   - Cleans up build artifacts (source, compiler symlinks)
 - **Directory Structure:**
   - `/root/` - Default working directory
-  - `/usr/local/bin/ares` - Compiled Ares binary  - Python packages installed system-wide
+  - `/usr/local/bin/ares` - Compiled Ares binary
+  - Python packages installed system-wide
 - The worker requires Redis (state), NATS JetStream (broker), and an
   Anthropic API key to function.
 
@@ -176,16 +178,6 @@ Deploy using the manifests in the argonaut repository:
 ```bash
 kubectl apply -k environments/dev/platforms/attack-simulation/ares-worker
 ```
-
----
-
-## Differences from ares-worker (Python)
-
-| Component | ares-worker (Python) | ares-worker |
-| ----------- | ---------------------- | ------------------ |
-| Entrypoint | `python -m ares worker` | `ares worker` (binary) || Runtime | Python interpreter | Compiled Rust + embedded Python |
-| Build | No compilation needed | Rust compilation with PyO3 |
-| Performance | Standard Python | Native Rust with Python FFI |
 
 ---
 

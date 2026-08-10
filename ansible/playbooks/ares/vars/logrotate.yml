@@ -1,0 +1,31 @@
+---
+# Shared logrotate config for /var/log/ares/*.log — consumed by both the
+# AMI-bake playbook (goad_attack_box.yml) and the runtime playbook
+# (logrotate.yml) so bake-time and hot-apply cannot drift.
+#
+# Rotation strategy:
+# - copytruncate: every ares service writes via systemd
+#   StandardOutput=append: (O_APPEND), so after truncation the next write
+#   goes to end-of-file (offset 0). No SIGHUP, no sparse hole.
+# - maxsize 500M: trips before daily on the ingest.log JSONL firehose,
+#   which can grow multiple GB/day.
+# - delaycompress: keeps yesterday's rotation uncompressed for grep/tail.
+logging_directories:
+  - path: /var/log/ares
+    mode: "0755"
+    owner: root
+    group: root
+
+logging_rotation_configs:
+  - name: ares
+    path: /var/log/ares/*.log
+    rotate: 7
+    frequency: daily
+    maxsize: 500M
+    compress: true
+    delaycompress: true
+    missingok: true
+    notifempty: true
+    copytruncate: true
+    dateext: true
+    dateformat: "-%Y%m%d"

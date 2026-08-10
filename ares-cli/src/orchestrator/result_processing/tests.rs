@@ -2,8 +2,13 @@ use super::admin_checks::{
     extract_ip_from_line, has_golden_ticket_indicator, parse_pwned_line, resolve_da_path,
 };
 use super::parsing::{has_domain_admin_indicator, parse_discoveries, resolve_parent_id};
-use super::timeline::{credential_techniques, hash_techniques, is_critical_hash};
-use super::{result_has_credential_evidence, result_has_parser_evidence};
+use super::timeline::{
+    admin_upgrade_description, credential_techniques, hash_techniques, is_critical_hash,
+};
+use super::{
+    extract_asrep_roastable_users, result_has_credential_evidence, result_has_parser_evidence,
+};
+use crate::orchestrator::state::StateInner;
 use ares_core::models::{Credential, Hash};
 use serde_json::json;
 
@@ -107,7 +112,41 @@ fn parse_single_credential() {
     });
     let parsed = parse_discoveries(&payload);
     assert_eq!(parsed.credentials.len(), 1);
-    assert_eq!(parsed.credentials[0].source, "ntlm_relay");
+    // The credential is kept, but `ntlm_relay` is no parser's label, so the
+    // provenance claim does not survive into state.
+    assert_eq!(parsed.credentials[0].source, "llm_reported");
+}
+
+/// A payload can claim any `source` it likes; only labels a parser actually
+/// emits are carried through. Without this, emitting `"source": "secretsdump"`
+/// bought the top trust tier and, with it, the right to displace a realm a
+/// real dump had pinned.
+#[test]
+fn parse_credential_strips_an_unearned_provenance_claim() {
+    let payload = json!({
+        "credential": {
+            "id": "c1", "username": "admin", "password": "P@ss1",
+            "domain": "contoso.local", "source": "secretsdump", "is_admin": false,
+            "attack_step": 0
+        }
+    });
+    let parsed = parse_discoveries(&payload);
+    assert_eq!(parsed.credentials.len(), 1);
+    assert_eq!(parsed.credentials[0].source, "llm_reported");
+}
+
+/// A label a parser really does emit passes through untouched.
+#[test]
+fn parse_credential_keeps_a_real_parser_source() {
+    let payload = json!({
+        "credentials": [{
+            "id": "c1", "username": "admin", "password": "P@ss1",
+            "domain": "contoso.local", "source": "laps_dump", "is_admin": false,
+            "attack_step": 0
+        }]
+    });
+    let parsed = parse_discoveries(&payload);
+    assert_eq!(parsed.credentials[0].source, "laps_dump");
 }
 
 #[test]
@@ -118,7 +157,9 @@ fn parse_cracked_password() {
     assert_eq!(parsed.credentials.len(), 1);
     assert_eq!(parsed.credentials[0].username, "jdoe");
     assert_eq!(parsed.credentials[0].password, "Summer2024!");
-    assert_eq!(parsed.credentials[0].source, "cracked");
+    // Minted from free text in the payload, not a cracker's stdout — it must
+    // not share a tier with regex-verified `cracked:hashcat`.
+    assert_eq!(parsed.credentials[0].source, "llm_reported");
 }
 
 #[test]
@@ -710,7 +751,7 @@ fn parse_cracked_password_with_domain() {
     let parsed = parse_discoveries(&payload);
     assert_eq!(parsed.credentials.len(), 1);
     assert_eq!(parsed.credentials[0].domain, "fabrikam.local");
-    assert_eq!(parsed.credentials[0].source, "cracked");
+    assert_eq!(parsed.credentials[0].source, "llm_reported");
 }
 
 #[test]
@@ -748,8 +789,6 @@ fn parse_shares_with_comment() {
     assert_eq!(parsed.shares.len(), 1);
     assert_eq!(parsed.shares[0].comment, "Logon server share");
 }
-
-// --- parse_pwned_line tests ---
 
 #[test]
 fn pwned_line_standard_format() {
@@ -827,8 +866,6 @@ fn pwned_line_username_with_special_chars() {
     );
 }
 
-// --- extract_ip_from_line tests ---
-
 #[test]
 fn extract_ip_basic() {
     let line = "SMB 192.168.58.10 445 DC01 [+] CONTOSO\\admin (Pwn3d!)";
@@ -873,8 +910,6 @@ fn extract_ip_boundary_values() {
     assert_eq!(extract_ip_from_line(line), Some("0.0.0.0".to_string()));
 }
 
-// --- has_golden_ticket_indicator tests ---
-
 #[test]
 fn golden_ticket_indicator_present() {
     let text = "Saving ticket in administrator.ccache";
@@ -904,58 +939,53 @@ fn golden_ticket_indicator_both_present_not_adjacent() {
     assert!(has_golden_ticket_indicator(text));
 }
 
-// --- resolve_da_path tests ---
+fn state_with_krbtgt_from(source: &str) -> StateInner {
+    let mut state = StateInner::new("op-test".to_string());
+    let mut hash = make_test_hash("h-krbtgt", "krbtgt", "contoso.local", 0);
+    hash.source = source.to_string();
+    state.hashes.push(hash);
+    state
+}
 
 #[test]
-fn da_path_always_krbtgt() {
-    // Agent-provided path fields are ignored.
-    let payload = json!({
-        "has_domain_admin": true,
-        "domain_admin_path": "secretsdump -> Administrator"
-    });
+fn da_path_names_the_capturing_tool() {
+    let state = state_with_krbtgt_from("certipy_esc1_full_chain");
     assert_eq!(
-        resolve_da_path(&payload),
-        Some("secretsdump -> krbtgt hash".to_string())
+        resolve_da_path(&state),
+        Some("certipy_esc1_full_chain → krbtgt NTLM hash".to_string())
     );
 }
 
 #[test]
-fn da_path_no_fields_defaults_to_krbtgt() {
-    let payload = json!({"has_domain_admin": true});
+fn da_path_reports_secretsdump_only_when_secretsdump_ran() {
+    let state = state_with_krbtgt_from("secretsdump");
     assert_eq!(
-        resolve_da_path(&payload),
-        Some("secretsdump -> krbtgt hash".to_string())
+        resolve_da_path(&state),
+        Some("secretsdump → krbtgt NTLM hash".to_string())
     );
 }
 
 #[test]
-fn da_path_no_flag_defaults_to_krbtgt() {
-    let payload = json!({});
-    assert_eq!(
-        resolve_da_path(&payload),
-        Some("secretsdump -> krbtgt hash".to_string())
-    );
+fn da_path_is_none_without_a_krbtgt_capture() {
+    let state = StateInner::new("op-test".to_string());
+    assert_eq!(resolve_da_path(&state), None);
 }
 
 #[test]
-fn da_path_false_flag_defaults_to_krbtgt() {
-    let payload = json!({"has_domain_admin": false});
-    assert_eq!(
-        resolve_da_path(&payload),
-        Some("secretsdump -> krbtgt hash".to_string())
-    );
+fn da_path_ignores_an_unsourced_krbtgt_hash() {
+    let state = state_with_krbtgt_from("");
+    assert_eq!(resolve_da_path(&state), None);
 }
 
 #[test]
-fn da_path_null_flag_defaults_to_krbtgt() {
-    let payload = json!({"has_domain_admin": null});
+fn da_path_does_not_read_agent_authored_claims() {
+    let mut state = state_with_krbtgt_from("secretsdump");
+    state.domain_admin_path = Some("spray → Administrator".to_string());
     assert_eq!(
-        resolve_da_path(&payload),
-        Some("secretsdump -> krbtgt hash".to_string())
+        resolve_da_path(&state),
+        Some("secretsdump → krbtgt NTLM hash".to_string())
     );
 }
-
-// --- credential_techniques tests ---
 
 #[test]
 fn credential_techniques_admin_base() {
@@ -1013,8 +1043,6 @@ fn credential_techniques_empty_source() {
     let t = credential_techniques("", false);
     assert_eq!(t, vec!["T1552"]);
 }
-
-// --- hash_techniques tests ---
 
 #[test]
 fn hash_techniques_base() {
@@ -1100,8 +1128,6 @@ fn hash_techniques_as_rep_hyphenated_source() {
     let t = hash_techniques("aabb", "unknown", "as-rep_roast");
     assert!(t.contains(&"T1558.004".to_string()));
 }
-
-// --- is_critical_hash tests ---
 
 #[test]
 fn critical_hash_krbtgt() {
@@ -1247,6 +1273,17 @@ fn is_ticket_grant_vuln_recognizes_delegation_prefixes() {
     assert!(is_ticket_grant_vuln("s4u_admin_at_contoso"));
 }
 
+/// A silver ticket's only product is an SPN-scoped ccache — the same shape the
+/// delegation primitives have. Without the prefix here, a clean
+/// `generate_silver_ticket` run against an injected/queued `silver_ticket_*`
+/// vuln is recorded as a FAILED exploit despite ticketer exiting 0.
+#[test]
+fn is_ticket_grant_vuln_recognizes_silver_ticket() {
+    use super::is_ticket_grant_vuln;
+    assert!(is_ticket_grant_vuln("silver_ticket_192.168.58.51_SQL01$"));
+    assert!(is_ticket_grant_vuln("SILVER_TICKET_sql01_svc_sql"));
+}
+
 #[test]
 fn is_ticket_grant_vuln_rejects_non_ticket_primitives() {
     use super::is_ticket_grant_vuln;
@@ -1296,6 +1333,588 @@ fn ccache_evidence_empty_payload() {
     use super::result_has_ccache_evidence;
     assert!(!result_has_ccache_evidence(&None));
     assert!(!result_has_ccache_evidence(&Some(json!({}))));
+}
+
+#[test]
+fn exploit_failure_reason_prefers_explicit_error() {
+    use super::exploit_failure_reason;
+    let result = Some(json!({ "summary": "fallback summary" }));
+    assert_eq!(
+        exploit_failure_reason(Some("rpc_s_access_denied"), &result),
+        "rpc_s_access_denied"
+    );
+}
+
+#[test]
+fn exploit_failure_reason_falls_back_to_summary() {
+    use super::exploit_failure_reason;
+    let result = Some(json!({
+        "summary": "S4U failed for WS01$ -> HTTP/dc01: KDC_ERR_BADOPTION (KDC cannot accommodate requested option)"
+    }));
+    let reason = exploit_failure_reason(None, &result);
+    assert!(
+        reason.contains("KDC_ERR_BADOPTION"),
+        "an LLM-reported diagnosis must survive into the timeline event, got {reason:?}"
+    );
+}
+
+#[test]
+fn exploit_failure_reason_ignores_blank_error_and_summary() {
+    use super::exploit_failure_reason;
+    assert_eq!(
+        exploit_failure_reason(Some("   "), &Some(json!({ "summary": "  " }))),
+        "unknown error"
+    );
+    assert_eq!(exploit_failure_reason(None, &None), "unknown error");
+}
+
+#[test]
+fn is_acl_mutation_vuln_recognizes_acl_prefixes() {
+    use super::is_acl_mutation_vuln;
+    assert!(is_acl_mutation_vuln("acl_writeproperty_alice_bob"));
+    assert!(is_acl_mutation_vuln("acl_genericall_alice_krbtgt"));
+    assert!(is_acl_mutation_vuln("ACL_ALLEXTENDEDRIGHTS_ALICE_ADMIN"));
+    assert!(is_acl_mutation_vuln("acl_genericwrite_alice_dc01"));
+}
+
+#[test]
+fn is_acl_mutation_vuln_recognizes_gpo_prefixes() {
+    use super::is_acl_mutation_vuln;
+    assert!(is_acl_mutation_vuln(
+        "gpo_genericall_alice_default_domain_policy"
+    ));
+    assert!(is_acl_mutation_vuln(
+        "gpo_writeproperty_alice_default_domain_policy"
+    ));
+    assert!(is_acl_mutation_vuln(
+        "GPO_WRITEDACL_ALICE_DEFAULT_DOMAIN_CONTROLLERS_POLICY"
+    ));
+    assert!(is_acl_mutation_vuln(
+        "gpo_writeowner_alice_default_domain_policy"
+    ));
+}
+
+#[test]
+fn is_acl_mutation_vuln_rejects_non_acl_primitives() {
+    use super::is_acl_mutation_vuln;
+    assert!(!is_acl_mutation_vuln("adcs_esc1_192.168.58.50"));
+    assert!(!is_acl_mutation_vuln("rbcd_dc01_target"));
+    assert!(!is_acl_mutation_vuln("dc_secretsdump_192.168.58.240"));
+    assert!(!is_acl_mutation_vuln("golden_ticket_child.contoso.local"));
+    assert!(!is_acl_mutation_vuln(""));
+}
+
+#[test]
+fn is_ticket_grant_vuln_recognizes_golden_ticket_prefix() {
+    use super::is_ticket_grant_vuln;
+    assert!(is_ticket_grant_vuln("golden_ticket_child.contoso.local"));
+    assert!(is_ticket_grant_vuln("golden_ticket_contoso.local"));
+    assert!(is_ticket_grant_vuln("GOLDEN_TICKET_CONTOSO.LOCAL"));
+}
+
+#[test]
+fn is_exploit_scoped_task_id_recognizes_all_exploit_families() {
+    use super::is_exploit_scoped_task_id;
+    assert!(is_exploit_scoped_task_id("exploit_abcdef123456"));
+    assert!(is_exploit_scoped_task_id("lateral_abcdef123456"));
+    assert!(is_exploit_scoped_task_id("privesc_abcdef123456"));
+}
+
+#[test]
+fn is_exploit_scoped_task_id_rejects_unrelated_task_types() {
+    use super::is_exploit_scoped_task_id;
+    assert!(!is_exploit_scoped_task_id("recon_abcdef123456"));
+    assert!(!is_exploit_scoped_task_id("credential_access_abcdef123456"));
+    assert!(!is_exploit_scoped_task_id("coercion_abcdef123456"));
+    assert!(!is_exploit_scoped_task_id("acl_chain_step_abcdef123456"));
+    assert!(!is_exploit_scoped_task_id(""));
+}
+
+#[test]
+fn acl_evidence_rejects_pywhisker_keycredlink_write() {
+    use super::{result_has_acl_mutation_evidence, result_has_shadow_cred_stage_one};
+    let payload = json!({
+        "tool_outputs": [
+            {"output": "[+] KeyCredential generated with DeviceID: 4b1c9f2a-1234-4a2b-9c3d-abcdef012345\n\
+                        [+] Updated the msDS-KeyCredentialLink attribute of the target object\n\
+                        [+] Saved PFX (#PKCS12) certificate & key at path: /tmp/ws01.pfx"}
+        ]
+    });
+    assert!(
+        !result_has_acl_mutation_evidence(&Some(payload.clone())),
+        "the write is stage one of a two-stage chain and proves no credential was recovered"
+    );
+    assert!(result_has_shadow_cred_stage_one(&Some(payload)));
+}
+
+#[test]
+fn shadow_cred_stage_one_lines_are_recognised_but_never_credit() {
+    use super::{result_has_acl_mutation_evidence, result_has_shadow_cred_stage_one};
+    for line in [
+        "[+] Updated the msDS-KeyCredentialLink attribute of the target object",
+        "[+] Saved PFX (#PKCS12) certificate & key at path: /tmp/ws01.pfx",
+        "[+] Successfully added msDS-KeyCredentialLink to the target",
+    ] {
+        let payload = json!({ "tool_outputs": [{"output": line}] });
+        assert!(
+            !result_has_acl_mutation_evidence(&Some(payload.clone())),
+            "stage-one line must not credit on its own: {line}"
+        );
+        assert!(
+            result_has_shadow_cred_stage_one(&Some(payload)),
+            "stage-one line must stay detectable for the log: {line}"
+        );
+    }
+}
+
+fn certipy_shadow_result(transcript: &str) -> serde_json::Value {
+    let params = json!({"domain": "contoso.local", "target": "dc01$", "dc_ip": "192.168.58.10"});
+    let discoveries =
+        ares_tools::parsers::merge_discoveries(&[ares_tools::parsers::parse_tool_output(
+            "certipy_shadow",
+            transcript,
+            &params,
+        )]);
+    json!({
+        "summary": "Successfully exploited shadow_credentials (GenericAll) as alice against dc01$",
+        "vuln_id": "acl_genericall_alice_dc01$",
+        "discoveries": discoveries,
+        "tool_outputs": [{"name": "certipy_shadow", "output": transcript}],
+    })
+}
+
+const CERTIPY_SHADOW_RECOVERED_HASH: &str = "\
+[*] Targeting user 'DC01$'\n\
+[*] Generating Key Credential\n\
+[*] Adding Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Successfully added Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Authenticating as 'DC01$' with the certificate\n\
+[*] Got TGT\n\
+[*] Wrote credential cache to 'dc01.ccache'\n\
+[*] Successfully restored the old Key Credentials for 'DC01$'\n\
+[*] NT hash for 'DC01$': 0123456789abcdef0123456789abcdef";
+
+const CERTIPY_SHADOW_STAGE_ONE_ONLY: &str = "\
+[*] Targeting user 'DC01$'\n\
+[*] Generating Key Credential\n\
+[*] Adding Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Successfully added Key Credential with device ID '4b1c9f2a-1234-4a2b-9c3d-abcdef012345' to the Key Credentials for 'DC01$'\n\
+[*] Authenticating as 'DC01$' with the certificate\n\
+[-] Got error while trying to request TGT: KDC_ERR_CLIENT_NAME_MISMATCH\n\
+[*] Successfully restored the old Key Credentials for 'DC01$'\n\
+[*] NT hash for 'DC01$': None";
+
+#[test]
+fn completed_shadow_cred_chain_satisfies_the_exploit_evidence_gate() {
+    let payload = Some(certipy_shadow_result(CERTIPY_SHADOW_RECOVERED_HASH));
+    assert!(
+        result_has_parser_evidence(&payload),
+        "a recovered NT hash is parser-grounded evidence and must credit the vulnerability"
+    );
+    assert!(
+        result_has_credential_evidence(&payload),
+        "the recovered hash must also count as credential evidence for host ownership"
+    );
+    let parsed = parse_discoveries(payload.as_ref().unwrap().get("discoveries").unwrap());
+    assert_eq!(parsed.hashes.len(), 1, "{parsed:?}");
+    assert_eq!(parsed.hashes[0].username, "dc01$");
+    assert_eq!(parsed.hashes[0].domain, "contoso.local");
+    assert_eq!(
+        parsed.hashes[0].hash_value,
+        "aad3b435b51404eeaad3b435b51404ee:0123456789abcdef0123456789abcdef"
+    );
+}
+
+#[test]
+fn stage_one_only_shadow_cred_chain_is_still_not_credited() {
+    use super::{result_has_acl_mutation_evidence, result_has_shadow_cred_stage_one};
+    let payload = Some(certipy_shadow_result(CERTIPY_SHADOW_STAGE_ONE_ONLY));
+    assert!(
+        !result_has_parser_evidence(&payload),
+        "a Key Credential write with no recovered credential must not credit"
+    );
+    assert!(
+        !result_has_acl_mutation_evidence(&payload),
+        "certipy_shadow status lines must not stand in for a recovered credential"
+    );
+    assert!(
+        result_has_shadow_cred_stage_one(&payload),
+        "certipy's own wording must make the half-finished chain countable in the log"
+    );
+}
+
+#[test]
+fn acl_evidence_detects_bloodyad_grant_and_group_add() {
+    use super::result_has_acl_mutation_evidence;
+    let genericall = json!({
+        "tool_outputs": [{"output": "[+] alice has now GenericAll on dc01"}]
+    });
+    assert!(result_has_acl_mutation_evidence(&Some(genericall)));
+
+    let group = json!({
+        "tool_outputs": [{
+            "name": "bloodyad_add_group_member",
+            "output": "[+] alice added to Domain Admins"
+        }]
+    });
+    assert!(result_has_acl_mutation_evidence(&Some(group)));
+}
+
+/// "added to" and "has been updated" are ordinary English that unrelated tools
+/// print. Crediting them anywhere in the task lets any co-running tool mark the
+/// ACL vulnerability EXPLOITED — the same metric lie as "ACL success is
+/// structurally impossible", just inverted.
+#[test]
+fn acl_evidence_ignores_generic_markers_from_unrelated_tools() {
+    use super::result_has_acl_mutation_evidence;
+    for output in [
+        "[*] 192.168.58.60 added to the target scope",
+        "[+] Kerberos ticket cache has been updated",
+        "[+] svc_sql added to the roastable SPN list",
+    ] {
+        let payload = json!({
+            "tool_outputs": [{"name": "enumerate_users", "output": output}]
+        });
+        assert!(
+            !result_has_acl_mutation_evidence(&Some(payload)),
+            "an unrelated tool must not credit an ACL edge: {output}"
+        );
+    }
+}
+
+/// An unnamed entry cannot be attributed, so the generic markers must not fire
+/// for it either. The specific ones still do — they name the primitive.
+#[test]
+fn acl_evidence_requires_attribution_for_generic_markers() {
+    use super::result_has_acl_mutation_evidence;
+
+    let unattributed = json!({
+        "tool_outputs": [{"output": "[+] alice added to Domain Admins"}]
+    });
+    assert!(!result_has_acl_mutation_evidence(&Some(unattributed)));
+
+    let specific = json!({
+        "tool_outputs": [{"output": "[+] alice has now GenericAll on dc01"}]
+    });
+    assert!(
+        result_has_acl_mutation_evidence(&Some(specific)),
+        "a marker naming the primitive stands on its own"
+    );
+}
+
+/// The generic markers are still needed: bloodyAD's group-add and attribute
+/// write print nothing more distinctive than these.
+#[test]
+fn acl_evidence_credits_generic_markers_from_the_acl_tool_itself() {
+    use super::result_has_acl_mutation_evidence;
+    for (tool, output) in [
+        (
+            "bloodyad_add_group_member",
+            "[+] alice added to Domain Admins",
+        ),
+        (
+            "bloodyad_set_object_attr",
+            "[+] servicePrincipalName has been updated",
+        ),
+    ] {
+        let payload = json!({ "tool_outputs": [{"name": tool, "output": output}] });
+        assert!(
+            result_has_acl_mutation_evidence(&Some(payload)),
+            "{tool} must still credit its own success line"
+        );
+    }
+}
+
+#[test]
+fn acl_evidence_credits_llm_driven_gpo_abuse() {
+    use super::result_has_acl_mutation_evidence;
+    let pygpoabuse = json!({
+        "tool_outputs": [{
+            "name": "pygpoabuse_immediate_task",
+            "output": "[+] Version updated\n[+] ScheduledTask AresProbe created!"
+        }]
+    });
+    assert!(result_has_acl_mutation_evidence(&Some(pygpoabuse)));
+
+    let sharpgpoabuse = json!({
+        "tool_outputs": [{
+            "name": "sharpgpoabuse",
+            "output": "[+] versionNumber attribute changed successfully\n[+] Done!"
+        }]
+    });
+    assert!(result_has_acl_mutation_evidence(&Some(sharpgpoabuse)));
+}
+
+#[test]
+fn acl_evidence_ignores_gpo_markers_from_unrelated_tools() {
+    use super::result_has_acl_mutation_evidence;
+    for output in [
+        "[+] ScheduledTask enumeration complete",
+        "[*] Done!",
+        "[+] Version updated",
+    ] {
+        let payload = json!({
+            "tool_outputs": [{"name": "enumerate_users", "output": output}]
+        });
+        assert!(
+            !result_has_acl_mutation_evidence(&Some(payload)),
+            "an unrelated tool must not credit a GPO write: {output}"
+        );
+    }
+}
+
+#[test]
+fn acl_evidence_ignores_gpo_failure_output() {
+    use super::result_has_acl_mutation_evidence;
+    for output in [
+        "[-] Unable to write to the GPO: insufficient access rights",
+        "[!] Failed to open connection: KDC_ERR_PREAUTH_FAILED",
+        "[+] GUID of the GPO is {31B2F340-016D-11D2-945F-00C04FB984F9}",
+    ] {
+        let payload = json!({
+            "tool_outputs": [{"name": "pygpoabuse_immediate_task", "output": output}]
+        });
+        assert!(
+            !result_has_acl_mutation_evidence(&Some(payload)),
+            "a GPO run without a write marker must not be credited: {output}"
+        );
+    }
+}
+
+#[test]
+fn acl_evidence_detects_dacledit_and_password_reset() {
+    use super::result_has_acl_mutation_evidence;
+    let dacl = json!({
+        "tool_outputs": [
+            {"output": "[*] DACL backed up to dacledit-20260728.bak\n[*] DACL modified successfully!"}
+        ]
+    });
+    assert!(result_has_acl_mutation_evidence(&Some(dacl)));
+
+    let reset = json!({
+        "tool_outputs": [{"output": "[+] Password changed successfully!"}]
+    });
+    assert!(result_has_acl_mutation_evidence(&Some(reset)));
+}
+
+#[test]
+fn acl_evidence_rejects_insufficient_access_rights() {
+    use super::result_has_acl_mutation_evidence;
+    let payload = json!({
+        "tool_outputs": [
+            {"output": "[-] pywhisker error: INSUFF_ACCESS_RIGHTS when writing msDS-KeyCredentialLink for target WS01$"}
+        ]
+    });
+    assert!(!result_has_acl_mutation_evidence(&Some(payload)));
+}
+
+#[test]
+fn acl_evidence_rejects_llm_prose_without_tool_marker() {
+    use super::result_has_acl_mutation_evidence;
+    let payload = json!({
+        "tool_outputs": [
+            {"output": "I would have added to the group once the DACL modified successfully, but auth failed."}
+        ]
+    });
+    assert!(!result_has_acl_mutation_evidence(&Some(payload)));
+}
+
+#[test]
+fn shadow_cred_stage_one_alone_does_not_credit() {
+    use super::{
+        is_acl_mutation_vuln, result_has_acl_mutation_evidence, result_has_parser_evidence,
+        result_has_shadow_cred_stage_one, result_text_indicates_failure,
+    };
+    let vuln_id = "acl_genericall_alice_krbtgt";
+    let result = Some(json!({
+        "vuln_id": vuln_id,
+        "summary": "Added shadow credentials to krbtgt and exported the PFX.",
+        "tool_outputs": [
+            {"name": "pywhisker",
+             "output": "[+] KeyCredential generated with DeviceID: 4b1c9f2a-1234-4a2b-9c3d-abcdef012345\n\
+                        [+] Updated the msDS-KeyCredentialLink attribute of the target object\n\
+                        [+] Saved PFX (#PKCS12) certificate & key at path: /tmp/krbtgt.pfx"}
+        ]
+    }));
+
+    assert!(
+        !result_has_parser_evidence(&result),
+        "no hash was recovered, so nothing reaches discoveries"
+    );
+    assert!(
+        result_has_shadow_cred_stage_one(&result),
+        "the write itself must still be detectable, so the gap can be logged"
+    );
+
+    let task_reported_success = true;
+    let has_acl_evidence =
+        is_acl_mutation_vuln(vuln_id) && result_has_acl_mutation_evidence(&result);
+    let actually_succeeded = task_reported_success
+        && !result_text_indicates_failure(&result)
+        && (result_has_parser_evidence(&result) || has_acl_evidence);
+
+    assert!(
+        !actually_succeeded,
+        "a msDS-KeyCredentialLink write with no PKINIT stage recovers no credential and must not be credited"
+    );
+}
+
+#[test]
+fn shadow_cred_stage_two_credits_via_parser_evidence() {
+    use super::{
+        is_acl_mutation_vuln, result_has_acl_mutation_evidence, result_has_parser_evidence,
+        result_text_indicates_failure,
+    };
+    let vuln_id = "acl_genericall_alice_krbtgt";
+    let result = Some(json!({
+        "vuln_id": vuln_id,
+        "summary": "Wrote msDS-KeyCredentialLink, then authenticated with the PFX.",
+        "discoveries": {
+            "hashes": [{"username": "krbtgt", "domain": "contoso.local",
+                        "hash": "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"}]
+        },
+        "tool_outputs": [
+            {"name": "pywhisker",
+             "output": "[+] Saved PFX (#PKCS12) certificate & key at path: /tmp/krbtgt.pfx"},
+            {"name": "certipy_auth",
+             "output": "[*] Got hash for 'krbtgt@contoso.local': aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"}
+        ]
+    }));
+
+    let has_acl_evidence =
+        is_acl_mutation_vuln(vuln_id) && result_has_acl_mutation_evidence(&result);
+    let actually_succeeded = !result_text_indicates_failure(&result)
+        && (result_has_parser_evidence(&result) || has_acl_evidence);
+
+    assert!(
+        actually_succeeded,
+        "the completed chain must credit — and via parser evidence, not the ACL carve-out"
+    );
+    assert!(
+        !has_acl_evidence,
+        "credit must come from the recovered hash, so the carve-out stays narrow"
+    );
+}
+
+#[test]
+fn pywhisker_generic_success_line_does_not_credit() {
+    use super::result_has_acl_mutation_evidence;
+    let result = Some(json!({
+        "tool_outputs": [
+            {"name": "pywhisker",
+             "output": "[*] Certificate added to the target object\n[+] Done!"}
+        ]
+    }));
+    assert!(
+        !result_has_acl_mutation_evidence(&result),
+        "generic attributed markers must not credit a stage-one-only tool"
+    );
+}
+
+#[test]
+fn error_indicates_assistance_matches_submission_format() {
+    use super::error_indicates_assistance;
+    assert!(error_indicates_assistance(Some(
+        "Assistance needed: Shadow credentials PFX generated (context: ...)"
+    )));
+    assert!(error_indicates_assistance(Some(
+        "assistance needed: lower case variant"
+    )));
+    assert!(!error_indicates_assistance(Some("rpc_s_access_denied")));
+    assert!(!error_indicates_assistance(Some("Agent hit max steps")));
+    assert!(!error_indicates_assistance(Some("")));
+    assert!(!error_indicates_assistance(None));
+}
+
+#[test]
+fn assisted_shadow_cred_stage_one_does_not_credit() {
+    use super::{
+        error_indicates_assistance, is_acl_mutation_vuln, result_has_acl_mutation_evidence,
+        result_text_indicates_failure,
+    };
+    let vuln_id = "acl_genericall_alice_krbtgt";
+    let err = "Assistance needed: Shadow credentials PFX generated for krbtgt (context: need PKINIT to convert)";
+    let result = Some(json!({
+        "vuln_id": vuln_id,
+        "summary": "Wrote msDS-KeyCredentialLink and exported the PFX; need help converting it.",
+        "tool_outputs": [
+            {"name": "pywhisker",
+             "output": "[+] Updated the msDS-KeyCredentialLink attribute of the target object\n\
+                        [+] Saved PFX (#PKCS12) certificate & key at path: /tmp/krbtgt.pfx"}
+        ]
+    }));
+
+    let has_acl_evidence =
+        is_acl_mutation_vuln(vuln_id) && result_has_acl_mutation_evidence(&result);
+    let assisted_with_evidence = error_indicates_assistance(Some(err))
+        && !result_text_indicates_failure(&result)
+        && has_acl_evidence;
+
+    assert!(
+        !assisted_with_evidence,
+        "this is the live op-20260730-213328 failure: the agent said it could not convert the PFX, so there is nothing to credit"
+    );
+}
+
+#[test]
+fn assisted_terminal_acl_write_still_credits() {
+    use super::{
+        error_indicates_assistance, is_acl_mutation_vuln, result_has_acl_mutation_evidence,
+        result_text_indicates_failure,
+    };
+    let vuln_id = "acl_genericall_alice_bob";
+    let err = "Assistance needed: granted rights but cannot pick the next edge (context: ...)";
+    let result = Some(json!({
+        "vuln_id": vuln_id,
+        "summary": "Granted GenericAll on the target.",
+        "tool_outputs": [
+            {"name": "bloodyad_add_genericall",
+             "output": "[+] alice has now GenericAll on bob"}
+        ]
+    }));
+
+    let has_acl_evidence =
+        is_acl_mutation_vuln(vuln_id) && result_has_acl_mutation_evidence(&result);
+    let assisted_with_evidence = error_indicates_assistance(Some(err))
+        && !result_text_indicates_failure(&result)
+        && has_acl_evidence;
+
+    assert!(
+        assisted_with_evidence,
+        "an ACL write that is itself the objective must keep crediting — the marker split must not undo #327"
+    );
+}
+
+#[test]
+fn assisted_acl_write_without_evidence_stays_failed() {
+    use super::{
+        error_indicates_assistance, is_acl_mutation_vuln, result_has_acl_mutation_evidence,
+    };
+    let vuln_id = "acl_genericall_alice_krbtgt";
+    let err =
+        "Assistance needed: pywhisker shadow credentials failed: invalidCredentials (context: ...)";
+    let result = Some(json!({
+        "vuln_id": vuln_id,
+        "tool_outputs": [
+            {"name": "pywhisker",
+             "output": "[-] pywhisker error: invalidCredentials binding to LDAP"}
+        ]
+    }));
+
+    let has_acl_evidence =
+        is_acl_mutation_vuln(vuln_id) && result_has_acl_mutation_evidence(&result);
+    assert!(error_indicates_assistance(Some(err)));
+    assert!(
+        !has_acl_evidence,
+        "an assistance request with no confirmed write must NOT be credited"
+    );
+}
+
+#[test]
+fn acl_evidence_empty_payload() {
+    use super::result_has_acl_mutation_evidence;
+    assert!(!result_has_acl_mutation_evidence(&None));
+    assert!(!result_has_acl_mutation_evidence(&Some(json!({}))));
 }
 
 #[test]
@@ -1351,12 +1970,31 @@ mod emit_gmsa_exploit_token {
     }
 
     #[tokio::test]
-    async fn marks_exploited_for_gmsa_principal() {
+    async fn marks_exploited_for_gmsa_principal_read_by_a_gmsa_tool() {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
-        emit_gmsa_exploit_token_if_gmsa(&state, &q, "gmsaDragon$").await;
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "gmsaDragon$", "gmsa_dump_passwords").await;
         let s = state.read().await;
         assert!(s.exploited_vulnerabilities.contains("gmsa_gmsadragon"));
+    }
+
+    #[tokio::test]
+    async fn marks_exploited_for_bloodyad_managed_password_read() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "gmsaDragon$", "gmsa_read_password_bloodyad")
+            .await;
+        let s = state.read().await;
+        assert!(s.exploited_vulnerabilities.contains("gmsa_gmsadragon"));
+    }
+
+    #[tokio::test]
+    async fn no_op_for_gmsa_hash_arriving_from_dcsync() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "gmsaDragon$", "secretsdump").await;
+        let s = state.read().await;
+        assert!(s.exploited_vulnerabilities.is_empty());
     }
 
     #[tokio::test]
@@ -1364,7 +2002,7 @@ mod emit_gmsa_exploit_token {
         // DC01$ ends with `$` but is not a gMSA — no token should be emitted.
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
-        emit_gmsa_exploit_token_if_gmsa(&state, &q, "DC01$").await;
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "DC01$", "gmsa_dump_passwords").await;
         let s = state.read().await;
         assert!(s.exploited_vulnerabilities.is_empty());
     }
@@ -1373,7 +2011,7 @@ mod emit_gmsa_exploit_token {
     async fn no_op_for_regular_user() {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
-        emit_gmsa_exploit_token_if_gmsa(&state, &q, "alice").await;
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "alice", "gmsa_dump_passwords").await;
         let s = state.read().await;
         assert!(s.exploited_vulnerabilities.is_empty());
     }
@@ -1382,9 +2020,71 @@ mod emit_gmsa_exploit_token {
     async fn token_normalized_lowercase_for_mixed_case_input() {
         let state = SharedState::new("op-1".to_string());
         let q = mock_queue();
-        emit_gmsa_exploit_token_if_gmsa(&state, &q, "GMSA_WEB$").await;
+        emit_gmsa_exploit_token_if_gmsa(&state, &q, "GMSA_WEB$", "gmsa_dump_passwords").await;
         let s = state.read().await;
         assert!(s.exploited_vulnerabilities.contains("gmsa_gmsa_web"));
+    }
+}
+
+mod seimpersonate_publish_only_contract {
+    use super::super::build_seimpersonate_vuln;
+    use crate::orchestrator::state::SharedState;
+    use crate::orchestrator::task_queue::TaskQueueCore;
+    use ares_core::state::mock_redis::MockRedisConnection;
+
+    fn mock_queue() -> TaskQueueCore<MockRedisConnection> {
+        TaskQueueCore::from_connection(MockRedisConnection::new())
+    }
+
+    #[tokio::test]
+    async fn publish_records_vuln_without_marking_exploited() {
+        let state = SharedState::new("op-1".to_string());
+        let q = mock_queue();
+
+        let vuln = build_seimpersonate_vuln("web01", Some("192.168.58.10"));
+        let vuln_id = vuln.vuln_id.clone();
+        assert_eq!(vuln_id, "seimpersonate_web01");
+        assert_eq!(vuln.vuln_type, "seimpersonate");
+        assert_eq!(vuln.recommended_agent, "privesc");
+
+        let added = state.publish_vulnerability(&q, vuln).await.unwrap();
+        assert!(added, "seimpersonate vuln should publish cleanly");
+
+        let s = state.read().await;
+        assert!(
+            s.discovered_vulnerabilities.contains_key(&vuln_id),
+            "vuln must be discoverable as a lead for the privesc agent"
+        );
+        assert!(
+            !s.exploited_vulnerabilities.contains(&vuln_id),
+            "publishing a seimpersonate lead MUST NOT credit exploitation \
+             (no on-target primitive can actually escalate to SYSTEM here)"
+        );
+    }
+
+    #[tokio::test]
+    async fn vuln_id_falls_back_to_host_label_when_ip_missing() {
+        let vuln = build_seimpersonate_vuln("web01", None);
+        assert_eq!(vuln.vuln_id, "seimpersonate_web01");
+        assert_eq!(vuln.target, "web01");
+        assert!(!vuln.details.contains_key("target_ip"));
+    }
+
+    #[tokio::test]
+    async fn note_documents_lead_only_status() {
+        let vuln = build_seimpersonate_vuln("web01", Some("192.168.58.20"));
+        let note = vuln
+            .details
+            .get("note")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        assert!(
+            note.contains("lead") && !note.contains("potato"),
+            "note should mark the vuln as a lead-only observation and MUST NOT \
+             promise potato-family exploitation (no on-target execution primitive \
+             exists) — got: {note}"
+        );
     }
 }
 
@@ -1576,7 +2276,50 @@ fn roast_token_recognises_kerberoast_hash() {
             "sql_svc",
             "contoso.local",
         ),
-        Some("kerberoast_sql_svc".to_string())
+        Some("kerberoast_contoso.local_sql_svc".to_string())
+    );
+}
+
+#[test]
+fn kerberoast_token_separates_the_same_account_in_two_forests() {
+    use super::roast_exploit_token;
+    let child = roast_exploit_token(
+        "$krb5tgs$23$*svc_sql$CHILD.CONTOSO.LOCAL$cifs/dc02...",
+        "svc_sql",
+        "child.contoso.local",
+    );
+    let forest_b = roast_exploit_token(
+        "$krb5tgs$23$*svc_sql$FABRIKAM.LOCAL$cifs/dc01...",
+        "svc_sql",
+        "fabrikam.local",
+    );
+    assert_eq!(
+        child,
+        Some("kerberoast_child.contoso.local_svc_sql".to_string())
+    );
+    assert_eq!(
+        forest_b,
+        Some("kerberoast_fabrikam.local_svc_sql".to_string())
+    );
+    assert_ne!(child, forest_b);
+}
+
+#[test]
+fn kerberoast_token_falls_back_to_the_bare_account_without_a_realm() {
+    use super::roast_exploit_token;
+    assert_eq!(
+        roast_exploit_token("$krb5tgs$23$*svc_sql$", "svc_sql", "   "),
+        Some("kerberoast_svc_sql".to_string())
+    );
+}
+
+#[test]
+fn kerberoast_token_keeps_the_scoreboard_prefix() {
+    use super::roast_exploit_token;
+    let token = roast_exploit_token("$krb5tgs$23$*", "svc_sql", "contoso.local").unwrap();
+    assert!(
+        token.starts_with("kerberoast_"),
+        "dreadgoad credits on the `kerberoast_` prefix — {token} would score as `other`"
     );
 }
 
@@ -1625,20 +2368,125 @@ fn roast_token_returns_none_when_both_user_and_domain_empty() {
     assert_eq!(roast_exploit_token("$krb5tgs$23$...", "", "dom"), None);
 }
 
+#[tokio::test]
+async fn roast_token_realm_folds_a_flat_name_onto_the_fqdn() {
+    use super::{roast_exploit_token, roast_token_realm};
+    use crate::orchestrator::state::SharedState;
+
+    let state = SharedState::new("op-1".to_string());
+    state
+        .write()
+        .await
+        .domains
+        .push("child.contoso.local".to_string());
+
+    let from_fqdn = roast_token_realm(&state, "CHILD.CONTOSO.LOCAL").await;
+    let from_flat = roast_token_realm(&state, "CHILD").await;
+    assert_eq!(from_fqdn, "child.contoso.local");
+    assert_eq!(
+        from_flat, from_fqdn,
+        "a NetBIOS capture and an FQDN capture of the same realm must key one token"
+    );
+    assert_eq!(
+        roast_exploit_token("$krb5tgs$23$*", "svc_sql", &from_flat),
+        roast_exploit_token("$krb5tgs$23$*", "svc_sql", &from_fqdn)
+    );
+}
+
+#[tokio::test]
+async fn roast_token_realm_keeps_an_unknown_label_rather_than_guessing() {
+    use super::roast_token_realm;
+    use crate::orchestrator::state::SharedState;
+
+    let state = SharedState::new("op-1".to_string());
+    assert_eq!(roast_token_realm(&state, " FABRIKAM ").await, "fabrikam");
+    assert_eq!(roast_token_realm(&state, "  ").await, "");
+}
+
+#[test]
+fn roast_credit_record_is_keyed_by_the_token_it_witnesses() {
+    use super::{roast_credit_record, roast_exploit_token};
+    let token = roast_exploit_token("$krb5tgs$23$*", "svc_sql", "contoso.local").unwrap();
+    let record = roast_credit_record(&token, "svc_sql", "contoso.local", "kerberoast", "netexec");
+    assert_eq!(
+        record.vuln_id, token,
+        "the record only closes the orphan credit if its id is the credited id"
+    );
+}
+
+#[test]
+fn roast_credit_record_carries_the_capture_evidence() {
+    use super::roast_credit_record;
+    let record = roast_credit_record(
+        "kerberoast_contoso.local_svc_sql",
+        "svc_sql",
+        "contoso.local",
+        "kerberoast",
+        "impacket_getuserspns",
+    );
+    assert_eq!(record.vuln_type, "kerberoast");
+    assert_eq!(record.target, "svc_sql");
+    assert_eq!(record.details["account"], "svc_sql");
+    assert_eq!(record.details["domain"], "contoso.local");
+    assert_eq!(record.details["hash_type"], "kerberoast");
+    assert_eq!(record.details["captured_by"], "impacket_getuserspns");
+}
+
+#[test]
+fn asrep_credit_record_targets_the_domain_the_token_names() {
+    use super::{roast_credit_record, roast_exploit_token};
+    let token = roast_exploit_token("$krb5asrep$23$alice@", "alice", "contoso.local").unwrap();
+    let record = roast_credit_record(&token, "alice", "contoso.local", "asrep_roast", "netexec");
+    assert_eq!(token, "asrep_roast_contoso.local");
+    assert_eq!(record.vuln_type, "asrep_roast");
+    assert_eq!(record.target, "contoso.local");
+    assert_eq!(record.details["account"], "alice");
+}
+
+#[test]
+fn asrep_credit_record_targets_the_account_without_a_realm() {
+    use super::roast_credit_record;
+    let record = roast_credit_record("asrep_roast_alice", "alice", "", "asrep_roast", "netexec");
+    assert_eq!(record.target, "alice");
+}
+
+#[test]
+fn roast_credit_record_is_a_witness_not_a_work_item() {
+    use super::roast_credit_record;
+    let record = roast_credit_record(
+        "kerberoast_contoso.local_svc_sql",
+        "svc_sql",
+        "contoso.local",
+        "kerberoast",
+        "netexec",
+    );
+    assert!(
+        record.priority > 3,
+        "priority must stay above ops loot's EXPLOITABLE_PRIORITY_MAX so an \
+         already-proven primitive is not tabled as outstanding work, and above \
+         the head of the exploitation ZSET so nothing pops it before the \
+         caller marks it exploited"
+    );
+    assert!(
+        crate::orchestrator::exploitation::is_automation_owned_vuln(&record.vuln_type),
+        "{} would be dispatched by the generic exploitation workflow, \
+         re-attacking a primitive that already succeeded",
+        record.vuln_type
+    );
+}
+
 #[test]
 fn roast_token_lowercases_account_and_domain() {
     use super::roast_exploit_token;
     assert_eq!(
         roast_exploit_token("$krb5tgs$23$*", "SQL_SVC", "CONTOSO.LOCAL"),
-        Some("kerberoast_sql_svc".to_string())
+        Some("kerberoast_contoso.local_sql_svc".to_string())
     );
     assert_eq!(
         roast_exploit_token("$krb5asrep$23$", "Alice", "Contoso.Local"),
         Some("asrep_roast_contoso.local".to_string())
     );
 }
-
-// ── result_has_ntlmv1_signal ──────────────────────────────────────────
 
 #[test]
 fn ntlmv1_signal_none_payload_is_false() {
@@ -1716,8 +2564,6 @@ fn ntlmv1_signal_ignores_scalar_output_field() {
     assert!(!result_has_ntlmv1_signal(&Some(p)));
 }
 
-// ── result_has_seimpersonate_signal ────────────────────────────────────
-
 #[test]
 fn seimpersonate_signal_recognises_enabled_row() {
     use super::result_has_seimpersonate_signal;
@@ -1773,8 +2619,6 @@ fn seimpersonate_signal_ignores_scalar_output_field() {
     assert!(!result_has_seimpersonate_signal(&Some(p)));
 }
 
-// ── result_has_ccache_evidence ─────────────────────────────────────────
-
 #[test]
 fn ccache_evidence_recognises_canonical_saving_line() {
     use super::result_has_ccache_evidence;
@@ -1814,8 +2658,6 @@ fn ccache_evidence_ignores_scalar_output_field() {
     let p = json!({"output": "Saving ticket in admin.ccache"});
     assert!(!result_has_ccache_evidence(&Some(p)));
 }
-
-// ── result_text_indicates_failure ──────────────────────────────────────
 
 #[test]
 fn text_failure_recognises_summary_failure_prefixes() {
@@ -1870,8 +2712,6 @@ fn text_failure_none_payload_false() {
     assert!(!result_text_indicates_failure(&None));
 }
 
-// ── parse_lockout_principal ─────────────────────────────────────────────
-
 #[test]
 fn parse_lockout_principal_canonical_netexec_line() {
     use super::parse_lockout_principal;
@@ -1915,8 +2755,6 @@ fn parse_lockout_principal_empty_user_or_domain_rejected() {
     let line = "[-] CONTOSO\\:pw STATUS_ACCOUNT_LOCKED_OUT";
     assert!(parse_lockout_principal(line).is_none());
 }
-
-// ── extract_locked_usernames_from_result ────────────────────────────────
 
 #[test]
 fn locked_usernames_walks_tool_outputs_strings() {
@@ -2008,7 +2846,51 @@ mod reconcile_extracted_credential_domain {
             description: String::new(),
             is_admin: false,
             source: "kerberos_enum".to_string(),
+            member_of: Vec::new(),
         }
+    }
+
+    fn user_from(username: &str, domain: &str, source: &str) -> User {
+        User {
+            source: source.to_string(),
+            ..user(username, domain)
+        }
+    }
+
+    #[test]
+    fn a_model_authored_user_cannot_rewrite_a_parser_credential_realm() {
+        let users = vec![user_from(
+            "alice",
+            "fabrikam.local",
+            "asrep_roastable_finding",
+        )];
+        assert_eq!(
+            reconcile_extracted_credential_domain(&users, "alice", "contoso.local"),
+            None,
+            "report_finding is a model assertion and must not repoint a parsed credential"
+        );
+    }
+
+    #[test]
+    fn a_parser_derived_user_still_corrects_the_realm() {
+        let users = vec![user_from("alice", "child.contoso.local", "ldap_extraction")];
+        assert_eq!(
+            reconcile_extracted_credential_domain(&users, "alice", "contoso.local"),
+            Some("child.contoso.local".to_string())
+        );
+    }
+
+    #[test]
+    fn a_model_authored_user_does_not_mask_a_parser_derived_one() {
+        let users = vec![
+            user_from("alice", "fabrikam.local", "asrep_roastable_finding"),
+            user_from("alice", "child.contoso.local", "ldap_extraction"),
+        ];
+        assert_eq!(
+            reconcile_extracted_credential_domain(&users, "alice", "contoso.local"),
+            Some("child.contoso.local".to_string()),
+            "the model-authored row must be ignored, not treated as an ambiguity"
+        );
     }
 
     #[test]
@@ -2084,6 +2966,7 @@ mod reconcile_low_trust_credential_domain {
             description: String::new(),
             is_admin: false,
             source: "kerberos_enum".to_string(),
+            member_of: Vec::new(),
         }
     }
 
@@ -2091,7 +2974,7 @@ mod reconcile_low_trust_credential_domain {
         Credential {
             id: "c1".to_string(),
             username: username.to_string(),
-            password: "_L0ngCl@w_".to_string(),
+            password: "P@ssw0rd!".to_string(),
             domain: domain.to_string(),
             source: source.to_string(),
             discovered_at: None,
@@ -2138,7 +3021,6 @@ mod reconcile_low_trust_credential_domain {
     }
 }
 
-// ── collect_result_text_parts ─────────────────────────────────────────────
 //
 // `collect_result_text_parts` pulls trusted tool stdout out of the
 // `tool_outputs` array, ignoring top-level `output` / `summary` prose fields
@@ -2207,8 +3089,6 @@ fn collect_result_text_parts_skips_non_string_and_non_object_entries() {
     assert_eq!(parts, vec!["kept"]);
 }
 
-// ── is_low_trust_realm_inferred_credential_source ──────────────────────────
-
 #[test]
 fn low_trust_sources_are_recognised() {
     use super::is_low_trust_realm_inferred_credential_source;
@@ -2246,4 +3126,719 @@ fn high_trust_sources_are_not_recognised() {
             "{src} should not be low-trust"
         );
     }
+}
+
+#[test]
+fn auto_trust_follow_skips_dcsync_chain_for_sid_filtered_target() {
+    use super::is_dcsync_chain_blocked_by_sid_filter;
+    use crate::orchestrator::state::StateInner;
+    let mut state = StateInner::new("op-test".into());
+    state.trusted_domains.insert(
+        "fabrikam.local".into(),
+        ares_core::models::TrustInfo {
+            domain: "fabrikam.local".into(),
+            flat_name: "FABRIKAM".into(),
+            direction: "bidirectional".into(),
+            trust_type: "forest".into(),
+            sid_filtering: true,
+            security_identifier: None,
+        },
+    );
+    assert!(is_dcsync_chain_blocked_by_sid_filter(
+        &state,
+        "fabrikam.local"
+    ));
+    // Case-insensitive lookup.
+    assert!(is_dcsync_chain_blocked_by_sid_filter(
+        &state,
+        "FABRIKAM.LOCAL"
+    ));
+}
+
+#[test]
+fn dcsync_chain_not_blocked_when_sid_filter_off() {
+    use super::is_dcsync_chain_blocked_by_sid_filter;
+    use crate::orchestrator::state::StateInner;
+    let mut state = StateInner::new("op-test".into());
+    state.trusted_domains.insert(
+        "fabrikam.local".into(),
+        ares_core::models::TrustInfo {
+            domain: "fabrikam.local".into(),
+            flat_name: "FABRIKAM".into(),
+            direction: "bidirectional".into(),
+            trust_type: "forest".into(),
+            sid_filtering: false,
+            security_identifier: None,
+        },
+    );
+    assert!(!is_dcsync_chain_blocked_by_sid_filter(
+        &state,
+        "fabrikam.local"
+    ));
+}
+
+#[test]
+fn dcsync_chain_not_blocked_for_intra_forest_trust() {
+    // child→parent intra-forest trusts may have sid_filtering=true logically
+    // but `is_cross_forest()` is false, so DCSync chain is fine.
+    use super::is_dcsync_chain_blocked_by_sid_filter;
+    use crate::orchestrator::state::StateInner;
+    let mut state = StateInner::new("op-test".into());
+    state.trusted_domains.insert(
+        "child.contoso.local".into(),
+        ares_core::models::TrustInfo {
+            domain: "child.contoso.local".into(),
+            flat_name: "CHILD".into(),
+            direction: "bidirectional".into(),
+            trust_type: "parent_child".into(),
+            sid_filtering: true,
+            security_identifier: None,
+        },
+    );
+    assert!(!is_dcsync_chain_blocked_by_sid_filter(
+        &state,
+        "child.contoso.local"
+    ));
+}
+
+#[test]
+fn dcsync_chain_not_blocked_when_no_trust_metadata() {
+    // Unlike trust-follow (which is conservative re: missing metadata), the
+    // S4U chain has the LDAP-bind ticket regardless — so we only skip the
+    // DCSync when we have *positive evidence* of SID filtering.
+    use super::is_dcsync_chain_blocked_by_sid_filter;
+    use crate::orchestrator::state::StateInner;
+    let state = StateInner::new("op-test".into());
+    assert!(!is_dcsync_chain_blocked_by_sid_filter(
+        &state,
+        "fabrikam.local"
+    ));
+}
+
+// Bug E: AES kerberoast retry + SPN lockout propagation
+
+#[test]
+fn etype_nosupp_detector_matches_canonical_marker() {
+    use super::result_text_indicates_etype_nosupp;
+    let result = Some(serde_json::json!({
+        "tool_outputs": [
+            "Kerberos SessionError: KDC_ERR_ETYPE_NOSUPP(KDC has no support for encryption type)"
+        ]
+    }));
+    assert!(result_text_indicates_etype_nosupp(&result));
+}
+
+#[test]
+fn etype_nosupp_detector_negative() {
+    use super::result_text_indicates_etype_nosupp;
+    let result = Some(serde_json::json!({
+        "tool_outputs": ["TGS-REP captured: $krb5tgs$18$*svc_sql$..."]
+    }));
+    assert!(!result_text_indicates_etype_nosupp(&result));
+}
+
+#[test]
+fn kerberoast_retries_with_aes_after_etype_nosupp() {
+    use super::should_retry_kerberoast_with_aes;
+    let result = Some(serde_json::json!({
+        "tool_outputs": ["[-] KDC_ERR_ETYPE_NOSUPP for svc_sql@fabrikam.local"]
+    }));
+    assert!(should_retry_kerberoast_with_aes(
+        Some("kerberoast"),
+        &result
+    ));
+    assert!(should_retry_kerberoast_with_aes(
+        Some("targeted_kerberoast"),
+        &result
+    ));
+    // Non-kerberoast technique: no retry.
+    assert!(!should_retry_kerberoast_with_aes(
+        Some("password_spray"),
+        &result
+    ));
+    // No technique at all: no retry.
+    assert!(!should_retry_kerberoast_with_aes(None, &result));
+}
+
+#[test]
+fn build_aes_kerberoast_retry_payload_includes_etype_hint() {
+    use crate::orchestrator::automation::credential_access::build_aes_kerberoast_retry_payload;
+    let cred = ares_core::models::Credential {
+        id: "c1".into(),
+        username: "carol".into(),
+        password: "P@ssw0rd!".into(), // pragma: allowlist secret
+        domain: "fabrikam.local".into(),
+        source: "test".into(),
+        discovered_at: None,
+        is_admin: false,
+        parent_id: None,
+        attack_step: 0,
+    };
+    let payload = build_aes_kerberoast_retry_payload(
+        "fabrikam.local",
+        "192.168.58.20",
+        &cred,
+        Some("sql_svc"),
+    );
+    assert_eq!(payload["technique"], "kerberoast");
+    assert_eq!(payload["target_user"], "sql_svc");
+    let etypes = payload["etype_hint"].as_array().expect("etype_hint array");
+    assert!(etypes.iter().any(|v| v == "aes256-cts-hmac-sha1-96"));
+    assert!(etypes.iter().any(|v| v == "aes128-cts-hmac-sha1-96"));
+    assert_eq!(payload["retry_reason"], "kdc_err_etype_nosupp");
+}
+
+#[test]
+fn lockout_on_spn_account_propagates_to_spray_exclusion() {
+    use crate::orchestrator::automation::credential_access::{
+        is_kerberoastable_principal, SPN_LOCKOUT_QUARANTINE_SECS,
+    };
+    use crate::orchestrator::state::StateInner;
+    let mut state = StateInner::new("op-test".into());
+
+    // Register a SPN-bearing account via a kerberoastable_account vuln.
+    let mut details = std::collections::HashMap::new();
+    details.insert(
+        "account_name".into(),
+        serde_json::Value::String("sql_svc".into()),
+    );
+    details.insert(
+        "domain".into(),
+        serde_json::Value::String("fabrikam.local".into()),
+    );
+    state.discovered_vulnerabilities.insert(
+        "v-spn-1".into(),
+        ares_core::models::VulnerabilityInfo {
+            vuln_id: "v-spn-1".into(),
+            vuln_type: "kerberoastable_account".into(),
+            target: "192.168.58.20".into(),
+            discovered_by: "test".into(),
+            discovered_at: chrono::Utc::now(),
+            details,
+            recommended_agent: "credential_access".into(),
+            priority: 2,
+        },
+    );
+    assert!(is_kerberoastable_principal(
+        &state,
+        "sql_svc",
+        "fabrikam.local"
+    ));
+    // Plain non-SPN principal: not flagged.
+    assert!(!is_kerberoastable_principal(
+        &state,
+        "alice",
+        "fabrikam.local"
+    ));
+
+    // Quarantine with the SPN window — verify the expiry is longer than the
+    // 5-min default (300s). 1800s expiry should still be present after a
+    // hypothetical 600s probe.
+    state.quarantine_principal_for("sql_svc", "fabrikam.local", SPN_LOCKOUT_QUARANTINE_SECS);
+    let excluded = state.quarantined_principals_in_domain("fabrikam.local");
+    assert!(
+        excluded.iter().any(|u| u == "sql_svc"),
+        "SPN-bearing principal must land in spray exclusion list, got: {:?}",
+        excluded
+    );
+
+    // Subsequent shorter quarantine must not shrink the 30-min window.
+    state.quarantine_principal("sql_svc", "fabrikam.local"); // 5-min
+    let now = chrono::Utc::now();
+    let key = "sql_svc@fabrikam.local".to_string();
+    let expiry = state
+        .quarantined_principals
+        .get(&key)
+        .copied()
+        .expect("entry");
+    let remaining = (expiry - now).num_seconds();
+    assert!(
+        remaining > 900,
+        "30-min quarantine should still have >15min remaining, got {}s",
+        remaining
+    );
+}
+
+use super::{
+    grants_dacl_write, is_shadow_cred_vuln_type, result_indicates_keycredlink_access_denied,
+};
+
+#[test]
+fn shadow_cred_vuln_type_matches_dispatch_shapes() {
+    for t in [
+        "genericall",
+        "GenericAll",
+        "genericwrite",
+        "writeproperty",
+        "shadow_credentials",
+        "acl_genericall",
+        "acl_writeproperty",
+    ] {
+        assert!(is_shadow_cred_vuln_type(t), "should match: {t}");
+    }
+}
+
+#[test]
+fn shadow_cred_vuln_type_rejects_non_acl_shapes() {
+    for t in [
+        "rbcd",
+        "esc1",
+        "constrained_delegation",
+        "unconstrained_delegation",
+        "forcechangepassword",
+        "allextendedrights", // deliberately excluded — not a valid shadow-cred primitive
+        "acl_allextendedrights",
+        // WriteDacl/WriteOwner never dispatch shadow creds (no property
+        // write); abandoning them here would kill the dacl_edit escalation.
+        "writedacl",
+        "writeowner",
+        "acl_writedacl",
+        "acl_writeowner",
+        "",
+    ] {
+        assert!(!is_shadow_cred_vuln_type(t), "should NOT match: {t}");
+    }
+}
+
+#[test]
+fn grants_dacl_write_only_for_rights_carrying_write_dac() {
+    // GenericAll is full control, so a source denied on
+    // msDS-KeyCredentialLink can still write itself an explicit ACE via
+    // dacl_edit and retry — abandoning it forecloses a live path.
+    assert!(grants_dacl_write("genericall"));
+    assert!(grants_dacl_write("GenericAll"));
+    assert!(grants_dacl_write("acl_genericall"));
+    assert!(grants_dacl_write("writedacl"));
+    assert!(grants_dacl_write("writeowner"));
+
+    // GenericWrite and WriteProperty grant property writes only. A source
+    // denied on the attribute cannot widen its own access, so the denial is
+    // genuinely terminal and abandoning is correct.
+    assert!(!grants_dacl_write("genericwrite"));
+    assert!(!grants_dacl_write("acl_genericwrite"));
+    assert!(!grants_dacl_write("writeproperty"));
+    assert!(!grants_dacl_write("acl_writeproperty"));
+    assert!(!grants_dacl_write("shadow_credentials"));
+    assert!(!grants_dacl_write(""));
+}
+
+#[test]
+fn keycredlink_denied_detects_impacket_insuff_access_rights() {
+    let payload = json!({
+        "tool_outputs": [
+            "[+] Connecting to LDAP",
+            "[!] Result: ldap.INSUFFICIENTACCESSRIGHTS: 00002098: LdapErr: DSID-0C09075A, comment: 000020BD: SecErr on msDS-KeyCredentialLink write"
+        ]
+    });
+    assert!(result_indicates_keycredlink_access_denied(
+        &Some(payload),
+        "operation failed"
+    ));
+}
+
+#[test]
+fn keycredlink_denied_detects_bare_insuff_access_rights_with_attribute() {
+    let payload = json!({
+        "tool_outputs": [
+            "[-] pywhisker error: INSUFF_ACCESS_RIGHTS when writing msDS-KeyCredentialLink for target CB-ATTK1$"
+        ]
+    });
+    assert!(result_indicates_keycredlink_access_denied(
+        &Some(payload),
+        ""
+    ));
+}
+
+#[test]
+fn keycredlink_denied_detects_certipy_no_permission_phrase() {
+    // certipy_shadow surfaces a plain-English refusal without naming the
+    // attribute — treat that phrase alone as a shadow-cred deny.
+    let payload = json!({
+        "tool_outputs": [
+            "[!] certipy: The user has no permission to add a certificate to this account"
+        ]
+    });
+    assert!(result_indicates_keycredlink_access_denied(
+        &Some(payload),
+        ""
+    ));
+}
+
+#[test]
+fn keycredlink_denied_ignores_unrelated_access_denied() {
+    // INSUFF_ACCESS_RIGHTS on a different attribute (servicePrincipalName)
+    // must NOT flip the shadow-cred flag — that's a DACL edge for a
+    // different primitive.
+    let payload = json!({
+        "tool_outputs": [
+            "[-] INSUFF_ACCESS_RIGHTS writing servicePrincipalName"
+        ]
+    });
+    assert!(!result_indicates_keycredlink_access_denied(
+        &Some(payload),
+        ""
+    ));
+}
+
+#[test]
+fn keycredlink_denied_ignores_success_output() {
+    let payload = json!({
+        "tool_outputs": [
+            "[+] Successfully added msDS-KeyCredentialLink to target CB-ATTK1$"
+        ]
+    });
+    assert!(!result_indicates_keycredlink_access_denied(
+        &Some(payload),
+        ""
+    ));
+}
+
+#[test]
+fn keycredlink_denied_accepts_worker_error_string() {
+    // `result.error` at this call site is worker-authored (tool_executor /
+    // result_handler), not LLM-authored — so a worker-reported deny in the
+    // error field IS a real signal and the pre-flight should honor it.
+    assert!(result_indicates_keycredlink_access_denied(
+        &None,
+        "INSUFF_ACCESS_RIGHTS on msDS-KeyCredentialLink for target CB-ATTK1$"
+    ));
+}
+
+/// Shape a `report_finding` payload the way `merge_result_extras` / the
+/// `report_finding` callback produce it: an `llm_findings` array of
+/// `{vulnerabilities: [{vuln_type, target, details}]}` objects.
+fn asrep_finding(vuln: serde_json::Value) -> serde_json::Value {
+    json!({ "llm_findings": [ { "vulnerabilities": [vuln] } ] })
+}
+
+#[test]
+fn asrep_finding_target_names_account() {
+    let payload = asrep_finding(json!({
+        "vuln_type": "asrep_roastable",
+        "target": "alice",
+        "details": {"description": "DoesNotRequirePreAuth set"},
+    }));
+    let users = extract_asrep_roastable_users(&payload, "contoso.local");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "alice");
+    assert_eq!(users[0].domain, "contoso.local");
+    assert_eq!(users[0].source, "asrep_roastable_finding");
+}
+
+#[test]
+fn asrep_finding_details_domain_overrides_default() {
+    let payload = asrep_finding(json!({
+        "vuln_type": "asrep_roastable",
+        "target": "bob",
+        "details": {"domain": "fabrikam.local"},
+    }));
+    let users = extract_asrep_roastable_users(&payload, "contoso.local");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "bob");
+    assert_eq!(users[0].domain, "fabrikam.local");
+}
+
+#[test]
+fn asrep_finding_upn_target_yields_sam_and_realm() {
+    let payload = asrep_finding(json!({
+        "vuln_type": "asrep_roastable",
+        "target": "carol@fabrikam.local",
+    }));
+    let users = extract_asrep_roastable_users(&payload, "contoso.local");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "carol");
+    assert_eq!(users[0].domain, "fabrikam.local");
+}
+
+#[test]
+fn asrep_finding_netbios_qualified_target_strips_domain_prefix() {
+    let payload = asrep_finding(json!({
+        "vuln_type": "asrep_roastable",
+        "target": "CONTOSO\\alice",
+    }));
+    let users = extract_asrep_roastable_users(&payload, "contoso.local");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "alice");
+    // NetBIOS prefix is not a DNS realm — fall back to the task domain.
+    assert_eq!(users[0].domain, "contoso.local");
+}
+
+#[test]
+fn asrep_finding_ip_target_falls_back_to_description() {
+    // The agent put the DC IP in `target`; recover the account from the prose.
+    let payload = asrep_finding(json!({
+        "vuln_type": "asrep_roastable",
+        "target": "192.168.58.10",
+        "details": {"description": "User alice has DoesNotRequirePreAuth enabled."},
+    }));
+    let users = extract_asrep_roastable_users(&payload, "contoso.local");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "alice");
+    assert_eq!(users[0].domain, "contoso.local");
+}
+
+#[test]
+fn asrep_finding_structured_account_field_preferred() {
+    let payload = asrep_finding(json!({
+        "vuln_type": "asrep_roastable",
+        "target": "192.168.58.10",
+        "details": {"account_name": "svc_backup", "domain": "contoso.local"},
+    }));
+    let users = extract_asrep_roastable_users(&payload, "contoso.local");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "svc_backup");
+    assert_eq!(users[0].domain, "contoso.local");
+}
+
+#[test]
+fn asrep_finding_ignores_non_asrep_vuln_types() {
+    let payload = asrep_finding(json!({
+        "vuln_type": "kerberoastable",
+        "target": "svc_sql",
+    }));
+    assert!(extract_asrep_roastable_users(&payload, "contoso.local").is_empty());
+}
+
+#[test]
+fn asrep_finding_machine_account_target_rejected() {
+    // No structured account field and no prose principal; the `$`-suffixed
+    // target is not a roastable user.
+    let payload = asrep_finding(json!({
+        "vuln_type": "asrep_roastable",
+        "target": "DC01$",
+    }));
+    assert!(extract_asrep_roastable_users(&payload, "contoso.local").is_empty());
+}
+
+#[test]
+fn asrep_finding_unresolvable_principal_skipped() {
+    let payload = asrep_finding(json!({
+        "vuln_type": "asrep_roastable",
+        "target": "192.168.58.10",
+        "details": {"description": "Domain controller allows AS-REP roasting."},
+    }));
+    assert!(extract_asrep_roastable_users(&payload, "contoso.local").is_empty());
+}
+
+#[test]
+fn asrep_finding_no_llm_findings_key() {
+    let payload = json!({"discoveries": {"hashes": []}});
+    assert!(extract_asrep_roastable_users(&payload, "contoso.local").is_empty());
+}
+
+#[test]
+fn asrep_finding_case_insensitive_vuln_type() {
+    let payload = asrep_finding(json!({
+        "vuln_type": "ASREP_Roastable",
+        "target": "alice",
+    }));
+    assert_eq!(
+        extract_asrep_roastable_users(&payload, "contoso.local").len(),
+        1
+    );
+}
+
+#[test]
+fn asrep_finding_multiple_findings_all_recovered() {
+    let payload = json!({
+        "llm_findings": [
+            {"vulnerabilities": [{"vuln_type": "asrep_roastable", "target": "alice"}]},
+            {"vulnerabilities": [
+                {"vuln_type": "kerberoastable", "target": "svc_sql"},
+                {"vuln_type": "asrep_roastable", "target": "bob@fabrikam.local"},
+            ]},
+        ]
+    });
+    let users = extract_asrep_roastable_users(&payload, "contoso.local");
+    assert_eq!(users.len(), 2);
+    assert_eq!(users[0].username, "alice");
+    assert_eq!(users[0].domain, "contoso.local");
+    assert_eq!(users[1].username, "bob");
+    assert_eq!(users[1].domain, "fabrikam.local");
+}
+
+//
+// Two paths publish hashes — the parser path in `mod.rs` and the realtime
+// discovery channel in `discovery_polling.rs` — and for the whole life of the
+// corpus they did different amounts of work on success. The realtime channel
+// emitted no timeline event (so `T1558.004` appears zero times in 92 ops
+// despite 145 AS-REP captures), and after that was fixed it still emitted no
+// roast or gMSA exploit token. `credit_published_hash` is the single place all
+// three steps live; these tests fail if a path starts doing its own thing
+// again. Read as source-level parity guards, not behaviour tests — the
+// behaviour needs a live `Dispatcher`, which this module cannot build.
+
+/// Source of the realtime discovery channel, read at compile time.
+const DISCOVERY_POLLING_SRC: &str = include_str!("discovery_polling.rs");
+
+/// Source of the parser path.
+const RESULT_PROCESSING_SRC: &str = include_str!("mod.rs");
+
+#[test]
+fn realtime_hash_publish_routes_through_the_shared_credit_helper() {
+    assert!(
+        DISCOVERY_POLLING_SRC.contains("credit_published_hash("),
+        "the realtime channel stopped routing hash credit through the shared helper"
+    );
+}
+
+#[test]
+fn realtime_hash_publish_does_not_hand_roll_part_of_the_credit() {
+    for partial in [
+        "create_hash_timeline_event(",
+        "emit_gmsa_exploit_token_if_gmsa(",
+        "roast_exploit_token(",
+        "roast_credit_record(",
+    ] {
+        assert!(
+            !DISCOVERY_POLLING_SRC.contains(partial),
+            "the realtime channel calls {partial} directly — that is the drift \
+             that lost AS-REP attribution and roast credit; call \
+             credit_published_hash instead"
+        );
+    }
+}
+
+#[test]
+fn every_hash_credit_step_lives_in_the_shared_helper() {
+    assert!(
+        RESULT_PROCESSING_SRC.contains("pub(crate) async fn credit_published_hash("),
+        "credit_published_hash moved or was renamed"
+    );
+
+    for step in [
+        "create_hash_timeline_event(",
+        "emit_gmsa_exploit_token_if_gmsa(",
+        "roast_exploit_token(",
+        "roast_credit_record(",
+    ] {
+        let calls = RESULT_PROCESSING_SRC.matches(step).count();
+        assert!(
+            calls > 0,
+            "{step} vanished from the credit path entirely — hash credit is now incomplete"
+        );
+    }
+}
+
+#[test]
+fn roast_credit_publishes_its_record_before_it_claims_the_credit() {
+    let publish = RESULT_PROCESSING_SRC
+        .find("roast_credit_record(&token")
+        .expect("credit_published_hash no longer publishes a roast vulnerability record");
+    let mark = RESULT_PROCESSING_SRC
+        .find("mark_exploited(&dispatcher.queue, &token)")
+        .expect("credit_published_hash no longer marks the roast token exploited");
+    assert!(
+        publish < mark,
+        "the record must be published before mark_exploited so the credit is \
+         never an orphan, not even transiently"
+    );
+}
+
+// Credential publish credit parity
+
+const ACL_GRANTS_SRC: &str = include_str!("acl_grants.rs");
+
+const TIMELINE_SRC: &str = include_str!("timeline.rs");
+
+#[test]
+fn no_credential_publish_path_bypasses_the_shared_helper() {
+    for (name, src) in [
+        ("mod.rs", RESULT_PROCESSING_SRC),
+        ("discovery_polling.rs", DISCOVERY_POLLING_SRC),
+    ] {
+        assert!(
+            src.contains("publish_credential_credited("),
+            "{name} stopped routing credential publishes through the shared helper"
+        );
+    }
+
+    // acl_grants.rs is not on the positive list: it publishes no credentials at
+    // all. `bloodyad_set_password` is the only credential a DACL takeover could
+    // mint, and bloodyAD never echoes the value it wrote — the password existed
+    // solely as a tool *argument*, which is model-authored input rather than
+    // parsed output. The negative guards below still apply, so a future edit
+    // cannot quietly reopen that route.
+    for (name, src) in [
+        ("mod.rs", RESULT_PROCESSING_SRC),
+        ("acl_grants.rs", ACL_GRANTS_SRC),
+        ("discovery_polling.rs", DISCOVERY_POLLING_SRC),
+    ] {
+        assert!(
+            !src.contains(".publish_credential("),
+            "{name} publishes a credential directly — that path emits no timeline \
+             event; call publish_credential_credited instead"
+        );
+        assert!(
+            !src.contains("create_credential_timeline_event("),
+            "{name} emits the credential timeline event by hand — the event and the \
+             publish must stay welded together in publish_credential_credited"
+        );
+    }
+}
+
+/// The reset path must not come back by copying `new_password` out of the tool
+/// call. bloodyAD confirms only *that* the password changed, never *to what*.
+///
+/// Matches the argument *read*, not the bare word — the fixture in
+/// `acl_grants.rs` passes `new_password` on purpose, to prove that a confirmed
+/// reset carrying one still yields no credential.
+#[test]
+fn acl_grants_never_reads_a_credential_out_of_tool_arguments() {
+    assert!(
+        !ACL_GRANTS_SRC.contains(r#"arg("new_password")"#),
+        "acl_grants.rs reads new_password out of the tool arguments again — that is \
+         model-authored input, not parsed tool output, and it lands in state.credentials"
+    );
+}
+
+#[test]
+fn acl_grants_credits_no_credential_from_a_model_authored_password() {
+    assert!(
+        !ACL_GRANTS_SRC.contains("publish_credential_credited("),
+        "acl_grants.rs credits a credential again — a bloodyAD reset only proves \
+         the write landed, never what the password now is, so the value could \
+         only have come from the model's own new_password argument"
+    );
+}
+
+#[test]
+fn credential_publish_and_credit_are_welded_in_one_helper() {
+    assert!(
+        TIMELINE_SRC.contains("pub(crate) async fn publish_credential_credited("),
+        "publish_credential_credited moved or was renamed"
+    );
+    assert!(
+        TIMELINE_SRC.contains("\nasync fn create_credential_timeline_event("),
+        "create_credential_timeline_event is no longer private to timeline.rs — \
+         publish paths can call it directly again, which is the drift these \
+         guards exist to prevent"
+    );
+    assert_eq!(
+        TIMELINE_SRC.matches(".publish_credential(").count(),
+        1,
+        "credential publishing escaped the single credited call site"
+    );
+}
+
+#[test]
+fn admin_upgrade_description_names_the_host_the_grant_was_proven_on() {
+    let d = admin_upgrade_description("alice", "contoso.local", Some("192.168.58.20"));
+    assert_eq!(
+        d,
+        "Admin access confirmed: contoso.local\\alice on 192.168.58.20 (Pwn3d!)"
+    );
+    assert!(
+        d.starts_with("Admin access confirmed: "),
+        "the corpus reproduction greps key off this prefix: {d}"
+    );
+}
+
+#[test]
+fn admin_upgrade_description_falls_back_when_the_host_is_unknown() {
+    // `extract_ip_from_line` returns None on a Pwn3d! line with no IP; the
+    // event must still fire rather than losing the grant entirely.
+    let d = admin_upgrade_description("alice", "contoso.local", None);
+    assert_eq!(d, "Admin access confirmed: contoso.local\\alice (Pwn3d!)");
+    assert!(d.starts_with("Admin access confirmed: "), "{d}");
 }

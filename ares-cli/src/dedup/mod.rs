@@ -23,20 +23,25 @@ pub(super) fn strip_trailing_dot(s: &str) -> &str {
     }
 }
 
-/// Auto-generated Windows hostname pattern (`WIN-` + 11 alphanumerics + optional `$`).
-/// Used to filter ghost machine accounts that the agent created itself via
-/// NoPAC / MachineAccountQuota — not real lab hosts, just our own residue.
+/// Auto-generated Windows hostname pattern (`WIN-` + 11 alphanumerics + optional `$`),
+/// the name noPAC gives the machine account it creates.
 static GHOST_MACHINE_ACCOUNT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^WIN-[A-Z0-9]{11}\$?$").unwrap());
 
-/// True if `username` looks like an auto-generated Windows machine account
-/// (e.g. `WIN-G9FWV8ZNSCL$`) — typically agent-created via NoPAC.
+/// True if `username` is a machine account this operation created — either
+/// noPAC's auto-generated name (`WIN-G9FWV8ZNSCL$`) or one minted by
+/// `add_computer` (`ARES-1A2B3C4D$`).
+///
+/// Callers use it to keep our own residue out of loot and to avoid re-attacking
+/// an account we control as though it were a lab target.
 pub(crate) fn is_ghost_machine_account(username: &str) -> bool {
-    GHOST_MACHINE_ACCOUNT_RE.is_match(username.trim())
+    let username = username.trim();
+    GHOST_MACHINE_ACCOUNT_RE.is_match(username)
+        || ares_tools::privesc::is_minted_machine_account(username)
 }
 
 pub(crate) use credentials::{dedup_credentials, sanitize_credentials};
-pub(crate) use domains::normalize_state_domains;
+pub(crate) use domains::{looks_like_workgroup_pseudo_domain, normalize_state_domains};
 pub(crate) use hashes::dedup_hashes;
 pub(crate) use labels::normalize_source_label;
 pub(crate) use users::dedup_users;

@@ -37,6 +37,24 @@ Perform a comprehensive reconnaissance scan of the target.
 {{ state_context }}
 {% endif -%}
 
+## Authentication Failure Handling
+
+LDAP bind failures such as `Invalid credentials (49)` or `data 52e` are
+recoverable task failures, not clarification blockers. Do not call
+`request_assistance` for them. Continue with these fallbacks as applicable:
+
+- If the failed call used `bind_domain` for a cross-domain principal, retry
+  `ldap_search` once without `bind_domain`.
+- If an NTLM hash is available, use `rpcclient_command` with the `hash`
+  parameter; do not pass the hash as a password.
+- If no valid credential works, use anonymous enumeration:
+  `rpcclient_command(target=TARGET, null_session=true, command='enumdomusers')`,
+  `rpcclient_command(target=TARGET, null_session=true, command='enumdomgroups')`,
+  or `enumerate_users(target=TARGET, domain=DOMAIN, null_session=true)`.
+
+If these fallbacks fail, call `task_complete` with a concise summary of the
+commands attempted and the failures observed.
+
 ## Output Requirements
 
 When calling `task_complete`, provide a summary of your findings. Do NOT include hosts, users, credentials, hashes, vulnerabilities, shares, or trusted_domains in your result — these are automatically extracted from tool output by the parser. Just describe what you found:

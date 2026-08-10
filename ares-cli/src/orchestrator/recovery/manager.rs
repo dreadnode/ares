@@ -47,19 +47,25 @@ impl OperationRecoveryManager {
         let mut last_err: Option<anyhow::Error> = None;
 
         for attempt in 1..=MAX_CONNECTION_RETRIES {
-            let queue = match TaskQueue::connect(&self.redis_url, &self.nats_url).await {
+            let queue = match TaskQueue::connect_state_only(&self.redis_url, &self.nats_url).await {
                 Ok(q) => q,
                 Err(e) => {
                     if attempt < MAX_CONNECTION_RETRIES {
+                        // `connect_state_only` opens both Redis and NATS, so a
+                        // failure here can originate from either backend (e.g. a
+                        // transient JetStream error). Don't pin the blame on
+                        // Redis — the wrong label previously read as "Redis
+                        // flapping" when the real fault was on the NATS side.
                         warn!(
                             attempt = attempt,
                             err = %e,
-                            "Redis connection failed, retrying"
+                            "State backend (Redis/NATS) connect failed, retrying"
                         );
                         last_err = Some(e);
                         continue;
                     }
-                    return Err(e).context("Failed to connect to Redis for recovery");
+                    return Err(e)
+                        .context("Failed to connect to state backend (Redis/NATS) for recovery");
                 }
             };
 
@@ -223,7 +229,6 @@ impl OperationRecoveryManager {
                     "Task collected for re-dispatch via LLM submission"
                 );
             } else {
-                // Exceeded max retries
                 task.status = TaskStatus::Failed;
                 task.error = Some(format!(
                     "Pod restart during execution (max retries {} exceeded)",
@@ -239,7 +244,6 @@ impl OperationRecoveryManager {
             }
         }
 
-        // Persist updated pending_tasks back to Redis
         for (task_id, task) in &pending_tasks {
             if let Ok(json) = serde_json::to_string(task) {
                 let _: Result<(), _> = conn.hset(&pending_tasks_key, task_id, &json).await;

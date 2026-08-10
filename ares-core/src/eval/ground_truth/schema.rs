@@ -125,6 +125,11 @@ pub struct EvaluationGroundTruth {
     pub expected_shares: Vec<ExpectedShare>,
     #[serde(default)]
     pub expected_vulnerabilities: Vec<ExpectedVulnerability>,
+    /// Groups of equivalent host identifiers (IP, hostname, short name) so a
+    /// hostname finding can be credited against that host's IP IOC, and vice
+    /// versa.
+    #[serde(default)]
+    pub host_aliases: Vec<Vec<String>>,
 
     /// Minimum acceptable highest pyramid level (default 4).
     #[serde(default = "default_min_pyramid")]
@@ -195,6 +200,7 @@ mod tests {
     fn make_gt() -> EvaluationGroundTruth {
         EvaluationGroundTruth {
             operation_id: "op-1".to_string(),
+            host_aliases: vec![],
             target_ip: "192.168.58.1".to_string(),
             expected_iocs: vec![
                 make_ioc("ip", "192.168.58.1", true),

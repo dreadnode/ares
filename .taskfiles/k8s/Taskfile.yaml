@@ -1,0 +1,213 @@
+---
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+# K8s deployment and cluster-state tasks — mirrors ec2:deploy for the K8s target.
+version: "3"
+
+set: [errexit, pipefail]
+shopt: [globstar]
+
+vars:
+  INFO: '\033[0;34m[INFO]\033[0m'
+  SUCCESS: '\033[0;32m[SUCCESS]\033[0m'
+  ERROR: '\033[0;31m[ERROR]\033[0m'
+  WARN: '\033[1;33m[WARN]\033[0m'
+  ORCH_CONTAINER: '{{.ORCH_CONTAINER | default "orchestrator"}}'
+
+tasks:
+  # ============================================================================
+  # Deploy — build binaries, roll pods, install binaries, sync config.
+  # K8s equivalent of ec2:deploy. Does NOT clear Redis; use k8s:reset for that.
+  # ============================================================================
+  deploy:
+    desc: "Build, rollout, deploy binaries+config to K8s (usage: task k8s:deploy [TEAM=red|blue|all])"
+    vars:
+      TEAM: '{{.TEAM | default "red"}}'
+    cmds:
+      - cmd: echo "=== BUILDING RUST BINARIES ==="
+      - task: :remote:rust:build
+      - cmd: echo "=== PATCHING ORCHESTRATOR WRAPPER ==="
+      - task: :remote:orchestrator:patch-wrapper
+      - cmd: echo "=== ROLLING OUT (team={{.TEAM}}) ==="
+      - task: :remote:rollout
+        vars: { NAMESPACE: "{{.K8S_NAMESPACE}}", TEAM: "{{.TEAM}}" }
+      - cmd: echo "=== DEPLOYING RUST BINARIES (team={{.TEAM}}) ==="
+      - task: :remote:rust:deploy
+        vars: { TEAM: "{{.TEAM}}" }
+      - cmd: echo "=== SYNCING CONFIG ==="
+      - task: sync:config
+
+  # ============================================================================
+  # Reset — kill local CLI sessions and wipe shared Redis state.
+  # Run this before k8s:deploy when you want a clean slate (no leftover ops,
+  # locks, or task queues). No EC2 equivalent — single-box vs shared cluster.
+  # ============================================================================
+  reset:
+    desc: "Kill local CLI sessions and clear Redis (shared cluster state nuke)"
+    cmds:
+      - cmd: |
+          # Kill any running red:multi processes to prevent them from
+          # re-submitting operations after Redis is cleared.
+          LOCAL_PIDS=$(pgrep -f "red:multi" 2>/dev/null || true)
+          if [ -n "$LOCAL_PIDS" ]; then
+            echo "=== STOPPING LOCAL CLI SESSIONS ==="
+            echo "Found running red:multi processes: $LOCAL_PIDS"
+            for pid in $LOCAL_PIDS; do
+              pkill -TERM -P "$pid" 2>/dev/null || true
+              kill -TERM "$pid" 2>/dev/null || true
+            done
+            sleep 1
+            for pid in $LOCAL_PIDS; do
+              if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+              fi
+            done
+            echo "Local CLI sessions stopped"
+          fi
+      - cmd: echo "=== CLEARING REDIS CACHE ==="
+      - task: redis:clear
+
+  # ============================================================================
+  # Config sync — kubectl cp config/ares.yaml into orchestrator + worker pods.
+  # ============================================================================
+  sync:config:
+    desc: "Sync config/ares.yaml to all pods"
+    silent: true
+    cmds:
+      - |
+        echo -e "{{.INFO}} Syncing config to pods in {{.K8S_NAMESPACE}}"
+
+        # Get orchestrator pod
+        ORCH_POD=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+          -l app.kubernetes.io/name=ares-orchestrator \
+          --field-selector=status.phase=Running \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+        # Get worker pods
+        PODS=$(kubectl get pods -n {{.K8S_NAMESPACE}} \
+          -l ares.dreadnode.io/component=red-team \
+          --field-selector=status.phase=Running \
+          -o json | jq -r --arg orch "$ORCH_POD" '.items[] | select(.metadata.labels["ares.dreadnode.io/role"] != "atomic") | select(.metadata.name != $orch) | .metadata.name' | tr '\n' ' ')
+
+        CONFIG_FILE="config/ares.yaml"
+        if [ ! -f "$CONFIG_FILE" ]; then
+          echo -e "{{.WARN}} Config file not found: $CONFIG_FILE"
+          exit 0
+        fi
+
+        # Sync to workers
+        for pod in $PODS; do
+          kubectl exec -n {{.K8S_NAMESPACE}} "$pod" -- mkdir -p /ares/config 2>/dev/null || true
+          if kubectl cp "$CONFIG_FILE" "{{.K8S_NAMESPACE}}/$pod:/ares/config/ares.yaml" 2>/dev/null; then
+            echo -e "{{.SUCCESS}} Config synced to $pod"
+          else
+            echo -e "{{.WARN}} Failed to sync config to $pod"
+          fi
+        done
+
+        # Sync to orchestrator
+        if [ -n "$ORCH_POD" ]; then
+          kubectl exec -n {{.K8S_NAMESPACE}} "$ORCH_POD" -c {{.ORCH_CONTAINER}} -- mkdir -p /ares/config 2>/dev/null || true
+          if kubectl cp "$CONFIG_FILE" "{{.K8S_NAMESPACE}}/$ORCH_POD:/ares/config/ares.yaml" -c {{.ORCH_CONTAINER}} 2>/dev/null; then
+            echo -e "{{.SUCCESS}} Config synced to orchestrator"
+          else
+            echo -e "{{.WARN}} Failed to sync config to orchestrator"
+          fi
+        fi
+
+        echo -e "{{.SUCCESS}} Config sync complete"
+
+  # ============================================================================
+  # Redis — inspect and clear shared multi-agent state.
+  # ============================================================================
+  redis:clear:
+    desc: "Clear multi-agent Redis operation cache (DANGEROUS: drops ops/locks/status)"
+    silent: true
+    cmds:
+      - |
+        set -euo pipefail
+        echo "Clearing Redis operation cache in namespace {{.K8S_NAMESPACE}}"
+
+        . .taskfiles/k8s/scripts/resolve.sh
+        REDIS_POD=$(resolve_pod "{{.K8S_NAMESPACE}}" "app=redis") || exit 1
+
+        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+        REDIS_ENV=()
+        if [ -n "$REDIS_PASS" ]; then
+          REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
+        fi
+
+        # Helper function to run redis-cli commands
+        redis_cmd() {
+          kubectl exec -n {{.K8S_NAMESPACE}} "$REDIS_POD" -- "${REDIS_ENV[@]}" redis-cli "$@"
+        }
+
+        # Verify we can write to Redis before proceeding
+        TEST_KEY="ares:clear:test:$$"
+        if ! redis_cmd set "$TEST_KEY" "test" EX 5 >/dev/null 2>&1; then
+          echo "ERROR: Cannot write to Redis. Are we connected to a read-only replica?"
+          echo "Master host: ${REDIS_HOST:-direct}"
+          exit 1
+        fi
+        redis_cmd del "$TEST_KEY" >/dev/null 2>&1 || true
+
+        # Lua script: SCAN + UNLINK in a single Redis call (avoids per-key kubectl exec)
+        LUA_DEL='local cursor="0" local count=0 repeat local r=redis.call("SCAN",cursor,"MATCH",ARGV[1],"COUNT",200) cursor=r[1] if #r[2]>0 then redis.call("UNLINK",unpack(r[2])) count=count+#r[2] end until cursor=="0" return count'
+        for pattern in "ares:operation:*:state" "ares:operation:*:checkpoint_time" "ares:operations:*:status" "ares:lock:*" "ares:tasks:*" "ares:results:*"; do
+          count=$(redis_cmd eval "$LUA_DEL" 0 "$pattern" 2>/dev/null || echo "0")
+          echo "Cleared $pattern ($count keys)"
+        done
+
+        # Clear additional keys
+        for key in ares:operations ares:operation:active; do
+          redis_cmd del "$key" >/dev/null 2>&1 || true
+          echo "Cleared $key"
+        done
+
+        # Clear op-specific keys (meta, task queues, etc.)
+        for pattern in "ares:op:*" "ares:tool_exec:*"; do
+          count=$(redis_cmd eval "$LUA_DEL" 0 "$pattern" 2>/dev/null || echo "0")
+          if [ "$count" != "0" ]; then
+            echo "Cleared $pattern ($count keys)"
+          fi
+        done
+
+        echo "Redis cleared"
+
+  redis:list:
+    desc: "List multi-agent Redis operations, statuses, and locks"
+    silent: true
+    cmds:
+      - |
+        set -euo pipefail
+        . .taskfiles/k8s/scripts/resolve.sh
+        REDIS_POD=$(resolve_pod "{{.K8S_NAMESPACE}}" "app=redis") || exit 1
+
+        REDIS_PASS=$(kubectl get secret redis-secret -n {{.K8S_NAMESPACE}} -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+        REDIS_ENV=()
+        if [ -n "$REDIS_PASS" ]; then
+          REDIS_ENV=(env REDISCLI_AUTH="$REDIS_PASS")
+        fi
+
+        echo "ares:operations queue (operation_ids):"
+        queue=$(kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli lrange ares:operations 0 -1)
+        if [ -z "$queue" ]; then
+          echo "  (empty)"
+        else
+          echo "$queue" | sed -n 's/.*"operation_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/  \1/p'
+        fi
+
+        echo ""
+        echo "operation status keys:"
+        keys=$(kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli --scan --pattern "ares:operations:*:status")
+        if [ -z "$keys" ]; then
+          echo "  (none)"
+        else
+          for key in $keys; do
+            val=$(kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli get "$key")
+            echo "  $key -> $val"
+          done
+        fi
+
+        echo ""
+        echo "operation locks:"
+        kubectl exec -n {{.K8S_NAMESPACE}} $REDIS_POD -- "${REDIS_ENV[@]}" redis-cli --scan --pattern "ares:lock:*" || true

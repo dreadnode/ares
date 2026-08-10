@@ -41,7 +41,6 @@ sources:
       path: ../../../ansible
 
 provisioners:
-  # Install pipx and Ansible
   - type: shell
     inline:
       - apt-get update
@@ -58,12 +57,24 @@ provisioners:
     source: ${sources.ansible}
     destination: /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range
 
-  # Install NVIDIA drivers for GPU-accelerated hashcat on g4dn (T4 GPU)
+  # NVIDIA driver for GPU-accelerated hashcat on g4dn (T4).
+  # Install the in-sync cloud kernel meta + headers, then the driver WITH
+  # recommends (NOT --no-install-recommends: it strips nvidia-smi + the GPU
+  # compute stack) + clinfo. DKMS builds the module for the installed kernel.
+  #
+  # KNOWN LIMITATION: GPU *compute* only works after a reboot into that kernel.
+  # EC2 Image Builder cannot reboot the Kali builder mid-build (exit 194 ->
+  # workflow CANCELLED, the builder's SSM agent doesn't rejoin), so an AMI built
+  # purely from this template enumerates the T4 but hashcat hangs on kernel build.
+  # The canonical, GPU-VERIFIED golden is produced by
+  # scripts/build-ares-golden-ami.sh (launch -> driver -> reboot -> tools ->
+  # create-image). Keep this template for the tooling layer / reference.
   - type: shell
     inline:
       - apt-get update
-      - apt-get install -y --no-install-recommends nvidia-driver firmware-misc-nonfree
-      - nvidia-smi || echo "nvidia-smi not available during AMI build (expected if no GPU attached)"
+      - DEBIAN_FRONTEND=noninteractive apt-get install -y linux-image-cloud-amd64 linux-headers-cloud-amd64 dkms
+      - DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver nvidia-opencl-icd clinfo firmware-misc-nonfree
+      - dkms status
 
   # Attack Box - all red team tools + Alloy telemetry
   # NOTE: Using shell instead of ansible provisioner because the playbook
@@ -71,17 +82,14 @@ provisioners:
   - type: shell
     inline:
       - PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-galaxy collection install -r /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/requirements.yml --force
-      - HOME=/root ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-playbook /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/playbooks/ares/goad_attack_box.yml -i localhost, -c local -e ansible_shell_executable=/bin/bash -e ansible_python_interpreter=/usr/bin/python3 -e cracking_tools_gpu_support=true -e cracking_tools_hashcat_from_source=true -e cracking_tools_nvidia_opencl_icd=true
+      # Driver already installed in the previous step. Tell cracking_tools NOT to
+      # reinstall it (reboots mid-component, kills this local run). Enable the
+      # CUDA backend via cracking_tools_install_cuda_toolkit — it now pulls just
+      # libnvrtc from NVIDIA's PyPI wheel (the Debian nvidia-cuda-toolkit package
+      # isn't in Kali's archive), so hashcat uses the native CUDA backend rather
+      # than the slower OpenCL fallback. hashcat from apt, not source.
+      - HOME=/root ANSIBLE_REMOTE_TMP=/tmp/ansible-tmp-$USER PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin ansible-playbook /root/.ansible/collections/ansible_collections/dreadnode/nimbus_range/playbooks/ares/goad_attack_box.yml -i localhost, -c local -e ansible_shell_executable=/bin/bash -e ansible_python_interpreter=/usr/bin/python3 -e cracking_tools_gpu_support=true -e cracking_tools_nvidia_opencl_icd=true -e cracking_tools_install_nvidia_driver=false -e cracking_tools_install_cuda_toolkit=true -e cracking_tools_hashcat_from_source=false
 
-  # NVIDIA GPU drivers + CUDA toolkit for hashcat GPU acceleration.
-  # Kernel headers + dkms are required so the nvidia module builds for the
-  # running kernel. The AMI then works on GPU instances (e.g. g4dn.xlarge)
-  # without manual driver setup.
-  - type: shell
-    inline:
-      - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-headers-$(uname -r) dkms nvidia-driver nvidia-cuda-toolkit
-
-  # Cleanup
   - type: shell
     inline:
       - apt-get clean
@@ -90,7 +98,7 @@ provisioners:
 
 targets:
   - type: ami
-    region: us-west-1
+    region: us-east-1
     instance_type: g4dn.xlarge
     ami_name: "ares-golden-image-{{timestamp}}"
     volume_size: 100

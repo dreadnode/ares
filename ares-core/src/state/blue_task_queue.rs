@@ -175,7 +175,7 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> BlueTaskQueueCore<C> {
             .context("BlueTaskQueue has no NATS broker configured")
     }
 
-    // === Queue methods (NATS JetStream) =====================================
+    // Queue methods (NATS JetStream)
 
     /// Submit a task to the global role queue.
     pub async fn submit_task(&mut self, task: &BlueTaskMessage) -> anyhow::Result<()> {
@@ -387,8 +387,6 @@ impl<C: ConnectionLike + Clone + Send + Sync + 'static> BlueTaskQueueCore<C> {
         let info = stream.cached_info();
         Ok(info.state.messages as usize)
     }
-
-    // === Redis-backed state methods ========================================
 
     /// Send a heartbeat for a blue team agent.
     pub async fn send_heartbeat(

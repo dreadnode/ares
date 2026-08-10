@@ -49,7 +49,7 @@ pub struct OperationConfig {
     #[serde(default)]
     pub llm_temperature: Option<f32>,
 
-    // --- Attack-path diversity (see docs/attack-path-diversity.md) ---
+    // Attack-path diversity (see docs/attack-path-diversity.md)
     // All default to today's deterministic behaviour; nothing changes until set.
     /// Queue selection temperature for softmax sampling in `pop_best` /
     /// `pop_next_vuln`. 0.0 = deterministic argmin (current behaviour); higher
@@ -72,6 +72,9 @@ pub struct OperationConfig {
     /// sequence) for coverage measurement. Phase 0 instrumentation; off by default.
     #[serde(default)]
     pub emit_path_records: bool,
+
+    #[serde(default = "default_acl_publish_cap")]
+    pub acl_publish_cap: u32,
 }
 
 /// Cross-run novelty memory configuration (attack-path diversity).
@@ -99,9 +102,9 @@ pub struct AgentConfig {
     #[serde(default = "default_max_steps")]
     pub max_steps: u32,
     #[serde(default)]
-    pub pod_selector: String,
+    pub max_tokens: Option<u32>,
     #[serde(default)]
-    pub capabilities: Vec<String>,
+    pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub tools: Vec<String>,
 }
@@ -293,9 +296,30 @@ mod tests {
         let cfg: AgentConfig = serde_json::from_str(r#"{"model": "openai/gpt-4.1"}"#).unwrap();
         assert_eq!(cfg.model, "openai/gpt-4.1");
         assert_eq!(cfg.max_steps, 100);
-        assert!(cfg.capabilities.is_empty());
         assert!(cfg.tools.is_empty());
     }
+}
+
+/// Optional benchmark snapshot storage settings.
+///
+/// Buckets, regions and profiles are account-specific, so none are compiled
+/// into the binary. The shipped `ares.yaml` omits this section on purpose —
+/// the values belong in `.env`, which is untracked — but a locally-added
+/// section is honoured. `BENCHMARK_*` / `LOKI_S3_*` env vars win over it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BenchmarkConfig {
+    #[serde(default)]
+    pub s3_bucket: String,
+    #[serde(default)]
+    pub aws_profile: String,
+    #[serde(default)]
+    pub aws_region: String,
+    #[serde(default)]
+    pub loki_s3_bucket: String,
+    #[serde(default)]
+    pub loki_s3_region: String,
+    #[serde(default)]
+    pub loki_s3_profile: String,
 }
 
 /// Optional Grafana dashboard integration settings.
@@ -304,11 +328,36 @@ pub struct GrafanaConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
-    pub base_url: String,
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default)]
     pub dashboard_uid: String,
+}
+
+/// Orchestrator behaviour flags.
+///
+/// Both fields are resolved with env-var override precedence at runtime:
+/// `ARES_ORCHESTRATOR_PLANNER` and `ARES_ORCHESTRATOR_MEDIATION` win over
+/// these values, which in turn win over the compiled-in fallbacks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestratorConfig {
+    /// Whether the LLM planner loop creates `orchestrator_plan` tasks.
+    ///
+    /// With this off, no orchestrator turn is ever created, so
+    /// `complete_operation` is never called and the rules are the only
+    /// scheduler.
+    #[serde(default = "default_true")]
+    pub planner_enabled: bool,
+
+    /// Whether the orchestrator reviews and can veto proposed tasks.
+    #[serde(default)]
+    pub mediation_enabled: bool,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            planner_enabled: true,
+            mediation_enabled: false,
+        }
+    }
 }
 
 /// Observability backend URLs for blue team tools.

@@ -32,17 +32,128 @@ pub async fn run_detection_query(args: &Value) -> Result<ToolOutput> {
     let now = chrono::Utc::now();
     let start = now - chrono::Duration::hours(hours_back);
 
+    // Running a catalog template is catalog work whoever dispatched it, so the
+    // results carry the same provenance the deterministic sweep writes. Without
+    // this, an analyst re-running a template has its hits counted as
+    // independent analyst evidence in the report's provenance split.
     let query_args = serde_json::json!({
         "logql": tmpl.logql,
         "start_time": start.to_rfc3339(),
         "end_time": now.to_rfc3339(),
         "limit": 100,
+        "evidence_source": format!(
+            "{}:{query_name}",
+            super::super::evidence_validator::CATALOG_QUERY_SOURCE_PREFIX
+        ),
     });
 
     let mut result = loki::query_logs(&query_args).await?;
     result.stdout = format!("{}\n{}", tmpl.format_header(), result.stdout);
     Ok(result)
 }
+
+/// What a detection template matched, with the event times preserved.
+#[derive(Debug, Clone, Default)]
+pub struct DetectionEvents {
+    pub event_count: usize,
+    /// Earliest matched event — the anchor for "did this detection follow the
+    /// attacker action it is credited to?".
+    pub first_event_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_event_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Hosts the matched events came from, from the stream labels.
+    pub hosts: Vec<String>,
+}
+
+fn scan_start(
+    now: chrono::DateTime<chrono::Utc>,
+    hours_back: i64,
+    not_before: Option<chrono::DateTime<chrono::Utc>>,
+) -> chrono::DateTime<chrono::Utc> {
+    let lookback = now - chrono::Duration::hours(hours_back.min(2));
+    match not_before {
+        Some(nb) if nb > lookback => nb,
+        _ => lookback,
+    }
+}
+
+/// Run a detection template and return its matches with event timestamps.
+///
+/// [`run_detection_query`] answers the same question as formatted text, which
+/// forces callers to scrape a count back out of prose and leaves them with no
+/// event times at all. Correlating a detection against attacker activity needs
+/// both, so this returns the aggregate directly.
+///
+/// An unknown template is an error rather than an empty result — silently
+/// scoring a typo'd template as "no matches" would understate coverage.
+///
+/// `not_before` clamps the scan to an operation's attack window. It can only
+/// narrow the `hours_back` window, never widen it. Without it a detection whose
+/// events straddle the window start reports a `first_event_at` from before the
+/// operation began, and that timestamp is what lands in the investigation
+/// timeline — dating this operation's detections to activity that predates it.
+pub async fn run_detection_query_events(
+    query_name: &str,
+    target_host: Option<&str>,
+    hours_back: i64,
+    not_before: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<DetectionEvents> {
+    let Some(tmpl) = build_detection_template(query_name, target_host) else {
+        anyhow::bail!("Unknown detection template: '{query_name}'");
+    };
+
+    let now = chrono::Utc::now();
+    let start = scan_start(now, hours_back, not_before);
+
+    let entries = loki::query_log_entries(
+        &tmpl.logql,
+        &start.to_rfc3339(),
+        &now.to_rfc3339(),
+        DETECTION_ENTRY_LIMIT,
+    )
+    .await?;
+
+    if !entries.is_empty() {
+        let joined = entries
+            .iter()
+            .map(|e| e.line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        super::super::evidence_validator::store_query_result_from(
+            &joined,
+            &format!(
+                "{}:{query_name}",
+                super::super::evidence_validator::CATALOG_QUERY_SOURCE_PREFIX
+            ),
+        );
+        super::super::evidence_validator::register_grounded_technique(tmpl.mitre_id);
+    }
+
+    let mut hosts: Vec<String> = entries
+        .iter()
+        .filter_map(|e| {
+            HOST_LABEL_KEYS
+                .iter()
+                .find_map(|k| e.labels.get(*k))
+                .cloned()
+        })
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+
+    Ok(DetectionEvents {
+        event_count: entries.len(),
+        first_event_at: entries.first().map(|e| e.timestamp),
+        last_event_at: entries.last().map(|e| e.timestamp),
+        hosts,
+    })
+}
+
+/// Stream labels that carry the originating host, most specific first.
+const HOST_LABEL_KEYS: &[&str] = &["hostname", "host", "computer", "instance", "agent_hostname"];
+
+/// Line cap for a structured detection query. Matches the formatted path's
+/// limit so the two cannot disagree about whether a template fired.
+const DETECTION_ENTRY_LIMIT: i64 = 100;
 
 /// Run multiple detection queries in parallel.
 pub async fn run_parallel_detections(args: &Value) -> Result<ToolOutput> {
@@ -62,7 +173,6 @@ pub async fn run_parallel_detections(args: &Value) -> Result<ToolOutput> {
 
     let mut output_parts = Vec::new();
 
-    // Process in batches
     for batch in query_names.chunks(max_concurrent) {
         let mut handles = Vec::new();
         for name in batch {
@@ -182,4 +292,47 @@ pub async fn get_user_activity(args: &Value) -> Result<ToolOutput> {
         result.stdout
     );
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_start;
+
+    fn t(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn attack_window_start_narrows_the_scan() {
+        let now = t("2026-07-28T01:52:00+00:00");
+        assert_eq!(
+            scan_start(now, 2, Some(t("2026-07-28T01:37:51+00:00"))),
+            t("2026-07-28T01:37:51+00:00")
+        );
+    }
+
+    #[test]
+    fn attack_window_start_never_widens_the_scan() {
+        // A window opening before the lookback must not pull in more history:
+        // the runner's 2h clamp exists because wider Loki queries time out.
+        let now = t("2026-07-28T01:52:00+00:00");
+        assert_eq!(
+            scan_start(now, 2, Some(t("2026-07-01T00:00:00+00:00"))),
+            t("2026-07-27T23:52:00+00:00")
+        );
+    }
+
+    #[test]
+    fn without_a_window_the_lookback_is_unchanged() {
+        let now = t("2026-07-28T01:52:00+00:00");
+        assert_eq!(scan_start(now, 2, None), t("2026-07-27T23:52:00+00:00"));
+    }
+
+    #[test]
+    fn hours_back_stays_clamped_to_two() {
+        let now = t("2026-07-28T01:52:00+00:00");
+        assert_eq!(scan_start(now, 24, None), t("2026-07-27T23:52:00+00:00"));
+    }
 }

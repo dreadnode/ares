@@ -128,7 +128,7 @@ pub async fn auto_ldap_signing(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         .await;
 
                     // Register ldap_signing_disabled vulnerability proactively so
-                    // downstream automations (KrbRelayUp, NTLM relay) can fire
+                    // downstream automations (NTLM relay) can fire
                     // without waiting for the agent's report_finding callback
                     // (which only logs and does NOT populate discovered_vulnerabilities).
                     let vuln = ares_core::models::VulnerabilityInfo {
@@ -162,7 +162,7 @@ pub async fn auto_ldap_signing(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                             info!(
                                 domain = %item.domain,
                                 dc = %item.dc_ip,
-                                "LDAP signing disabled — vulnerability registered for KrbRelayUp"
+                                "LDAP signing disabled — vulnerability registered for NTLM relay"
                             );
                         }
                         Ok(false) => {}

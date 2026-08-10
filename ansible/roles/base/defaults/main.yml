@@ -85,3 +85,16 @@ base_workspace_mode: "0755"
 # Pip configuration
 base_pip_break_system_packages: true
 base_pip_executable: "pip3"
+
+# Host tuning for the Ares worker fleet (OOM cushion).
+# Disabled by default so container/molecule runs skip it; enable on the
+# attack-box AMI (see goad_attack_box.yml). Workers fork heavy tool
+# subprocesses (netexec, hashcat, nmap); without a swap cushion and OOM
+# tuning a runaway process can OOM the whole instance — and take the SSM
+# agent down with it.
+base_configure_swap: false
+base_swap_file: "/swapfile"
+base_swap_size_mb: 4096
+base_oom_tuning: false
+base_vm_swappiness: 10
+base_vm_oom_kill_allocating_task: 1

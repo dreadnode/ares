@@ -50,15 +50,17 @@ pub(crate) fn has_dc_services(host: &Host) -> bool {
 
 /// Full multi-tier DC IP discovery.
 ///
-/// 7 priority tiers:
+/// Priority tiers:
 ///
 /// 0. Cached `domain_controllers` map
-/// 1. Hosts with explicit DC roles matching domain
-/// 2. Hosts with "dc" in hostname matching domain
-/// 3. Hosts with DC services (port 88/389) matching domain
-///    3.5. Forest-based: child domain -> parent DC search
-/// 5. Fallback: any host with DC role (cross-domain)
-/// 6. Last resort: any host with DC services
+/// 1. Zone-apex: a DC whose hostname is *exactly* the domain (wins over the
+///    label-stripping tiers so a child DC isn't claimed for its parent)
+/// 2. Hosts with explicit DC roles matching domain
+/// 3. Hosts with "dc" in hostname matching domain
+/// 4. Hosts with DC services (port 88/389) matching domain
+/// 5. Forest-based: child domain -> parent DC search
+/// 6. Fallback: any host with DC role (cross-domain)
+/// 7. Last resort: any host with DC services
 ///
 /// Tiers 4 (DNS SRV) and 4.5 (LDAP rootDSE) require network calls and
 /// are handled separately by the orchestrator.
@@ -81,6 +83,21 @@ pub fn find_dc_ip(
             tier: DcTier::Cached,
             should_cache: false, // already cached
         });
+    }
+
+    for host in hosts {
+        if (has_dc_role(host) || has_dc_services(host))
+            && host
+                .hostname
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case(&domain_lower)
+        {
+            return Some(DcDiscovery {
+                ip: host.ip.clone(),
+                tier: DcTier::ZoneApex,
+                should_cache: true,
+            });
+        }
     }
 
     // Target check: if target IP matches domain
@@ -224,6 +241,7 @@ pub struct DcDiscovery {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DcTier {
     Cached,
+    ZoneApex,
     Target,
     Role,
     HostnamePattern,
@@ -240,6 +258,7 @@ impl fmt::Display for DcTier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
             Self::Cached => "cached",
+            Self::ZoneApex => "zone_apex",
             Self::Target => "target",
             Self::Role => "role",
             Self::HostnamePattern => "hostname_pattern",
@@ -467,8 +486,6 @@ mod tests {
         assert_eq!(DcTier::LastResort.to_string(), "last_resort");
     }
 
-    // ── Additional tier coverage ────────────────────────────────────
-
     #[test]
     fn find_dc_ip_target_tier_via_ip_match() {
         // Tier "Target": when target_ip matches a host that has DC role/services
@@ -543,6 +560,62 @@ mod tests {
     }
 
     #[test]
+    fn find_dc_ip_zone_apex_does_not_transpose_parent_and_child() {
+        // Regression: both DCs report mangled bare-domain apex hostnames — the
+        // parent DC as `contoso.local` and the child DC as
+        // `child.contoso.local`. The label-stripping tiers alone would claim
+        // the child DC for the parent domain (`child.contoso.local` strips to
+        // `contoso.local`). The zone-apex pass must map each to its own domain.
+        let hosts = vec![
+            // Child DC first so a naive strip would grab it for the parent.
+            make_host("192.168.58.240", "child.contoso.local", true, vec![]),
+            make_host("192.168.58.243", "contoso.local", true, vec![]),
+        ];
+
+        let parent = find_dc_ip(
+            "contoso.local",
+            &hosts,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        )
+        .expect("parent DC");
+        assert_eq!(parent.ip, "192.168.58.243");
+        assert_eq!(parent.tier, DcTier::ZoneApex);
+
+        let child = find_dc_ip(
+            "child.contoso.local",
+            &hosts,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        )
+        .expect("child DC");
+        assert_eq!(child.ip, "192.168.58.240");
+        assert_eq!(child.tier, DcTier::ZoneApex);
+    }
+
+    #[test]
+    fn find_dc_ip_normal_fqdn_not_treated_as_zone_apex() {
+        // A conventional DC FQDN must resolve via the role tier, not zone-apex.
+        let hosts = vec![make_host(
+            "192.168.58.10",
+            "dc01.contoso.local",
+            true,
+            vec![],
+        )];
+        let d = find_dc_ip(
+            "contoso.local",
+            &hosts,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+        )
+        .expect("DC");
+        assert_eq!(d.tier, DcTier::Role);
+    }
+
+    #[test]
     fn find_dc_ip_last_resort_tier() {
         // Tier 6: no domain match anywhere, but some host has DC services.
         let host = make_host(
@@ -571,6 +644,7 @@ mod tests {
         // Cover all DcTier::Display arms so the formatter lines are executed.
         let cases = [
             (DcTier::Cached, "cached"),
+            (DcTier::ZoneApex, "zone_apex"),
             (DcTier::Target, "target"),
             (DcTier::Role, "role"),
             (DcTier::HostnamePattern, "hostname_pattern"),

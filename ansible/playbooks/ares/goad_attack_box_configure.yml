@@ -22,7 +22,16 @@
     alloy_server_id: ""
     alloy_instance_id: ""
     alloy_loki_endpoint: "{{ alloy_loki_endpoint }}"
-    alloy_version: "1.10.1"
+    alloy_version: "1.17.1"
+
+    # Vector S3 store-and-forward shipper (off-LAN path to the home Loki).
+    # Disabled by default; enable + set the bucket/region from the DreadOps
+    # ares-logging terragrunt outputs to ship logs to S3 for the home-cluster
+    # Vector ingestor to replay into Loki. Coexists with Alloy above (Alloy can
+    # keep direct-pushing to a reachable Loki; Vector covers the off-LAN case).
+    vector_s3_enabled: "{{ lookup('env', 'VECTOR_S3_ENABLED') | default(false, true) }}"
+    vector_s3_bucket: "{{ lookup('env', 'VECTOR_S3_BUCKET') | default('', true) }}"
+    vector_s3_region: "{{ lookup('env', 'VECTOR_S3_REGION') | default('us-east-1', true) }}"
 
   roles:
     # Grafana Alloy for log shipping to Loki
@@ -97,6 +106,15 @@
               url = "{{ alloy_loki_endpoint }}"
             }
           }
+
+    # Vector S3 store-and-forward shipper (off-LAN path to the home Loki).
+    - name: Install and configure Vector S3 shipper
+      role: dreadnode.nimbus_range.vector
+      become: true
+      when: vector_s3_enabled | bool
+      vars:
+        vector_deployment_name: "{{ alloy_deployment_name }}"
+        vector_environment: "{{ alloy_env }}"
 
   post_tasks:
     - name: Setup shell history file permissions for Alloy

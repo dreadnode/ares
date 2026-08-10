@@ -7,10 +7,6 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-// =============================================================================
-// Role → Tactic
-// =============================================================================
-
 /// Red team agent role → primary MITRE tactic.
 pub static ROLE_TO_TACTIC: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
@@ -35,9 +31,7 @@ pub static BLUE_ROLE_TO_TACTIC: LazyLock<HashMap<&str, &str>> = LazyLock::new(||
     ])
 });
 
-// =============================================================================
 // Role → Attack Phase
-// =============================================================================
 
 /// Red team agent role → attack phase.
 pub static ROLE_TO_PHASE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
@@ -63,16 +57,13 @@ pub static BLUE_ROLE_TO_PHASE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
     ])
 });
 
-// =============================================================================
 // Tool → MITRE Technique ID
 //
 // Keys MUST match the tool names in ares_tools::dispatch().
-// =============================================================================
 
 /// Tool name → MITRE ATT&CK technique ID.
 pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
-        // ── Reconnaissance / Discovery ──────────────────────────────────
         ("nmap_scan", "T1046"),
         ("smb_sweep", "T1046"),
         ("smb_signing_check", "T1046"),
@@ -90,7 +81,6 @@ pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("adidnsdump", "T1018"),
         ("smbclient_kerberos_shares", "T1135"),
         ("save_users_to_file", "T1087.002"),
-        // ── Credential Access ───────────────────────────────────────────
         ("secretsdump", "T1003.006"),
         ("secretsdump_kerberos", "T1003.006"),
         ("ntds_dit_extract", "T1003.003"),
@@ -113,32 +103,31 @@ pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("username_as_password", "T1110.001"),
         ("check_credman_entries", "T1552.001"),
         ("check_autologon_registry", "T1552.001"),
-        // ── Credential Cracking ─────────────────────────────────────────
         ("crack_with_hashcat", "T1110.002"),
         ("crack_with_john", "T1110.002"),
-        // ── Privilege Escalation ────────────────────────────────────────
         ("certipy_request", "T1649"),
         ("certipy_shadow", "T1556.006"),
         ("certipy_template_esc4", "T1649"),
         ("certipy_esc4_full_chain", "T1649"),
         ("rbcd_write", "T1134.001"),
         ("s4u_attack", "T1134.001"),
+        ("windows_stage_and_run", "T1134.001"),
         ("find_delegation", "T1087.002"),
         ("unconstrained_tgt_dump", "T1558.001"),
         ("unconstrained_coerce_and_capture", "T1558.001"),
         ("generate_golden_ticket", "T1558.001"),
+        ("generate_silver_ticket", "T1558.002"),
         ("add_computer", "T1136.002"),
         ("addspn", "T1098.001"),
-        ("krbrelayup", "T1134.001"),
-        ("raise_child", "T1134.001"),
         ("create_inter_realm_ticket", "T1558.001"),
+        ("forge_inter_realm_and_dump", "T1134.005"),
         ("get_sid", "T1087.002"),
         ("dnstool", "T1484.001"),
         ("nopac", "T1068"),
         ("printnightmare", "T1068"),
         ("petitpotam_unauth", "T1187"),
-        // ── ACL Exploitation ────────────────────────────────────────────
         ("dacl_edit", "T1222.001"),
+        ("owner_edit", "T1222.001"),
         ("bloodyad_add_group_member", "T1098.001"),
         ("bloodyad_set_password", "T1098.001"),
         ("bloodyad_add_genericall", "T1222.001"),
@@ -147,7 +136,6 @@ pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("pywhisker", "T1556.006"),
         ("sharpgpoabuse", "T1484.001"),
         ("pygpoabuse_immediate_task", "T1484.001"),
-        // ── Lateral Movement ────────────────────────────────────────────
         ("psexec", "T1021.002"),
         ("psexec_kerberos", "T1021.002"),
         ("wmiexec", "T1047"),
@@ -170,7 +158,6 @@ pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("mssql_linked_enable_xpcmdshell", "T1059.001"),
         ("mssql_linked_xpcmdshell", "T1059.001"),
         ("mssql_ntlm_coerce", "T1187"),
-        // ── Coercion / Relay ────────────────────────────────────────────
         ("petitpotam", "T1187"),
         ("dfscoerce", "T1187"),
         ("coercer", "T1187"),
@@ -180,23 +167,19 @@ pub static TOOL_TO_TECHNIQUE: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("ntlmrelayx_to_adcs", "T1557.001"),
         ("ntlmrelayx_to_smb", "T1557.001"),
         ("ntlmrelayx_multirelay", "T1557.001"),
-        // ── MSSQL ───────────────────────────────────────────────────────
         ("mssql_enum_impersonation", "T1078.002"),
         ("mssql_enum_linked_servers", "T1021.002"),
         ("mssql_impersonate", "T1134.001"),
     ])
 });
 
-// =============================================================================
 // Tool → Category
 //
 // Keys MUST match the tool names in ares_tools::dispatch().
-// =============================================================================
 
 /// Tool name → toolset category (for dashboard grouping).
 pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     HashMap::from([
-        // ── NetworkEnumerationTools ─────────────────────────────────────
         ("nmap_scan", "NetworkEnumerationTools"),
         ("smb_sweep", "NetworkEnumerationTools"),
         ("smb_signing_check", "NetworkEnumerationTools"),
@@ -217,9 +200,7 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("password_policy", "NetworkEnumerationTools"),
         ("get_sid", "NetworkEnumerationTools"),
         ("find_delegation", "NetworkEnumerationTools"),
-        // ── BloodHoundTools ─────────────────────────────────────────────
         ("run_bloodhound", "BloodHoundTools"),
-        // ── CredentialHarvestingTools ────────────────────────────────────
         ("secretsdump", "CredentialHarvestingTools"),
         ("secretsdump_kerberos", "CredentialHarvestingTools"),
         ("ntds_dit_extract", "CredentialHarvestingTools"),
@@ -235,42 +216,34 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("check_credman_entries", "CredentialHarvestingTools"),
         ("check_autologon_registry", "CredentialHarvestingTools"),
         ("get_tgt", "CredentialHarvestingTools"),
-        // ── SharePilferingTools ─────────────────────────────────────────
         ("smbclient_spider", "SharePilferingTools"),
         ("sysvol_script_search", "SharePilferingTools"),
-        // ── GMSATools ───────────────────────────────────────────────────
         ("gmsa_dump_passwords", "GMSATools"),
         ("gmsa_read_password_bloodyad", "GMSATools"),
-        // ── TrustAttackTools ────────────────────────────────────────────
         ("extract_trust_key", "TrustAttackTools"),
-        ("raise_child", "TrustAttackTools"),
         ("create_inter_realm_ticket", "TrustAttackTools"),
-        // ── CertipyTools ────────────────────────────────────────────────
+        ("forge_inter_realm_and_dump", "TrustAttackTools"),
         ("certipy_auth", "CertipyTools"),
         ("certipy_find", "CertipyTools"),
         ("certipy_request", "CertipyTools"),
         ("certipy_shadow", "CertipyTools"),
         ("certipy_template_esc4", "CertipyTools"),
         ("certipy_esc4_full_chain", "CertipyTools"),
-        // ── CrackingTools ───────────────────────────────────────────────
         ("crack_with_hashcat", "CrackingTools"),
         ("crack_with_john", "CrackingTools"),
-        // ── DelegationTools ─────────────────────────────────────────────
         ("rbcd_write", "DelegationTools"),
         ("s4u_attack", "DelegationTools"),
         ("unconstrained_tgt_dump", "DelegationTools"),
         ("unconstrained_coerce_and_capture", "DelegationTools"),
         ("addspn", "DelegationTools"),
-        // ── PrivilegeEscalationTools ────────────────────────────────────
-        ("krbrelayup", "PrivilegeEscalationTools"),
         ("dnstool", "PrivilegeEscalationTools"),
         ("add_computer", "PrivilegeEscalationTools"),
-        // ── CVEExploitTools ─────────────────────────────────────────────
+        ("windows_stage_and_run", "PrivilegeEscalationTools"),
         ("nopac", "CVEExploitTools"),
         ("printnightmare", "CVEExploitTools"),
         ("petitpotam_unauth", "CVEExploitTools"),
-        // ── ACLExploitTools ─────────────────────────────────────────────
         ("dacl_edit", "ACLExploitTools"),
+        ("owner_edit", "ACLExploitTools"),
         ("bloodyad_add_group_member", "ACLExploitTools"),
         ("bloodyad_set_password", "ACLExploitTools"),
         ("bloodyad_add_genericall", "ACLExploitTools"),
@@ -278,7 +251,6 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("pywhisker", "ACLExploitTools"),
         ("sharpgpoabuse", "ACLExploitTools"),
         ("pygpoabuse_immediate_task", "ACLExploitTools"),
-        // ── LateralMovementTools ────────────────────────────────────────
         ("psexec", "LateralMovementTools"),
         ("psexec_kerberos", "LateralMovementTools"),
         ("wmiexec", "LateralMovementTools"),
@@ -295,7 +267,6 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("pth_rpcclient", "LateralMovementTools"),
         ("pth_wmic", "LateralMovementTools"),
         ("mssql_command", "LateralMovementTools"),
-        // ── CoercionTools ───────────────────────────────────────────────
         ("petitpotam", "CoercionTools"),
         ("dfscoerce", "CoercionTools"),
         ("coercer", "CoercionTools"),
@@ -304,10 +275,8 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("ntlmrelayx_to_adcs", "CoercionTools"),
         ("ntlmrelayx_to_smb", "CoercionTools"),
         ("ntlmrelayx_multirelay", "CoercionTools"),
-        // ── CoercionNetworkTools ────────────────────────────────────────
         ("start_responder", "CoercionNetworkTools"),
         ("start_mitm6", "CoercionNetworkTools"),
-        // ── MSSQLTools ──────────────────────────────────────────────────
         ("mssql_enum_impersonation", "MSSQLTools"),
         ("mssql_enum_linked_servers", "MSSQLTools"),
         ("mssql_impersonate", "MSSQLTools"),
@@ -315,14 +284,12 @@ pub static TOOL_TO_CATEGORY: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         ("mssql_exec_linked", "MSSQLTools"),
         ("mssql_linked_enable_xpcmdshell", "MSSQLTools"),
         ("mssql_linked_xpcmdshell", "MSSQLTools"),
-        // ── GoldenTicketTools ───────────────────────────────────────────
         ("generate_golden_ticket", "GoldenTicketTools"),
+        ("generate_silver_ticket", "GoldenTicketTools"),
     ])
 });
 
-// =============================================================================
 // Tool metadata from tools.yaml (generated at compile time)
-// =============================================================================
 
 include!(concat!(env!("OUT_DIR"), "/tool_meta.rs"));
 
@@ -366,10 +333,6 @@ pub static TOOL_CATEGORY_TO_TACTIC: LazyLock<HashMap<&str, &str>> = LazyLock::ne
         ("ReportingTools", "discovery"),
     ])
 });
-
-// =============================================================================
-// Lookup helpers
-// =============================================================================
 
 /// Derive a tactic name from a MITRE technique ID prefix.
 pub fn tactic_from_technique(technique_id: &str) -> Option<&'static str> {
@@ -417,6 +380,29 @@ mod tests {
             Some(&"credential-access")
         );
         assert_eq!(ROLE_TO_TACTIC.get("lateral"), Some(&"lateral-movement"));
+    }
+
+    #[test]
+    fn tool_binary_maps_to_the_invoked_binary_not_group_first() {
+        // Regression: the tools.yaml impacket groups bundle several binaries, and
+        // the generator used to label every fn with binaries[0] — so `secretsdump`
+        // spans reported `impacket-GetNPUsers` and `secretsdump_kerberos` reported
+        // `impacket-psexec`. Each fn must now resolve to the binary it runs.
+        assert_eq!(get_tool_binary("secretsdump"), Some("impacket-secretsdump"));
+        assert_eq!(
+            get_tool_binary("secretsdump_kerberos"),
+            Some("impacket-secretsdump")
+        );
+        assert_eq!(
+            get_tool_binary("ntds_dit_extract"),
+            Some("impacket-secretsdump")
+        );
+        assert_eq!(get_tool_binary("wmiexec"), Some("impacket-wmiexec"));
+        assert_eq!(get_tool_binary("smbexec"), Some("impacket-smbexec"));
+        // Unchanged: psexec was already correct (group-first), stays correct.
+        assert_eq!(get_tool_binary("psexec"), Some("impacket-psexec"));
+        // Single-binary group: still maps to its one binary.
+        assert_eq!(get_tool_binary("certipy_request"), Some("certipy"));
     }
 
     #[test]

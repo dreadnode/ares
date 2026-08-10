@@ -1,9 +1,10 @@
-//! auto_shadow_credentials -- exploit GenericAll/WriteDacl ACL edges via shadow credentials.
+//! auto_shadow_credentials -- exploit property-write ACL edges via shadow credentials.
 //!
-//! When BloodHound or ACL analysis discovers that a controlled user has
-//! GenericAll, GenericWrite, or WriteDacl on another user/computer, this
-//! automation dispatches `certipy shadow auto` to add shadow credentials
-//! and obtain the target's NT hash without touching LSASS.
+//! When BloodHound or ACL analysis discovers that a controlled user holds a
+//! right that writes `msDS-KeyCredentialLink` on another user/computer
+//! (GenericAll, GenericWrite, WriteProperty), this automation dispatches
+//! `certipy shadow auto` to add shadow credentials and obtain the target's
+//! NT hash without touching LSASS.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,10 +19,11 @@ use crate::orchestrator::state::StateInner;
 /// Dedup key prefix for shadow credential attacks.
 const DEDUP_SHADOW_CREDS: &str = "shadow_creds";
 
-/// Monitors for GenericAll/WriteDacl edges and dispatches shadow credential attacks.
+/// Monitors for property-write ACL edges and dispatches shadow credential attacks.
 /// Interval: 30s.
 pub(crate) struct ShadowCredWorkItem {
     pub vuln_id: String,
+    pub vuln_type: String,
     pub dedup_key: String,
     pub source_user: String,
     pub target_user: String,
@@ -89,6 +91,7 @@ pub(crate) fn select_shadow_credentials_work(state: &StateInner) -> Vec<ShadowCr
 
             Some(ShadowCredWorkItem {
                 vuln_id: vuln.vuln_id.clone(),
+                vuln_type: vuln.vuln_type.clone(),
                 dedup_key,
                 source_user,
                 target_user,
@@ -169,8 +172,9 @@ pub async fn auto_shadow_credentials(
             let payload = build_shadow_credentials_payload(&item);
 
             let priority = dispatcher.effective_priority("shadow_credentials");
+            let role = shadow_cred_role(&item.vuln_type);
             match dispatcher
-                .throttled_submit("exploit", "privesc", payload, priority)
+                .throttled_submit("exploit", role, payload, priority)
                 .await
             {
                 Ok(Some(task_id)) => {
@@ -179,6 +183,7 @@ pub async fn auto_shadow_credentials(
                         vuln_id = %item.vuln_id,
                         source = %item.source_user,
                         target = %item.target_user,
+                        role = %role,
                         "Shadow credentials attack dispatched"
                     );
                     dispatcher
@@ -227,24 +232,64 @@ fn extract_target_user(
         .map(|s| s.to_string())
 }
 
+/// Pick the worker role for a shadow-credentials dispatch.
+///
+/// An ACL-derived edge goes to the `acl` worker, which holds `pywhisker` — the
+/// same `msDS-KeyCredentialLink` primitive as `certipy_shadow` — *plus*
+/// `dacl_edit` and `bloodyad_add_genericall`. The `privesc` worker has
+/// `certipy_shadow` but no DACL primitive at all, and no bloodyAD in its
+/// container image, so an `INSUFF_ACCESS_RIGHTS` denial there is terminal:
+/// the agent has no tool with which to grant itself the missing property
+/// write. On the `acl` worker the same denial is recoverable in-task.
+///
+/// This mirrors the inference `task_builders` already applies to generic
+/// exploit dispatches, which this automation used to bypass by hard-coding
+/// `privesc`.
+fn shadow_cred_role(vuln_type: &str) -> &'static str {
+    if crate::orchestrator::dispatcher::task_builders::is_acl_style_vuln_type(vuln_type) {
+        "acl"
+    } else {
+        "privesc"
+    }
+}
+
 /// Returns `true` if the given vulnerability type is a candidate for shadow
 /// credentials exploitation (ACL-based write access on a user/computer that
 /// can be abused to add a msDS-KeyCredentialLink and obtain that target's
 /// NT hash via certipy auth).
 ///
-/// Includes the obvious primitives (GenericAll, GenericWrite, WriteDacl,
-/// WriteOwner) plus two that the lab's BloodHound exposed but the
-/// original matcher missed:
-/// - `allextendedrights`: subsumes every extended right on the target,
-///   including the property-write needed for msDS-KeyCredentialLink —
-///   equivalent to GenericAll for shadow-creds purposes.
-/// - `writeproperty`: a property write that covers msDS-KeyCredentialLink
-///   (BloodHound's targetedwrite analogue).
+/// The accept list is exactly the rights that confer `WriteProperty` on
+/// `msDS-KeyCredentialLink` directly: GenericAll and GenericWrite, plus
+/// `writeproperty` (BloodHound's targetedwrite analogue for a specific
+/// attribute write, which — when it covers all properties or
+/// msDS-KeyCredentialLink specifically — is a valid shadow-cred primitive).
 ///
-/// `forcechangepassword` is deliberately excluded: the User-Force-Change-
-/// Password extended right grants password reset only, not the property
-/// write required for msDS-KeyCredentialLink. Those vulns are routed to
-/// `auto_dacl_abuse` → `bloodyad_set_password` instead.
+/// `WriteDacl` and `WriteOwner` are deliberately excluded even though both
+/// are ACL rights `auto_dacl_abuse` acts on. Neither confers a property
+/// write. `WriteDacl` permits modifying the target's DACL — you must first
+/// write an ACE granting yourself GenericAll/GenericWrite and only then can
+/// you write `msDS-KeyCredentialLink`. `WriteOwner` is a further step
+/// removed: change the owner, take ownership, write the DACL, grant the
+/// right. Dispatching `certipy_shadow` / `pywhisker` straight off either
+/// edge can only return `INSUFF_ACCESS_RIGHTS 00002098`, which is exactly
+/// what live ops observed against `writeowner` edges. Both are routed to
+/// `auto_dacl_abuse` (they match `acl_graph::is_acl_vuln_type`) → `dacl_edit`,
+/// and a successful grant publishes the acquired right as a fresh ACL edge
+/// (`result_processing::acl_grants`) that this matcher then accepts.
+///
+/// `AllExtendedRights` is deliberately excluded. The extended-rights ACE
+/// covers *control access rights* (User-Force-Change-Password, DS-Replication-
+/// Get-Changes, etc.) but does NOT grant `WriteProperty` on any attribute —
+/// including `msDS-KeyCredentialLink`. Historically the matcher accepted it,
+/// which caused every `AllExtendedRights` edge from BloodHound to burn a
+/// shadow-cred dispatch that came back `INSUFF_ACCESS_RIGHTS 00002098` on
+/// `msDS-KeyCredentialLink`. See WAYSFUCKED op-20260624 for the trail.
+/// Those vulns are routed to `auto_dacl_abuse` instead.
+///
+/// `forcechangepassword` is likewise excluded: the User-Force-Change-Password
+/// extended right grants password reset only, not the property write required
+/// for msDS-KeyCredentialLink. Those vulns are routed to `auto_dacl_abuse` →
+/// `bloodyad_set_password`.
 ///
 /// All forms accept both the bare and `acl_`-prefixed shapes emitted by
 /// ldap_acl_enumeration's parser.
@@ -253,16 +298,10 @@ pub(crate) fn is_shadow_cred_candidate(vuln_type: &str) -> bool {
         vuln_type.to_lowercase().as_str(),
         "genericall"
             | "genericwrite"
-            | "writedacl"
-            | "writeowner"
             | "shadow_credentials"
-            | "allextendedrights"
             | "writeproperty"
             | "acl_genericall"
             | "acl_genericwrite"
-            | "acl_writedacl"
-            | "acl_writeowner"
-            | "acl_allextendedrights"
             | "acl_writeproperty"
     )
 }
@@ -275,30 +314,57 @@ mod tests {
     // is_shadow_cred_candidate
 
     #[test]
+    fn shadow_cred_role_routes_acl_edges_to_the_acl_worker() {
+        // The acl worker holds pywhisker (same primitive) plus dacl_edit and
+        // bloodyad_add_genericall, so an INSUFF_ACCESS_RIGHTS denial there is
+        // recoverable in-task. privesc has certipy_shadow and no DACL tool.
+        assert_eq!(shadow_cred_role("genericall"), "acl");
+        assert_eq!(shadow_cred_role("GenericWrite"), "acl");
+        assert_eq!(shadow_cred_role("acl_genericall"), "acl");
+        assert_eq!(shadow_cred_role("writeproperty"), "acl");
+        assert_eq!(shadow_cred_role("acl_writeproperty"), "acl");
+    }
+
+    #[test]
+    fn shadow_cred_role_keeps_non_acl_types_on_privesc() {
+        assert_eq!(shadow_cred_role("shadow_credentials"), "privesc");
+    }
+
+    #[test]
     fn is_shadow_cred_candidate_positive() {
         assert!(is_shadow_cred_candidate("genericall"));
         assert!(is_shadow_cred_candidate("GenericAll"));
         assert!(is_shadow_cred_candidate("genericwrite"));
-        assert!(is_shadow_cred_candidate("writedacl"));
-        assert!(is_shadow_cred_candidate("writeowner"));
         assert!(is_shadow_cred_candidate("shadow_credentials"));
         assert!(is_shadow_cred_candidate("acl_genericall"));
         assert!(is_shadow_cred_candidate("acl_genericwrite"));
-        assert!(is_shadow_cred_candidate("acl_writedacl"));
     }
 
     #[test]
-    fn is_shadow_cred_candidate_accepts_allextendedrights_and_writeproperty() {
-        // BloodHound surfaces these on user-targeted ACLs (e.g. a low-priv
-        // account with AllExtendedRights on Administrator) — accepting them
-        // lets certipy_shadow fire on the direct DA path.
-        assert!(is_shadow_cred_candidate("allextendedrights"));
-        assert!(is_shadow_cred_candidate("AllExtendedRights"));
+    fn is_shadow_cred_candidate_accepts_writeproperty() {
+        // WriteProperty (unrestricted) covers all properties including
+        // msDS-KeyCredentialLink, so it remains a valid shadow-cred
+        // primitive. When BloodHound reports a *property-scoped* WriteProperty
+        // that doesn't touch KeyCredentialLink, the pre-flight result-inspection
+        // path in result_processing bumps it to abandoned after one failure.
         assert!(is_shadow_cred_candidate("writeproperty"));
-        // ACL-prefixed forms emitted by ldap_acl_enumeration parser.
-        assert!(is_shadow_cred_candidate("acl_allextendedrights"));
         assert!(is_shadow_cred_candidate("acl_writeproperty"));
-        assert!(is_shadow_cred_candidate("acl_writeowner"));
+    }
+
+    #[test]
+    fn is_shadow_cred_candidate_rejects_dacl_control_rights() {
+        // WriteDacl grants DACL modification, not WriteProperty on
+        // msDS-KeyCredentialLink: you must write a GenericAll/GenericWrite ACE
+        // for yourself first. WriteOwner is one step further removed (take
+        // ownership → write DACL → grant right). Dispatching certipy_shadow /
+        // pywhisker off either edge only ever returns INSUFF_ACCESS_RIGHTS
+        // 00002098, so both route to auto_dacl_abuse → dacl_edit instead.
+        assert!(!is_shadow_cred_candidate("writedacl"));
+        assert!(!is_shadow_cred_candidate("WriteDacl"));
+        assert!(!is_shadow_cred_candidate("acl_writedacl"));
+        assert!(!is_shadow_cred_candidate("writeowner"));
+        assert!(!is_shadow_cred_candidate("WriteOwner"));
+        assert!(!is_shadow_cred_candidate("acl_writeowner"));
     }
 
     #[test]
@@ -315,12 +381,19 @@ mod tests {
         assert!(!is_shadow_cred_candidate("forcechangepassword"));
         assert!(!is_shadow_cred_candidate("ForceChangePassword"));
         assert!(!is_shadow_cred_candidate("acl_forcechangepassword"));
+        // AllExtendedRights grants extended (control-access) rights, NOT
+        // property writes on msDS-KeyCredentialLink. See WAYSFUCKED
+        // op-20260624 for the trail of INSUFF_ACCESS_RIGHTS failures this
+        // used to produce. Routed to auto_dacl_abuse instead.
+        assert!(!is_shadow_cred_candidate("allextendedrights"));
+        assert!(!is_shadow_cred_candidate("AllExtendedRights"));
+        assert!(!is_shadow_cred_candidate("acl_allextendedrights"));
     }
 
     #[test]
     fn is_shadow_cred_candidate_case_insensitive() {
         assert!(is_shadow_cred_candidate("GENERICALL"));
-        assert!(is_shadow_cred_candidate("WriteDacl"));
+        assert!(is_shadow_cred_candidate("WriteProperty"));
         assert!(is_shadow_cred_candidate("ACL_GENERICWRITE"));
     }
 
@@ -524,6 +597,7 @@ mod tests {
     fn shadow_cred_work_with_credential() {
         let work = ShadowCredWorkItem {
             vuln_id: "vuln-sc-001".to_string(),
+            vuln_type: "genericall".to_string(),
             dedup_key: format!("{DEDUP_SHADOW_CREDS}:vuln-sc-001"),
             source_user: "testuser".to_string(),
             target_user: "dc01$".to_string(),
@@ -554,6 +628,7 @@ mod tests {
     fn shadow_cred_work_with_hash_fallback() {
         let work = ShadowCredWorkItem {
             vuln_id: "vuln-sc-002".to_string(),
+            vuln_type: "genericall".to_string(),
             dedup_key: format!("{DEDUP_SHADOW_CREDS}:vuln-sc-002"),
             source_user: "svc_admin".to_string(),
             target_user: "sql01$".to_string(),
@@ -591,6 +666,7 @@ mod tests {
     fn shadow_cred_work_no_dc_ip() {
         let work = ShadowCredWorkItem {
             vuln_id: "vuln-sc-003".to_string(),
+            vuln_type: "genericall".to_string(),
             dedup_key: format!("{DEDUP_SHADOW_CREDS}:vuln-sc-003"),
             source_user: "testuser".to_string(),
             target_user: "web01$".to_string(),

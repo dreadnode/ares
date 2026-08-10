@@ -2,8 +2,6 @@
 
 use super::config::{build_template_logql, find_template};
 
-// ─── Template metadata ─────────────────────────────────────────────────────
-
 pub(super) struct DetectionTemplate {
     pub(super) logql: String,
     pub(super) description: &'static str,
@@ -30,8 +28,6 @@ impl DetectionTemplate {
         header
     }
 }
-
-// ─── Template builder ───────────────────────────────────────────────────────
 
 pub(super) fn build_detection_template(
     name: &str,

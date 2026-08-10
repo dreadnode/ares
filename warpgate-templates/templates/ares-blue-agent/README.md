@@ -80,20 +80,10 @@ docker run --rm ares-blue-agent:latest ares worker --version
   - Provided by `ares-base` (Python 3.13.x, uv, Ares framework, dependencies, procps)
   - Rust-compiled `ares` binary with PyO3 Python bindings
 - **Build Process:**
-  - Clones ares repository from `feature/rust-cli` branch
+  - Clones ares repository from the `main` branch
   - Compiles Rust binary with `--features python` for Python interop
   - Installs binary to `/usr/local/bin/ares`
   - Cleans up build artifacts (source, compiler symlinks)
-
----
-
-## Differences from ares-blue-agent (Python)
-
-| Component | ares-blue-agent (Python) | ares-blue-agent |
-| ----------- | ---------------------- | ------------------ |
-| Entrypoint | `python -m ares --args.multi-agent` | `ares worker` (binary) |
-| Runtime | Python interpreter | Compiled Rust + embedded Python |
-| Build | No compilation needed | Rust compilation with PyO3 |
 
 ---
 

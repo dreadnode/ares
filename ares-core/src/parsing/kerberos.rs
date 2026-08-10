@@ -5,8 +5,12 @@ use std::sync::LazyLock;
 
 use super::types::{KerberosHash, KerberosHashType};
 
+// The `*` after the etype is optional: impacket emits it only for RC4 tickets
+// (`$krb5tgs$23$*user$realm$spn*$…`). AES tickets (etype 17/18, the AES-capable
+// account default) omit it (`$krb5tgs$17$user$realm$spn*$…`). Requiring it drops
+// every AES kerberoast hash, so those accounts never reach the cracker.
 static KRB_TGS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\$krb5tgs\$\d+\$\*([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+")
+    Regex::new(r"\$krb5tgs\$\d+\$\*?([^$*]+)\$([^$*]+)\$[^$]+\$[a-fA-F0-9$]+")
         .expect("krb5tgs regex")
 });
 
@@ -62,6 +66,20 @@ mod tests {
         assert_eq!(results[0].domain, "CONTOSO.LOCAL");
         assert_eq!(results[0].hash_type, KerberosHashType::TGS);
         assert!(results[0].hash_value.starts_with("$krb5tgs$"));
+    }
+
+    #[test]
+    fn extract_tgs_aes_etype() {
+        // AES128 (etype 17) kerberoast hash from impacket. Real layout: no `*`
+        // before the user, `$*spn*$` around the SPN (format `$krb5tgs$%d$%s$%s$*%s*$…`).
+        // Regression guard: these must be extracted, not silently dropped.
+        let output =
+            "$krb5tgs$17$svc_sql$CONTOSO.LOCAL$*MSSQLSvc/db01.contoso.local*$aabbccdd$eeff0011\n";
+        let results = extract_kerberos_hashes(output);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].username, "svc_sql");
+        assert_eq!(results[0].domain, "CONTOSO.LOCAL");
+        assert_eq!(results[0].hash_type, KerberosHashType::TGS);
     }
 
     #[test]

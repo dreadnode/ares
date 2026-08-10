@@ -16,6 +16,12 @@ use super::types::{
 /// by operation ID alongside a flat list of blue detections.
 pub type LoadedReports = (Vec<(String, Vec<RedTeamActivity>)>, Vec<BlueTeamDetection>);
 
+/// Metadata flag marking a [`RedTeamActivity`] whose timestamp was derived from
+/// the operation start time rather than read from a parser-emitted timeline row.
+/// Such activities are matched on technique and target only — scoring them by
+/// time proximity would penalise blue against a time nobody observed.
+pub const SYNTHETIC_TIMESTAMP_KEY: &str = "timestamp_synthetic";
+
 /// Correlates red team activities with blue team detections.
 ///
 /// This engine:
@@ -48,6 +54,12 @@ impl RedBlueCorrelator {
     /// - Exact match: T1003 == T1003
     /// - Parent matches child: T1003 matches T1003.006
     /// - Child matches parent: T1003.006 matches T1003
+    ///
+    /// Sibling sub-techniques do NOT match. They share a parent but describe
+    /// different attacker behaviour, and crediting one for the other inflates
+    /// detection coverage: a Golden Ticket detection (T1558.001) is not a
+    /// Kerberoasting detection (T1558.003), and DCSync (T1003.006) is not
+    /// LSASS dumping (T1003.001).
     pub fn techniques_match(red: Option<&str>, blue: Option<&str>) -> bool {
         let (Some(red), Some(blue)) = (red, blue) else {
             return false;
@@ -63,7 +75,7 @@ impl RedBlueCorrelator {
         let red_parent = red.split('.').next().unwrap_or(&red);
         let blue_parent = blue.split('.').next().unwrap_or(&blue);
 
-        red_parent == blue_parent
+        red_parent == blue_parent && (red == red_parent || blue == blue_parent)
     }
 
     /// Load and parse a red team report file.
@@ -74,7 +86,6 @@ impl RedBlueCorrelator {
         let content = std::fs::read_to_string(report_path)?;
         let mut activities = Vec::new();
 
-        // Extract operation ID
         let op_id_re = Regex::new(r"\*\*Operation ID\*\*:\s*(\S+)")?;
         let operation_id = op_id_re
             .captures(&content)
@@ -82,14 +93,12 @@ impl RedBlueCorrelator {
             .map(|m| m.as_str().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Extract target IP
         let target_ip_re = Regex::new(r"\*\*Target\*\*:\s*(\d+\.\d+\.\d+\.\d+)")?;
         let target_ip = target_ip_re
             .captures(&content)
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string());
 
-        // Extract start time
         let started_re = Regex::new(r"\*\*Started\*\*:\s*(.+?)(?:\n|$)")?;
         let started_at = started_re
             .captures(&content)
@@ -101,7 +110,6 @@ impl RedBlueCorrelator {
             .map(|dt| dt.and_utc())
             .unwrap_or_else(Utc::now);
 
-        // Parse hosts section
         let hosts_re = Regex::new(r"### Hosts \((\d+)\)([\s\S]*?)(?:###|\z)")?;
         if let Some(hosts_cap) = hosts_re.captures(&content) {
             if let Ok(host_count) = hosts_cap[1].parse::<u32>() {
@@ -115,13 +123,15 @@ impl RedBlueCorrelator {
                         target_host: None,
                         credential_used: None,
                         success: true,
-                        metadata: HashMap::new(),
+                        metadata: HashMap::from([(
+                            SYNTHETIC_TIMESTAMP_KEY.to_string(),
+                            "true".to_string(),
+                        )]),
                     });
                 }
             }
         }
 
-        // Parse credentials section
         let creds_re = Regex::new(r"### Credentials \(\d+\)([\s\S]*?)(?:###|\z)")?;
         if let Some(creds_cap) = creds_re.captures(&content) {
             let creds_content = &creds_cap[1];
@@ -151,12 +161,12 @@ impl RedBlueCorrelator {
                     metadata: HashMap::from([
                         ("username".to_string(), username.to_string()),
                         ("source".to_string(), source.to_string()),
+                        (SYNTHETIC_TIMESTAMP_KEY.to_string(), "true".to_string()),
                     ]),
                 });
             }
         }
 
-        // Parse timeline section
         let timeline_re = Regex::new(r"### Timeline of Key Events([\s\S]*?)(?:---|\z)")?;
         if let Some(timeline_cap) = timeline_re.captures(&content) {
             let timeline_content = &timeline_cap[1];
@@ -185,9 +195,13 @@ impl RedBlueCorrelator {
             }
         }
 
-        // Domain Admin access
-        if content.contains("Domain Admin Access**: ✓")
-            || content.to_lowercase().contains("has_domain_admin: true")
+        let already_timelined = |acts: &[RedTeamActivity], id: &str| {
+            acts.iter().any(|a| a.technique_id.as_deref() == Some(id))
+        };
+
+        if !already_timelined(&activities, "T1078.002")
+            && (content.contains("Domain Admin Access**: ✓")
+                || content.to_lowercase().contains("has_domain_admin: true"))
         {
             activities.push(RedTeamActivity {
                 timestamp: started_at + Duration::minutes(5),
@@ -198,13 +212,16 @@ impl RedBlueCorrelator {
                 target_host: None,
                 credential_used: None,
                 success: true,
-                metadata: HashMap::new(),
+                metadata: HashMap::from([(
+                    SYNTHETIC_TIMESTAMP_KEY.to_string(),
+                    "true".to_string(),
+                )]),
             });
         }
 
-        // Golden Ticket
-        if content.contains("Golden Ticket**: ✓")
-            || content.to_lowercase().contains("has_golden_ticket: true")
+        if !already_timelined(&activities, "T1558.001")
+            && (content.contains("Golden Ticket**: ✓")
+                || content.to_lowercase().contains("has_golden_ticket: true"))
         {
             activities.push(RedTeamActivity {
                 timestamp: started_at + Duration::minutes(6),
@@ -215,7 +232,10 @@ impl RedBlueCorrelator {
                 target_host: None,
                 credential_used: None,
                 success: true,
-                metadata: HashMap::new(),
+                metadata: HashMap::from([(
+                    SYNTHETIC_TIMESTAMP_KEY.to_string(),
+                    "true".to_string(),
+                )]),
             });
         }
 
@@ -228,19 +248,24 @@ impl RedBlueCorrelator {
     }
 
     /// Load and parse a blue team investigation report.
+    ///
+    /// One investigation can record several techniques, so this returns one
+    /// [`BlueTeamDetection`] per distinct technique — a single first-match
+    /// collapse would let a 6-technique report correlate against only one red
+    /// activity. A report with no technique still yields a single detection so
+    /// it counts toward volume and false-positive metrics.
     pub fn load_investigation_report(
         &self,
         report_path: &Path,
-    ) -> anyhow::Result<Option<BlueTeamDetection>> {
+    ) -> anyhow::Result<Vec<BlueTeamDetection>> {
         let content = std::fs::read_to_string(report_path)?;
 
-        // Skip DatasourceNoData reports
         if report_path
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.contains("DatasourceNoData"))
         {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         let inv_id_re = Regex::new(r"\*\*Investigation ID:\*\*\s*`?(\S+?)`?(?:\n|$)")?;
@@ -263,7 +288,6 @@ impl RedBlueCorrelator {
             .map(|m| m.as_str().trim().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Parse timestamp from startsAt or filename
         let starts_at_re = Regex::new(r#""startsAt":\s*"([^"]+)""#)?;
         let timestamp = if let Some(ts_cap) = starts_at_re.captures(&content) {
             DateTime::parse_from_rfc3339(&ts_cap[1].replace('Z', "+00:00"))
@@ -280,11 +304,23 @@ impl RedBlueCorrelator {
                 .unwrap_or_else(Utc::now)
         };
 
+        // Collect every distinct technique the investigation recorded. Scope the
+        // scan to the blue-authored body — everything before the appendix — because
+        // the appendix embeds red's ground-truth `techniques_used` list from the
+        // alert payload; scanning the whole file would falsely credit blue with the
+        // entire attack.
         let technique_re = Regex::new(r"(T\d{4}(?:\.\d{3})?)")?;
-        let technique_id = technique_re
-            .captures(&content)
-            .and_then(|c| c.get(1))
-            .map(|m| m.as_str().to_string());
+        let body = content
+            .split("## Appendix")
+            .next()
+            .unwrap_or(content.as_str());
+        let mut techniques: Vec<String> = Vec::new();
+        for cap in technique_re.captures_iter(body) {
+            let technique = cap[1].to_string();
+            if !techniques.contains(&technique) {
+                techniques.push(technique);
+            }
+        }
 
         let status_re = Regex::new(r"\|\s*Status\s*\|\s*(\w+)")?;
         let status = status_re
@@ -313,10 +349,10 @@ impl RedBlueCorrelator {
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string());
 
-        Ok(Some(BlueTeamDetection {
+        let base = BlueTeamDetection {
             timestamp,
             alert_name,
-            technique_id,
+            technique_id: None,
             severity,
             target_ip,
             target_host: None,
@@ -325,7 +361,19 @@ impl RedBlueCorrelator {
             evidence_count,
             highest_pyramid_level,
             metadata: HashMap::new(),
-        }))
+        };
+
+        if techniques.is_empty() {
+            return Ok(vec![base]);
+        }
+
+        Ok(techniques
+            .into_iter()
+            .map(|technique| BlueTeamDetection {
+                technique_id: Some(technique),
+                ..base.clone()
+            })
+            .collect())
     }
 
     /// Load all reports from the reports directory (recursively).
@@ -366,8 +414,7 @@ impl RedBlueCorrelator {
                 }
             } else if is_blue {
                 match self.load_investigation_report(&path) {
-                    Ok(Some(detection)) => blue_team_detections.push(detection),
-                    Ok(None) => {}
+                    Ok(detections) => blue_team_detections.extend(detections),
                     Err(e) => {
                         warn!(path = %path.display(), error = %e, "Failed to parse investigation report")
                     }
@@ -426,17 +473,21 @@ impl RedBlueCorrelator {
 
         let time_window_secs = self.time_window.num_seconds() as f64;
 
-        // Match activities to detections
         for red_activity in &red_sorted {
             let mut best_match: Option<CorrelationMatch> = None;
             let mut best_confidence = 0.0_f64;
+
+            let synthetic_ts = red_activity
+                .metadata
+                .get(SYNTHETIC_TIMESTAMP_KEY)
+                .is_some_and(|v| v == "true");
 
             for detection in &blue_sorted {
                 let time_delta = (detection.timestamp - red_activity.timestamp).num_milliseconds()
                     as f64
                     / 1000.0;
 
-                if time_delta.abs() > time_window_secs {
+                if !synthetic_ts && time_delta.abs() > time_window_secs {
                     continue;
                 }
 
@@ -456,8 +507,11 @@ impl RedBlueCorrelator {
                 if target_match {
                     confidence += 0.3;
                 }
-                // Time proximity bonus
-                let time_bonus = (1.0 - time_delta.abs() / time_window_secs).max(0.0) * 0.2;
+                let time_bonus = if synthetic_ts {
+                    0.0
+                } else {
+                    (1.0 - time_delta.abs() / time_window_secs).max(0.0) * 0.2
+                };
                 confidence += time_bonus;
 
                 if confidence > best_confidence {
@@ -482,7 +536,6 @@ impl RedBlueCorrelator {
             }
         }
 
-        // Identify detection gaps
         let gaps: Vec<DetectionGap> = red_activities
             .iter()
             .filter(|a| !matched_red_keys.contains(&a.key()))
@@ -494,13 +547,20 @@ impl RedBlueCorrelator {
             })
             .collect();
 
-        // Identify false positives
+        // Identify false positives. A detection is only a false positive if red
+        // never performed a matching technique — not merely because the greedy 1:1
+        // matcher assigned some other detection to that red activity. This keeps a
+        // report that records both a parent technique and its sub-technique (e.g.
+        // T1021 and T1021.002) from spuriously flagging one as a false positive.
         let false_positives: Vec<BlueTeamDetection> = blue_detections
             .iter()
             .filter(|d| {
                 !matched_blue_keys.contains(&d.key())
                     && d.timestamp >= time_window_start
                     && d.timestamp <= time_window_end
+                    && !red_activities.iter().any(|a| {
+                        Self::techniques_match(a.technique_id.as_deref(), d.technique_id.as_deref())
+                    })
             })
             .cloned()
             .collect();
@@ -669,7 +729,6 @@ impl RedBlueCorrelator {
         for (operation_id, activities) in &red_reports {
             let report = self.correlate(activities, &blue_detections, operation_id);
 
-            // Save markdown report under {op_id}/ subdirectory
             let markdown = Self::generate_report_markdown(&report);
             let op_dir = self.reports_dir.join(operation_id);
             std::fs::create_dir_all(&op_dir)?;
@@ -733,8 +792,6 @@ mod tests {
         Utc.with_ymd_and_hms(2024, 1, 15, 10, 0, 0).unwrap()
     }
 
-    // ── techniques_match ───────────────────────────────────────────
-
     #[test]
     fn techniques_match_exact() {
         assert!(RedBlueCorrelator::techniques_match(
@@ -792,13 +849,13 @@ mod tests {
 
     #[test]
     fn techniques_match_different_sub() {
-        assert!(RedBlueCorrelator::techniques_match(
+        // Siblings share parent T1003 but are different behaviours: detecting
+        // DCSync is not detecting LSASS dumping.
+        assert!(!RedBlueCorrelator::techniques_match(
             Some("T1003.001"),
             Some("T1003.006")
         ));
     }
-
-    // ── determine_gap_reason ───────────────────────────────────────
 
     #[test]
     fn gap_reason_no_technique() {
@@ -827,8 +884,6 @@ mod tests {
         let reason = RedBlueCorrelator::determine_gap_reason(&activity, &detections);
         assert!(reason.contains("Alert exists but did not trigger"));
     }
-
-    // ── recommend_detection ────────────────────────────────────────
 
     #[test]
     fn recommend_detection_t1046() {
@@ -865,8 +920,6 @@ mod tests {
         let activity = make_red(None, None, "stuff", base_time());
         assert!(RedBlueCorrelator::recommend_detection(&activity).is_none());
     }
-
-    // ── calculate_technique_coverage ───────────────────────────────
 
     #[test]
     fn coverage_empty() {
@@ -942,8 +995,6 @@ mod tests {
         assert_eq!(cov["T1003"].missed, 1);
         assert!((cov["T1003"].detection_rate - 0.5).abs() < 0.001);
     }
-
-    // ── correlate ──────────────────────────────────────────────────
 
     #[test]
     fn correlate_empty() {
@@ -1063,7 +1114,6 @@ mod tests {
         )];
         let correlator = RedBlueCorrelator::new("/tmp/test", None);
         let report = correlator.correlate(&red, &blue, "op-1");
-        // One match out of two activities
         assert_eq!(report.matched_activities, 1);
         assert!((report.detection_rate - 0.5).abs() < 0.001);
     }
@@ -1147,8 +1197,6 @@ mod tests {
         assert_eq!(report.gaps.len(), 1);
         assert_eq!(report.technique_coverage.len(), 3);
     }
-
-    // ── constructor ────────────────────────────────────────────────
 
     #[test]
     fn new_default_window() {

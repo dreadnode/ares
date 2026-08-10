@@ -39,7 +39,7 @@ Environment variables required:
 
 ## Building Docker Images
 
-This builds **Ares PrivEsc Agent** Docker images for `amd64` and `arm64`architectures, installs prerequisites, provisions using Ansible roles, and
+This builds **Ares PrivEsc Agent** Docker images for `amd64` and `arm64` architectures, installs prerequisites, provisions using Ansible roles, and
 compiles the Rust worker binary.
 
 **Initialize the template:**
@@ -66,13 +66,13 @@ After building the Docker image, you can push it to GHCR:
 
 ```bash
 # Tag the image
-docker tag ares-privesc-agent:latest ghcr.io/dreadnode/ares-privesc-agent:latest
+docker tag ares-privesc-agent:latest ghcr.io/l50/ares-privesc-agent:latest
 
 # Authenticate with GHCR
 echo $GITHUB_TOKEN | docker login ghcr.io -u YOUR_USERNAME --password-stdin
 
 # Push the image
-docker push ghcr.io/dreadnode/ares-privesc-agent:latest
+docker push ghcr.io/l50/ares-privesc-agent:latest
 ```
 
 ---
@@ -93,28 +93,37 @@ warpgate validate ares-privesc-agent
   provisioning playbooks and requirement files are available at the path
   specified by `PROVISION_REPO_PATH`.
 - **Docker build:**
-  - Multi-arch (`amd64` + `arm64`) and privileged for full testbed support.
+  - Multi-arch (`amd64` + `arm64`) and privileged for testbed support.
   - Images are suitable for CI, local testing, or deployment in a Kubernetes cluster.
   - Default user: `root`
   - Working directory: `/root`
 - **Ansible Roles:** Uses `dreadnode.nimbus_range` roles:
   - `ares_base` - Python 3.13.7, uv, core dependencies
-  - `ares_privesc_tools` - Comprehensive privilege escalation toolkit
+  - `ares_privesc_tools` - Privilege escalation toolkit
 - **Rust Binary:**
-  - Compiled from `feature/rust-cli` branch with PyO3 Python bindings
-- Installed to `/usr/local/bin/ares`- **Installed Tools:**
+  - Compiled from the `main` branch with PyO3 Python bindings
+  - Installed to `/usr/local/bin/ares`
+- **Installed Tools:**
 
-  **Potato Exploits (SeImpersonatePrivilege):**
+  > **Most of the Windows tooling below is installed but not reachable.** Ares drives
+  > SMB/LDAP/Kerberos/MSSQL against a target from Linux; it has no primitive for staging
+  > and running a binary on a Windows host as an unprivileged user. The potato family,
+  > the .NET/PowerShell enumerators, RunasCs and KrbRelayUp therefore have no entry in
+  > the tool registry and cannot be dispatched. They are present for manual operator use
+  > only. See `docs/red.md` § "Provisioned but NOT reachable".
+
+  **Potato Exploits (SeImpersonatePrivilege) — not reachable:**
   - **PrintSpoofer** - Named pipe impersonation
   - **SweetPotato** - Alternative potato exploit
   - **GodPotato** - Modern potato exploit
 
   **Kerberos/AD PrivEsc:**
-  - **KrbRelayUp** - Kerberos relay local privilege escalation
-  - **SharpGPOAbuse** - GPO-based privilege escalation
+  - **KrbRelayUp** - Kerberos relay local privilege escalation (not reachable — removed
+    from the technique set in #371; needs on-host execution as an unprivileged user)
+  - **SharpGPOAbuse** - GPO-based privilege escalation (runs locally under `mono`)
   - **noPac** - CVE-2021-42287/CVE-2021-42278 exploitation
 
-  **Enumeration Tools:**
+  **Enumeration Tools — not reachable:**
   - **Seatbelt** - Windows security enumeration
   - **SharpUp** - Privilege escalation checks
   - **PowerUp** - PowerShell privesc enumeration
@@ -122,7 +131,7 @@ warpgate validate ares-privesc-agent
   - **LinPEAS** - Linux privilege escalation enumeration
 
   **Other Tools:**
-  - **RunasCs** - Run commands as another user
+  - **RunasCs** - Run commands as another user (not reachable)
   - **PrintNightmare** - CVE-2021-1675 exploitation
 
 - **Directory Structure:**
@@ -142,7 +151,8 @@ warpgate validate ares-privesc-agent
     - `/opt/privesc/RunasCs/`
     - `/opt/privesc/noPac/`
     - `/opt/privesc/PrintNightmare/`
-- `/usr/local/bin/ares` - Compiled Ares binary- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
+  - `/usr/local/bin/ares` - Compiled Ares binary
+- The build includes cleanup steps to remove temporary files, Ansible artifacts, and Rust build artifacts.
 
 ---
 
@@ -150,17 +160,21 @@ warpgate validate ares-privesc-agent
 
 This agent is specialized for:
 
-- **Token Impersonation** - Potato exploits for SeImpersonatePrivilege abuse
-- **Local Privilege Escalation** - Multiple techniques for elevating privileges
-- **Enumeration** - Identifying privilege escalation vectors
+- **ADCS abuse** - certipy-driven ESC chains
+- **Kerberos delegation** - constrained/unconstrained/RBCD, S4U, ticket forging
 - **CVE Exploitation** - noPac, PrintNightmare
+- **GPO abuse** - SharpGPOAbuse, pygpoabuse
+
+Local privilege escalation on a Windows host is **not** in scope for this agent, and
+`SeImpersonatePrivilege` is recorded as an operator lead rather than exploited — see the
+note under Installed Tools.
 
 ### Common Attack Scenarios
 
-1. **Service Account with SeImpersonatePrivilege** - Use PrintSpoofer/GodPotato
+1. **Vulnerable certificate template** - Use certipy for the matching ESC chain
 2. **Misconfigured GPO** - Use SharpGPOAbuse
 3. **CVE-2021-42287** - Use noPac for domain user to domain admin
-4. **General Enumeration** - Run WinPEAS/LinPEAS to identify vectors
+4. **Delegation misconfiguration** - S4U or RBCD to a service ticket, then secretsdump
 
 ---
 

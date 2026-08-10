@@ -6,7 +6,7 @@
 
 mod execution;
 mod kerberos;
-mod mssql;
+pub(crate) mod mssql;
 mod pth;
 
 pub use execution::*;

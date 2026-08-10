@@ -122,8 +122,6 @@ mod tests {
         }
     }
 
-    // ── strip_ansi ──────────────────────────────────────────────────
-
     #[test]
     fn strip_ansi_removes_color_codes() {
         assert_eq!(strip_ansi("\x1b[31mred\x1b[0m"), "red");
@@ -133,8 +131,6 @@ mod tests {
     fn strip_ansi_passthrough_clean() {
         assert_eq!(strip_ansi("clean text"), "clean text");
     }
-
-    // ── sanitize_credentials ────────────────────────────────────────
 
     #[test]
     fn sanitize_strips_password_prefix() {
@@ -213,8 +209,6 @@ mod tests {
         sanitize_credentials(&mut creds);
         assert_eq!(creds[0].domain, "contoso.local");
     }
-
-    // ── dedup_credentials ───────────────────────────────────────────
 
     #[test]
     fn dedup_removes_duplicates() {

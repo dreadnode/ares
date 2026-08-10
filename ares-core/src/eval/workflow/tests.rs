@@ -104,7 +104,7 @@ fn evaluates_dataset() {
 
 #[test]
 fn estimates_cost() {
-    let cost = estimate_cost("claude-sonnet-4-20250514", 1_000_000, 500_000);
+    let cost = estimate_cost("claude-sonnet-4-6", 1_000_000, 500_000);
     // 1M * 3.0/1M + 500K * 15.0/1M = 3.0 + 7.5 = 10.5
     assert!((cost - 10.5).abs() < 0.01);
 

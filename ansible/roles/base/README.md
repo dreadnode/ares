@@ -1,5 +1,4 @@
 <!-- DOCSIBLE START -->
-<!-- DOCSIBLE START -->
 # base
 
 ## Description
@@ -71,6 +70,12 @@ Base requirements for Ares AI agents
 | `base_workspace_mode` | str | <code>0755</code> | No description |
 | `base_pip_break_system_packages` | bool | <code>True</code> | No description |
 | `base_pip_executable` | str | <code>pip3</code> | No description |
+| `base_configure_swap` | bool | <code>False</code> | No description |
+| `base_swap_file` | str | <code>/swapfile</code> | No description |
+| `base_swap_size_mb` | int | <code>4096</code> | No description |
+| `base_oom_tuning` | bool | <code>False</code> | No description |
+| `base_vm_swappiness` | int | <code>10</code> | No description |
+| `base_vm_oom_kill_allocating_task` | int | <code>1</code> | No description |
 
 ## Tasks
 
@@ -90,7 +95,12 @@ Base requirements for Ares AI agents
 ### install_pipx.yml
 
 
-- **Install pipx via apt (Debian/Ubuntu)** (ansible.builtin.apt) - Conditional
+- **Install pipx via apt (Debian/Ubuntu)** (block) - Conditional
+- **Refresh apt cache before pipx install** (ansible.builtin.apt)
+- **Install pipx via apt** (ansible.builtin.apt)
+- **Check pipx version after apt install** (ansible.builtin.command)
+- **Check whether pip supports --break-system-packages** (ansible.builtin.command) - Conditional
+- **Upgrade pipx to a version supporting --global (>= 1.5.0)** (ansible.builtin.pip) - Conditional
 - **Add pipx bin to system PATH via profile.d** (ansible.builtin.copy)
 - **Verify pipx installation** (ansible.builtin.command)
 - **Display pipx version** (ansible.builtin.debug)
@@ -119,6 +129,8 @@ Base requirements for Ares AI agents
 ### linux.yml
 
 
+- **Check if sudoers.d is present (sudo installed)** (ansible.builtin.stat) - Conditional
+- **Ensure sudo secure_path includes /usr/local** (ansible.builtin.copy) - Conditional
 - **Set DEBIAN_FRONTEND to noninteractive** (ansible.builtin.lineinfile) - Conditional
 - **Update apt cache** (ansible.builtin.apt) - Conditional
 - **Install Python packages** (ansible.builtin.apt) - Conditional
@@ -144,11 +156,27 @@ Base requirements for Ares AI agents
 - **Print pip install tail** (ansible.builtin.debug) - Conditional
 - **Fail if pip install failed** (ansible.builtin.fail) - Conditional
 - **Create Ares workspace directory** (ansible.builtin.file) - Conditional
+- **Apply host tuning for the Ares worker fleet** (ansible.builtin.include_tasks) - Conditional
 
 ### main.yml
 
 
 - **Include Linux tasks** (ansible.builtin.include_tasks) - Conditional
+
+### tuning.yml
+
+
+- **Detect container environment (swap/sysctl are not settable there)** (ansible.builtin.set_fact)
+- **Configure swap file (OOM cushion)** (block) - Conditional
+- **Stat swap file** (ansible.builtin.stat)
+- **Create or resize swap file** (block) - Conditional
+- **Disable existing (undersized) swap file** (ansible.builtin.command) - Conditional
+- **Allocate swap file (fallocate, dd fallback)** (ansible.builtin.shell)
+- **Secure swap file permissions** (ansible.builtin.file)
+- **Initialize swap area** (ansible.builtin.command)
+- **Enable swap** (ansible.builtin.command)
+- **Ensure swap file is registered in fstab** (ansible.posix.mount)
+- **Tune OOM behavior via sysctl** (ansible.posix.sysctl) - Conditional
 
 ## Example Playbook
 
@@ -170,5 +198,4 @@ Base requirements for Ares AI agents
 - Ubuntu: all
 - Debian: all
 - Kali: all
-<!-- DOCSIBLE END -->
 <!-- DOCSIBLE END -->

@@ -10,7 +10,7 @@ use crate::prompt::StateSnapshot;
 
 use super::Params;
 
-/// Try to generate a no-credential technique enforcement prompt (Branch 5).
+/// Try to generate a no-credential technique enforcement prompt (Branch 6).
 /// Returns `Some` if conditions match, `None` otherwise.
 pub(super) fn try_generate(
     task_id: &str,

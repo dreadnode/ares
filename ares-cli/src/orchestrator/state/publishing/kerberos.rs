@@ -21,10 +21,7 @@ impl SharedState {
         queue: &TaskQueueCore<impl ConnectionLike + Clone + Send + Sync + 'static>,
         ticket: KerberosTicket,
     ) -> Result<()> {
-        let operation_id = {
-            let state = self.inner.read().await;
-            state.operation_id.clone()
-        };
+        let operation_id = self.operation_id().await;
         let reader = RedisStateReader::new(operation_id);
         let mut conn = queue.connection();
         reader.add_kerberos_ticket(&mut conn, &ticket).await?;

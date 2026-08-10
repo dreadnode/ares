@@ -12,6 +12,8 @@ struct OperationListEntry {
     operation_id: String,
     is_running: bool,
     started_at: Option<DateTime<Utc>>,
+    heartbeat_age_secs: Option<i64>,
+    heartbeat_stale: bool,
 }
 
 pub(crate) async fn ops_list(redis_url: Option<String>, latest: bool) -> Result<()> {
@@ -33,21 +35,37 @@ pub(crate) async fn ops_list(redis_url: Option<String>, latest: bool) -> Result<
         return Ok(());
     }
 
-    // Collect metadata for each operation
     let mut ops: Vec<OperationListEntry> = Vec::new();
+    let listed_at = Utc::now();
     for op_id in &op_ids {
         let reader = RedisStateReader::new(op_id.clone());
         let meta = reader.get_meta(&mut conn).await?;
         let is_running = running_ops.contains(op_id);
+
+        // Only running operations are expected to tick, so only they can be
+        // stale. One extra GET each, and there is rarely more than one.
+        let (heartbeat_age_secs, heartbeat_stale) = if is_running {
+            match state::read_operation_status(&mut conn, op_id).await? {
+                Some(record) => (
+                    record.heartbeat_age_secs(listed_at),
+                    record.is_stale(listed_at),
+                ),
+                None => (None, false),
+            }
+        } else {
+            (None, false)
+        };
+
         ops.push(OperationListEntry {
             checkpoint_time: meta.started_at,
             operation_id: op_id.clone(),
             is_running,
             started_at: meta.started_at,
+            heartbeat_age_secs,
+            heartbeat_stale,
         });
     }
 
-    // Sort by started_at descending
     ops.sort_by_key(|b| std::cmp::Reverse(b.checkpoint_time));
 
     println!("Multi-Agent Operations:");
@@ -55,7 +73,19 @@ pub(crate) async fn ops_list(redis_url: Option<String>, latest: bool) -> Result<
 
     let now = Utc::now();
     for entry in &ops {
-        let status = if entry.is_running { " [running]" } else { "" };
+        let status = match (entry.is_running, entry.heartbeat_stale) {
+            (false, _) => String::new(),
+            (true, false) => " [running]".to_string(),
+            (true, true) => match entry.heartbeat_age_secs {
+                Some(age) => {
+                    format!(
+                        " [running? STALE — no heartbeat for {}]",
+                        format_duration(age as u64)
+                    )
+                }
+                None => " [running? STALE — no heartbeat]".to_string(),
+            },
+        };
         let mut runtime_str = String::new();
         if let Some(started) = entry.started_at {
             let end_time = if entry.is_running {

@@ -1,0 +1,32 @@
+apiVersion: 1
+# Datasource uids match argonaut so the blue agent's Loki proxy resolution
+# (GET /api/datasources/uid/loki) works unchanged in replay.
+datasources:
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+  - name: Mimir
+    uid: mimir
+    type: prometheus
+    access: proxy
+    url: http://mimir:9009/prometheus
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+  - name: Alertmanager
+    uid: alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    jsonData:
+      implementation: prometheus

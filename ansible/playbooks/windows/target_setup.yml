@@ -9,12 +9,17 @@
     alloy_server_id: ""
     alloy_instance_id: ""
     alloy_loki_endpoint: "{{ alloy_loki_endpoint }}"
-    alloy_version: "1.10.1"
+    alloy_version: "1.17.1"
+    alloy_enable_sysmon: true
 
   roles:
-    # Nimbus Range roles for Ansible system configuration and monitoring
-    - role: dreadnode.nimbus_range.aws_ssm_agent
-    - role: dreadnode.nimbus_range.aws_cloudwatch_agent
+    # Bulwark roles for Ansible system configuration and monitoring
+    - role: l50.bulwark.aws_ssm_agent
+    - role: l50.bulwark.aws_cloudwatch_agent
+
+    # Install Sysmon before Alloy so the Sysmon event channel exists
+    # when Alloy subscribes to it.
+    - role: l50.bulwark.sysmon
 
     # Install and configure Grafana Alloy for log shipping
-    - role: dreadnode.nimbus_range.alloy
+    - role: l50.bulwark.alloy

