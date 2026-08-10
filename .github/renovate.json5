@@ -103,5 +103,18 @@
       datasourceTemplate: 'github-releases',
       versioningTemplate: 'semver',
     },
+    {
+      customType: 'regex',
+      description: 'Update CARGO_LLVM_COV_VERSION environment variable in workflows',
+      managerFilePatterns: [
+        '/^\\.github/workflows/[^/]+\\.ya?ml$/',
+      ],
+      matchStrings: [
+        'CARGO_LLVM_COV_VERSION:\\s*["\']?(?<currentValue>[0-9.]+)["\']?',
+      ],
+      depNameTemplate: 'cargo-llvm-cov',
+      datasourceTemplate: 'crate',
+      versioningTemplate: 'semver',
+    },
   ],
 }

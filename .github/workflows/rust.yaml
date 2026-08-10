@@ -32,6 +32,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_LLVM_COV_VERSION: 0.8.7
 
 permissions:
   actions: read
@@ -81,7 +82,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@${{ env.CARGO_LLVM_COV_VERSION }}
 
       - name: Cache cargo registry and build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
