@@ -77,6 +77,6 @@ services:
     restart: unless-stopped
 
   alertmanager:
-    image: prom/alertmanager:v0.33.1
+    image: prom/alertmanager:v0.34.0
     ports: ["9093:9093"]
     restart: unless-stopped
