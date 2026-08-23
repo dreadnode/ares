@@ -68,7 +68,7 @@ services:
     restart: unless-stopped
 
   mimir:
-    image: grafana/mimir:3.1.4
+    image: grafana/mimir:3.2.0
     command: -config.file=/etc/mimir/mimir.yaml
     ports: ["9009:9009"]
     volumes:
