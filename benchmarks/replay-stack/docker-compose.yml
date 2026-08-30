@@ -13,7 +13,7 @@
 # Per-snapshot data is staged into ./data by setup.sh before `docker compose up`.
 services:
   loki:
-    image: grafana/loki:3.7.6
+    image: grafana/loki:3.7.7
     # Run as root: /loki is a root-owned bind mount (docker/setup.sh create the
     # empty dirs as root); Loki's default uid 10001 otherwise can't write it.
     user: "0:0"
