@@ -369,4 +369,141 @@ mod tests {
         let result = replace_model_in_yaml(yaml, "recon", "wrong-model", "new-model");
         assert!(result.contains("model: \"new-model\""));
     }
+
+    const SHIPPED_CONFIG: &str = include_str!("../../config/ares.yaml");
+
+    fn shipped_config_copy() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ares.yaml");
+        std::fs::write(&path, SHIPPED_CONFIG).unwrap();
+        let path = path.to_str().unwrap().to_string();
+        (dir, path)
+    }
+
+    #[test]
+    fn resolve_config_path_accepts_an_existing_file() {
+        let (_dir, path) = shipped_config_copy();
+        assert_eq!(
+            resolve_config_path(Some(path.clone())).unwrap(),
+            std::path::PathBuf::from(&path)
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_rejects_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.yaml");
+        let err = resolve_config_path(Some(missing.to_str().unwrap().to_string())).unwrap_err();
+        assert!(err.to_string().contains("Config file not found"));
+    }
+
+    #[test]
+    fn shipped_config_parses_and_validates() {
+        let (_dir, path) = shipped_config_copy();
+        config_validate(Some(path)).unwrap();
+    }
+
+    #[test]
+    fn shipped_config_renders_both_show_modes() {
+        let (_dir, path) = shipped_config_copy();
+        config_show(Some(path.clone()), true).unwrap();
+        config_show(Some(path), false).unwrap();
+    }
+
+    #[test]
+    fn set_model_rewrites_one_role_and_leaves_the_rest() {
+        let (_dir, path) = shipped_config_copy();
+        let before = AresConfig::load(std::path::Path::new(&path)).unwrap();
+        let untouched: Vec<(String, String)> = before
+            .agents
+            .iter()
+            .filter(|(role, _)| role.as_str() != "recon")
+            .map(|(role, agent)| (role.clone(), agent.model.clone()))
+            .collect();
+
+        config_set_model(
+            Some(path.clone()),
+            Some("recon".to_string()),
+            "test-model".to_string(),
+            false,
+        )
+        .unwrap();
+
+        let after = AresConfig::load(std::path::Path::new(&path)).unwrap();
+        assert_eq!(after.agents["recon"].model, "test-model");
+        for (role, model) in untouched {
+            assert_eq!(
+                after.agents[&role].model, model,
+                "role {role} was rewritten"
+            );
+        }
+    }
+
+    #[test]
+    fn set_model_preserves_comments_and_step_budgets() {
+        let (_dir, path) = shipped_config_copy();
+        let before = AresConfig::load(std::path::Path::new(&path)).unwrap();
+
+        config_set_model(
+            Some(path.clone()),
+            Some("recon".to_string()),
+            "test-model".to_string(),
+            false,
+        )
+        .unwrap();
+
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            rewritten
+                .lines()
+                .filter(|l| l.trim_start().starts_with('#'))
+                .count(),
+            SHIPPED_CONFIG
+                .lines()
+                .filter(|l| l.trim_start().starts_with('#'))
+                .count(),
+        );
+        let after = AresConfig::load(std::path::Path::new(&path)).unwrap();
+        assert_eq!(
+            after.agents["recon"].max_steps,
+            before.agents["recon"].max_steps
+        );
+    }
+
+    #[test]
+    fn set_model_all_rewrites_every_role() {
+        let (_dir, path) = shipped_config_copy();
+        config_set_model(Some(path.clone()), None, "test-model".to_string(), true).unwrap();
+
+        let after = AresConfig::load(std::path::Path::new(&path)).unwrap();
+        assert!(!after.agents.is_empty());
+        for (role, agent) in &after.agents {
+            assert_eq!(agent.model, "test-model", "role {role} kept its old model");
+        }
+    }
+
+    #[test]
+    fn set_model_rejects_an_unknown_role() {
+        let (_dir, path) = shipped_config_copy();
+        let err = config_set_model(
+            Some(path.clone()),
+            Some("nonexistent".to_string()),
+            "test-model".to_string(),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Unknown role 'nonexistent'"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SHIPPED_CONFIG);
+    }
+
+    #[test]
+    fn set_model_requires_a_role_when_all_is_unset() {
+        let (_dir, path) = shipped_config_copy();
+        let err = config_set_model(Some(path.clone()), None, "test-model".to_string(), false)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Role argument is required"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SHIPPED_CONFIG);
+    }
 }
