@@ -1,8 +1,8 @@
-ansible-core==2.21.2
-ansible-lint==26.6.0
+ansible-core==2.21.3
+ansible-lint==26.8.0
 docker==7.2.0
 docsible==0.8.0
 molecule==26.8.0
 molecule-docker==2.1.0
 molecule-plugins[docker]==26.7.15
-pre-commit==4.6.1
+pre-commit==4.6.2
