@@ -1,0 +1,32 @@
+---
+name: Set up Docker Buildx
+description: Boot a BuildKit builder, retrying the BuildKit image pull so a transient Docker Hub failure does not fail the job.
+
+inputs:
+  buildkit-image:
+    description: BuildKit image used by the docker-container driver.
+    required: false
+    default: moby/buildkit:buildx-stable-1
+
+runs:
+  using: composite
+  steps:
+    - name: Pull BuildKit image
+      shell: bash
+      env:
+        BUILDKIT_IMAGE: ${{ inputs.buildkit-image }}
+      run: |
+        for attempt in 1 2 3 4 5; do
+          if docker pull "$BUILDKIT_IMAGE"; then
+            exit 0
+          fi
+          echo "::warning::pull of $BUILDKIT_IMAGE failed (attempt $attempt/5)"
+          sleep "$((attempt * 10))"
+        done
+        echo "::error::could not pull $BUILDKIT_IMAGE after 5 attempts"
+        exit 1
+
+    - name: Create builder
+      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      with:
+        driver-opts: image=${{ inputs.buildkit-image }}
