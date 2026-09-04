@@ -494,4 +494,147 @@ mod tests {
         let map = hostname_by_ip(&[make_host("192.168.58.10", "DC01.CONTOSO.LOCAL.")]);
         assert_eq!(map.get("192.168.58.10").unwrap(), "dc01.contoso.local");
     }
+
+    fn with_services(mut host: Host, services: &[&str]) -> Host {
+        host.services = services.iter().map(|s| (*s).to_string()).collect();
+        host
+    }
+
+    fn dedup(hosts: &[Host]) -> Vec<Host> {
+        dedup_hosts(hosts, &HashMap::new(), &HashMap::new())
+    }
+
+    #[test]
+    fn dedup_drops_cidr_rows_and_empty_ips() {
+        let hosts = [
+            make_host("192.168.58.0/24", "subnet"),
+            make_host("", ""),
+            make_host("192.168.58.10", "dc01.contoso.local"),
+        ];
+
+        let result = dedup(&hosts);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].ip, "192.168.58.10");
+    }
+
+    #[test]
+    fn dedup_merges_rows_sharing_an_ip() {
+        let hosts = [
+            with_services(make_host("192.168.58.10", "dc01"), &["445/tcp"]),
+            with_services(make_host("192.168.58.10", ""), &["445/tcp", "389/tcp"]),
+        ];
+
+        let result = dedup(&hosts);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].services, vec!["445/tcp", "389/tcp"]);
+    }
+
+    #[test]
+    fn dedup_upgrades_a_short_name_to_the_fqdn() {
+        let hosts = [
+            make_host("192.168.58.10", "dc01"),
+            make_host("192.168.58.10", "dc01.contoso.local"),
+        ];
+
+        assert_eq!(dedup(&hosts)[0].hostname, "dc01.contoso.local");
+    }
+
+    #[test]
+    fn dedup_keeps_the_fqdn_when_the_short_name_arrives_second() {
+        let hosts = [
+            make_host("192.168.58.10", "dc01.contoso.local"),
+            make_host("192.168.58.10", "dc01"),
+        ];
+
+        assert_eq!(dedup(&hosts)[0].hostname, "dc01.contoso.local");
+    }
+
+    #[test]
+    fn dedup_is_dc_is_sticky_across_merges() {
+        let mut dc = make_host("192.168.58.10", "dc01.contoso.local");
+        dc.is_dc = true;
+        let hosts = [dc, make_host("192.168.58.10", "dc01.contoso.local")];
+
+        assert!(dedup(&hosts)[0].is_dc);
+    }
+
+    #[test]
+    fn dedup_fills_an_empty_os_but_never_overwrites_one() {
+        let mut first = make_host("192.168.58.10", "dc01.contoso.local");
+        first.os = "Windows Server 2019".to_string();
+        let mut second = make_host("192.168.58.10", "dc01.contoso.local");
+        second.os = "Windows Server 2022".to_string();
+
+        assert_eq!(dedup(&[first, second.clone()])[0].os, "Windows Server 2019");
+
+        let mut blank = make_host("192.168.58.10", "dc01.contoso.local");
+        blank.os = String::new();
+        assert_eq!(dedup(&[blank, second])[0].os, "Windows Server 2022");
+    }
+
+    #[test]
+    fn dedup_unions_roles_without_duplicating() {
+        let mut first = make_host("192.168.58.10", "dc01.contoso.local");
+        first.roles = vec!["dc".to_string()];
+        let mut second = make_host("192.168.58.10", "dc01.contoso.local");
+        second.roles = vec!["dc".to_string(), "ca".to_string()];
+
+        assert_eq!(dedup(&[first, second])[0].roles, vec!["dc", "ca"]);
+    }
+
+    #[test]
+    fn dedup_folds_a_hostname_only_row_into_the_matching_ip_row() {
+        let hosts = [
+            make_host("192.168.58.10", "dc01.contoso.local"),
+            with_services(make_host("dc01.contoso.local", ""), &["445/tcp"]),
+        ];
+
+        let result = dedup(&hosts);
+        assert_eq!(
+            result.len(),
+            1,
+            "hostname-only row should not become its own entry"
+        );
+        assert_eq!(result[0].ip, "192.168.58.10");
+        assert_eq!(result[0].services, vec!["445/tcp"]);
+    }
+
+    #[test]
+    fn dedup_keeps_an_unmatched_hostname_row_only_when_it_has_services() {
+        let with_svc = [with_services(
+            make_host("web01.contoso.local", ""),
+            &["80/tcp"],
+        )];
+        let result = dedup(&with_svc);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].hostname, "web01.contoso.local");
+        assert!(result[0].ip.is_empty());
+
+        let without_svc = [make_host("web01.contoso.local", "")];
+        assert!(dedup(&without_svc).is_empty());
+    }
+
+    #[test]
+    fn dedup_marks_known_domain_controllers_and_backfills_the_fqdn() {
+        let hosts = [make_host("192.168.58.10", "")];
+        let netbios = HashMap::from([("DC01".to_string(), "dc01.contoso.local".to_string())]);
+        let dcs = HashMap::from([("contoso.local".to_string(), "192.168.58.10".to_string())]);
+
+        let result = dedup_hosts(&hosts, &netbios, &dcs);
+        assert!(result[0].is_dc);
+        assert_eq!(result[0].hostname, "dc01.contoso.local");
+    }
+
+    #[test]
+    fn dedup_sorts_by_ip() {
+        let hosts = [
+            make_host("192.168.58.30", "ws01.contoso.local"),
+            make_host("192.168.58.10", "dc01.contoso.local"),
+            make_host("192.168.58.20", "sql01.contoso.local"),
+        ];
+
+        let result = dedup(&hosts);
+        let ips: Vec<&str> = result.iter().map(|h| h.ip.as_str()).collect();
+        assert_eq!(ips, ["192.168.58.10", "192.168.58.20", "192.168.58.30"]);
+    }
 }

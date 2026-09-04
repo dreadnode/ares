@@ -1558,6 +1558,45 @@ fn sweep_timeout_secs() -> u64 {
 mod tests {
     use super::*;
 
+    const SWEEP_TEST_ENV_VARS: [&str; 4] = [
+        "ARES_BLUE_DETERMINISTIC_SWEEP",
+        "ARES_BLUE_SWEEP_REFRESH_SECS",
+        "ARES_BLUE_GOLDEN_TICKET_CORRELATION",
+        "ARES_BLUE_SILVER_TICKET_CORRELATION",
+    ];
+
+    /// Serializes tests that mutate the process-wide sweep environment.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Restores the caller's environment after each env-dependent test, even
+    /// when an assertion panics.
+    struct EnvGuard {
+        prior: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        async fn acquire() -> Self {
+            let lock = ENV_LOCK.lock().await;
+            let prior = SWEEP_TEST_ENV_VARS
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect();
+            Self { prior, _lock: lock }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.prior {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
     fn fired(first: Option<&str>, last: Option<&str>, hosts: &[&str]) -> FiredDetection {
         let parse = |s: &str| {
             chrono::DateTime::parse_from_rfc3339(s)
@@ -1693,8 +1732,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sweep_enabled_defaults_on_and_respects_off() {
+    #[tokio::test]
+    async fn sweep_enabled_defaults_on_and_respects_off() {
+        let _guard = EnvGuard::acquire().await;
         std::env::remove_var("ARES_BLUE_DETERMINISTIC_SWEEP");
         assert!(sweep_enabled());
         std::env::set_var("ARES_BLUE_DETERMINISTIC_SWEEP", "0");
@@ -1706,8 +1746,9 @@ mod tests {
         std::env::remove_var("ARES_BLUE_DETERMINISTIC_SWEEP");
     }
 
-    #[test]
-    fn sweep_refresh_defaults_and_respects_override() {
+    #[tokio::test]
+    async fn sweep_refresh_defaults_and_respects_override() {
+        let _guard = EnvGuard::acquire().await;
         std::env::remove_var("ARES_BLUE_SWEEP_REFRESH_SECS");
         assert_eq!(sweep_refresh_secs(), DEFAULT_SWEEP_REFRESH_SECS);
         std::env::set_var("ARES_BLUE_SWEEP_REFRESH_SECS", "300");
@@ -1721,6 +1762,7 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_refresh_is_disabled_by_the_sweep_toggle_and_by_zero() {
+        let _guard = EnvGuard::acquire().await;
         std::env::set_var("ARES_BLUE_DETERMINISTIC_SWEEP", "0");
         std::env::remove_var("ARES_BLUE_SWEEP_REFRESH_SECS");
         assert!(spawn_sweep_refresh("inv-test".into(), None).is_none());
@@ -2154,6 +2196,7 @@ mod tests {
 
     #[tokio::test]
     async fn recheck_is_disabled_by_the_same_toggles_as_the_sweep() {
+        let _guard = EnvGuard::acquire().await;
         // The close-of-investigation re-check must respect both switches, or
         // disabling the sweep would still fire two Loki queries per
         // investigation.
@@ -2173,8 +2216,9 @@ mod tests {
 
     /// Each correlation must be independently switchable, or turning one off to
     /// cut query load silently disables the other technique too.
-    #[test]
-    fn correlation_toggles_are_independent() {
+    #[tokio::test]
+    async fn correlation_toggles_are_independent() {
+        let _guard = EnvGuard::acquire().await;
         std::env::set_var("ARES_BLUE_GOLDEN_TICKET_CORRELATION", "0");
         assert!(!golden_ticket_enabled());
         assert!(silver_ticket_enabled());
