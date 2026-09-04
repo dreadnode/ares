@@ -623,8 +623,10 @@ mod tests {
             .expect("valid base64");
         assert_eq!(bytes.len() % 2, 0, "UTF-16LE payload must be even-length");
         let utf16: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         let decoded = String::from_utf16(&utf16).expect("valid utf-16");
         assert_eq!(decoded, "Write-Host 'ok'");
