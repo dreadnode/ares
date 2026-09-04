@@ -129,3 +129,189 @@ pub(crate) fn print_diff(prev: &LootSnapshot, curr: &LootSnapshot) {
         println!("  [share] {host}/{name}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ares_core::models::{Credential, Hash, Host, Share, User};
+    use serde_json::json;
+
+    fn state() -> SharedRedTeamState {
+        SharedRedTeamState::new("op-test-001".to_string())
+    }
+
+    fn host(hostname: &str, ip: &str) -> Host {
+        serde_json::from_value(json!({ "hostname": hostname, "ip": ip })).unwrap()
+    }
+
+    fn user(username: &str, domain: &str) -> User {
+        serde_json::from_value(json!({ "username": username, "domain": domain })).unwrap()
+    }
+
+    fn credential(username: &str, domain: &str, password: &str) -> Credential {
+        serde_json::from_value(
+            json!({ "username": username, "domain": domain, "password": password }),
+        )
+        .unwrap()
+    }
+
+    fn hash(username: &str, domain: &str, hash_type: &str, hash_value: &str) -> Hash {
+        serde_json::from_value(json!({
+            "username": username,
+            "domain": domain,
+            "hash_type": hash_type,
+            "hash_value": hash_value,
+        }))
+        .unwrap()
+    }
+
+    fn share(host: &str, name: &str) -> Share {
+        serde_json::from_value(json!({ "host": host, "name": name })).unwrap()
+    }
+
+    #[test]
+    fn empty_state_yields_an_empty_snapshot() {
+        let snap = loot_snapshot(&state());
+        assert!(snap.domains.is_empty());
+        assert!(snap.host_keys.is_empty());
+        assert!(snap.user_keys.is_empty());
+        assert!(snap.cred_keys.is_empty());
+        assert!(snap.hash_keys.is_empty());
+        assert!(snap.share_keys.is_empty());
+    }
+
+    #[test]
+    fn domains_are_trimmed_lowercased_and_deduped() {
+        let mut s = state();
+        s.all_domains = vec![
+            "CONTOSO.local".to_string(),
+            "  contoso.local  ".to_string(),
+            "fabrikam.local".to_string(),
+        ];
+
+        let snap = loot_snapshot(&s);
+        assert_eq!(snap.domains.len(), 2);
+        assert!(snap.domains.contains("contoso.local"));
+        assert!(snap.domains.contains("fabrikam.local"));
+    }
+
+    #[test]
+    fn blank_domains_are_dropped() {
+        let mut s = state();
+        s.all_domains = vec![
+            String::new(),
+            "   ".to_string(),
+            "contoso.local".to_string(),
+        ];
+
+        let snap = loot_snapshot(&s);
+        assert_eq!(
+            snap.domains,
+            HashSet::from(["contoso.local".to_string()]),
+            "whitespace-only domains must not become empty-string keys"
+        );
+    }
+
+    #[test]
+    fn user_keys_normalize_domain_and_username() {
+        let mut s = state();
+        s.all_users = vec![
+            user("Alice", "CONTOSO.local"),
+            user("  alice  ", "  contoso.local  "),
+        ];
+
+        let snap = loot_snapshot(&s);
+        assert_eq!(
+            snap.user_keys,
+            HashSet::from([("contoso.local".to_string(), "alice".to_string())])
+        );
+    }
+
+    #[test]
+    fn credential_keys_normalize_identity_but_keep_the_password_verbatim() {
+        let mut s = state();
+        s.all_credentials = vec![credential("Alice", "CONTOSO.local", "P@ssw0rd!")];
+
+        let snap = loot_snapshot(&s);
+        assert_eq!(
+            snap.cred_keys,
+            HashSet::from([(
+                "contoso.local".to_string(),
+                "alice".to_string(),
+                "P@ssw0rd!".to_string(),
+            )]),
+            "case-folding the password would merge distinct credentials"
+        );
+    }
+
+    #[test]
+    fn credentials_differing_only_by_password_stay_separate() {
+        let mut s = state();
+        s.all_credentials = vec![
+            credential("alice", "contoso.local", "P@ssw0rd!"),
+            credential("alice", "contoso.local", "p@ssw0rd!"),
+        ];
+
+        assert_eq!(loot_snapshot(&s).cred_keys.len(), 2);
+    }
+
+    #[test]
+    fn hash_keys_are_fully_lowercased() {
+        let mut s = state();
+        s.all_hashes = vec![hash(
+            "Alice",
+            "CONTOSO.local",
+            "NTLM",
+            "AAD3B435B51404EEAAD3B435B51404EE",
+        )];
+
+        let snap = loot_snapshot(&s);
+        assert_eq!(
+            snap.hash_keys,
+            HashSet::from([(
+                "contoso.local".to_string(),
+                "alice".to_string(),
+                "ntlm".to_string(),
+                "aad3b435b51404eeaad3b435b51404ee".to_string(),
+            )])
+        );
+    }
+
+    #[test]
+    fn host_and_share_keys_are_kept_verbatim() {
+        let mut s = state();
+        s.all_hosts = vec![host("DC01.contoso.local", "192.168.58.10")];
+        s.all_shares = vec![share("192.168.58.10", "SYSVOL")];
+
+        let snap = loot_snapshot(&s);
+        assert_eq!(
+            snap.host_keys,
+            HashSet::from([(
+                "DC01.contoso.local".to_string(),
+                "192.168.58.10".to_string()
+            )])
+        );
+        assert_eq!(
+            snap.share_keys,
+            HashSet::from([("192.168.58.10".to_string(), "SYSVOL".to_string())])
+        );
+    }
+
+    #[test]
+    fn repeated_entries_collapse_to_one_key_each() {
+        let mut s = state();
+        s.all_hosts = vec![
+            host("dc01.contoso.local", "192.168.58.10"),
+            host("dc01.contoso.local", "192.168.58.10"),
+        ];
+        s.all_shares = vec![
+            share("192.168.58.10", "SYSVOL"),
+            share("192.168.58.10", "SYSVOL"),
+        ];
+
+        let snap = loot_snapshot(&s);
+        assert_eq!(snap.host_keys.len(), 1);
+        assert_eq!(snap.share_keys.len(), 1);
+    }
+}
