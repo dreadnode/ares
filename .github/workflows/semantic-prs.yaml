@@ -10,6 +10,12 @@ on:
       - edited
       - synchronize
       - reopened
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to validate (used when dispatched manually)
+        required: true
+        type: string
 
 permissions:
   pull-requests: read
@@ -19,6 +25,22 @@ jobs:
     name: Validate PR title
     runs-on: ubuntu-latest
     steps:
-      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+      - name: Validate conventional-commit title (pull_request)
+        if: github.event_name == 'pull_request'
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate conventional-commit title (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          title=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title)
+          echo "PR #$PR_NUMBER title: $title"
+          if echo "$title" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: .+'; then
+            echo "Title matches conventional commit format."
+          else
+            echo "::error::PR title does not match conventional commit format"
+            exit 1
+          fi

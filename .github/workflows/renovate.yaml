@@ -63,7 +63,7 @@ jobs:
           token: "${{ steps.app-token.outputs.token }}"
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -71,12 +71,14 @@ jobs:
         run: python3 -m pip install pre-commit
 
       - name: Renovate
-        uses: renovatebot/github-action@3064367f740a1a91cca218698a63902689cce200 # v46.1.20
+        uses: renovatebot/github-action@316d7cd859606d6039a2182b7d69199e9b036835 # v46.2.1
         env:
           LOG_LEVEL: "${{ inputs.logLevel || 'debug' }}"
           RENOVATE_AUTODISCOVER: true
           RENOVATE_AUTODISCOVER_FILTER: "${{ github.repository }}"
           RENOVATE_DRY_RUN: "${{ inputs.dryRun }}"
+          # Required: renovate refuses to process forks unless explicitly enabled.
+          RENOVATE_FORK_PROCESSING: enabled
           RENOVATE_INTERNAL_CHECKS_FILTER: strict
           RENOVATE_PLATFORM: github
           RENOVATE_PLATFORM_COMMIT: true
