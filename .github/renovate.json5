@@ -7,7 +7,6 @@
     ':semanticCommits',
     ':enablePreCommit',
     ':automergeDigest',
-    ':automergeBranch',
     'helpers:pinGitHubActionDigests',
   ],
   dependencyDashboardLabels: [
@@ -54,7 +53,7 @@
         'patch',
       ],
       automerge: true,
-      automergeType: 'branch',
+      automergeType: 'pr',
     },
     {
       description: 'Auto merge warpgate patch and minor updates',
@@ -102,6 +101,19 @@
       ],
       depNameTemplate: 'CowDogMoo/warpgate',
       datasourceTemplate: 'github-releases',
+      versioningTemplate: 'semver',
+    },
+    {
+      customType: 'regex',
+      description: 'Update CARGO_LLVM_COV_VERSION environment variable in workflows',
+      managerFilePatterns: [
+        '/^\\.github/workflows/[^/]+\\.ya?ml$/',
+      ],
+      matchStrings: [
+        'CARGO_LLVM_COV_VERSION:\\s*["\']?(?<currentValue>[0-9.]+)["\']?',
+      ],
+      depNameTemplate: 'cargo-llvm-cov',
+      datasourceTemplate: 'crate',
       versioningTemplate: 'semver',
     },
   ],
