@@ -266,7 +266,7 @@ rather than a tag, so a rebuild can pick up upstream changes.
 - `community.windows` 3.3.0
 - `community.docker` 5.2.1
 - `ansible.posix` 2.2.2
-- `community.general` 13.2.0
+- `community.general` 13.3.0
 - `grafana.grafana` 6.1.0
 - `cowdogmoo.workstation` (git, main)
 - `l50.arsenal` (git, main) — all pentesting tool roles

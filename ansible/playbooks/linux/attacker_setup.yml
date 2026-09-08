@@ -24,6 +24,17 @@
     vnc_setup_vncpwd_path: /usr/local/bin/vncpwd
 
   pre_tasks:
+    - name: Install Ruby readline headers for evil-winrm
+      ansible.builtin.apt:
+        name: libreadline-dev
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      become: true
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - ansible_facts['distribution'] != 'Kali'
+
     - name: Gather EC2 instance metadata for Alloy stream labels
       amazon.aws.ec2_metadata_facts:
       failed_when: false
