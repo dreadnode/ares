@@ -8,6 +8,17 @@
   vars:
     _container_build: "{{ (container_build | default(false)) | bool }}"
 
+  pre_tasks:
+    - name: Install Ruby readline headers for evil-winrm
+      ansible.builtin.apt:
+        name: libreadline-dev
+        state: present
+        update_cache: "{{ not _container_build }}"
+        cache_valid_time: 3600
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - ansible_facts['distribution'] != 'Kali'
+
   roles:
     - role: dreadnode.nimbus_range.base
       vars:
