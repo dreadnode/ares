@@ -3,7 +3,7 @@ collections:
   - name: amazon.aws
     version: 11.4.0
   - name: community.aws
-    version: 11.1.0
+    version: 11.2.0
   - name: ansible.windows
     version: 3.8.0
   - name: community.windows
